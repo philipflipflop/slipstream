@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(& \"C:\\\\Program Files\\\\Google\\\\Chrome\\\\Application\\\\chrome.exe\" --headless=new --disable-gpu --no-first-run --hide-scrollbars --window-size=1366,820 --virtual-time-budget=40000 --screenshot=\"C:\\\\Users\\\\phili\\\\OneDrive\\\\Experiments\\\\flight_sim_fable\\\\shot_fly.png\" \"http://localhost:4173/?autofly=1\"; \"LASTEXITCODE=$LASTEXITCODE\"; Test-Path \"C:\\\\Users\\\\phili\\\\OneDrive\\\\Experiments\\\\flight_sim_fable\\\\shot_fly.png\")"
+    ]
+  }
+}

@@ -1,0 +1,613 @@
+/**
+ * Procedural aircraft. Every plane is lofted from primitives at runtime —
+ * no model files. Naming conventions drive animation in aircraft.ts:
+ *   prop*      — spinner groups, rotate around Z with RPM
+ *   aileronL/R, elevator, rudder — control-surface hinge groups
+ *   gear       — landing gear group (retract animation)
+ *   burner     — afterburner flame (visible at full throttle)
+ *   propDisc   — translucent blur disc faded in at speed
+ * Forward is -Z, CG at the group origin.
+ */
+import * as THREE from 'three';
+
+// chunky low-poly airfoil profile: (chord fraction, thickness fraction)
+const PROF: Array<[number, number]> = [
+  [-0.5, 0], [-0.25, 0.5], [0.15, 0.42], [0.55, 0.02], [0.15, -0.32], [-0.25, -0.4],
+];
+
+interface WingSection {
+  x: number;      // span position
+  chord: number;  // m
+  t: number;      // thickness, m
+  sweep?: number; // +z shift (backwards)
+  rise?: number;  // +y shift (dihedral)
+}
+
+function wingGeo(sections: WingSection[]): THREE.BufferGeometry {
+  const P = PROF.length;
+  const verts: number[] = [];
+  for (const s of sections) {
+    for (const [cz, ty] of PROF) {
+      verts.push(s.x, ty * s.t + (s.rise ?? 0), cz * s.chord + (s.sweep ?? 0));
+    }
+  }
+  const idx: number[] = [];
+  for (let s = 0; s < sections.length - 1; s++) {
+    for (let k = 0; k < P; k++) {
+      const a = s * P + k;
+      const b = s * P + ((k + 1) % P);
+      const c = (s + 1) * P + k;
+      const d = (s + 1) * P + ((k + 1) % P);
+      idx.push(a, c, b, b, c, d);
+    }
+  }
+  // end caps (fans)
+  const last = (sections.length - 1) * P;
+  for (let k = 1; k < P - 1; k++) {
+    idx.push(0, k, k + 1);
+    idx.push(last, last + k + 1, last + k);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
+  g.setIndex(idx);
+  const flat = g.toNonIndexed();
+  flat.computeVertexNormals();
+  g.dispose();
+  return flat;
+}
+
+interface FuseStation { z: number; r: number; ry?: number; y?: number }
+
+function fuseGeo(stations: FuseStation[], segs = 12): THREE.BufferGeometry {
+  const verts: number[] = [];
+  for (const st of stations) {
+    for (let i = 0; i < segs; i++) {
+      const a = (i / segs) * Math.PI * 2;
+      verts.push(Math.cos(a) * st.r, Math.sin(a) * (st.ry ?? st.r) + (st.y ?? 0), st.z);
+    }
+  }
+  const idx: number[] = [];
+  for (let s = 0; s < stations.length - 1; s++) {
+    for (let i = 0; i < segs; i++) {
+      const a = s * segs + i;
+      const b = s * segs + ((i + 1) % segs);
+      const c = (s + 1) * segs + i;
+      const d = (s + 1) * segs + ((i + 1) % segs);
+      idx.push(a, b, c, b, d, c);
+    }
+  }
+  // nose & tail caps
+  const g0 = stations[0];
+  const gn = stations[stations.length - 1];
+  const base = verts.length / 3;
+  verts.push(0, g0.y ?? 0, g0.z, 0, gn.y ?? 0, gn.z);
+  const lastRing = (stations.length - 1) * segs;
+  for (let i = 0; i < segs; i++) {
+    idx.push(base, i, (i + 1) % segs);
+    idx.push(base + 1, lastRing + ((i + 1) % segs), lastRing + i);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
+  g.setIndex(idx);
+  g.computeVertexNormals();
+  return g;
+}
+
+const matCache = new Map<string, THREE.MeshStandardMaterial>();
+function std(color: number, rough = 0.5, metal = 0.15, double = false): THREE.MeshStandardMaterial {
+  const key = `${color}|${rough}|${metal}|${double}`;
+  let m = matCache.get(key);
+  if (!m) {
+    m = new THREE.MeshStandardMaterial({
+      color, roughness: rough, metalness: metal,
+      side: double ? THREE.DoubleSide : THREE.FrontSide,
+    });
+    matCache.set(key, m);
+  }
+  return m;
+}
+
+const GLASS = new THREE.MeshStandardMaterial({ color: 0x16242f, roughness: 0.08, metalness: 0.9 });
+
+function mesh(geo: THREE.BufferGeometry, material: THREE.Material): THREE.Mesh {
+  const m = new THREE.Mesh(geo, material);
+  m.castShadow = true;
+  m.receiveShadow = false;
+  return m;
+}
+
+function navLights(group: THREE.Group, span: number, z: number, y: number): void {
+  const geo = new THREE.SphereGeometry(0.09, 6, 4);
+  const red = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: 0xff2020 }));
+  red.position.set(-span, y, z);
+  const green = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: 0x20ff40 }));
+  green.position.set(span, y, z);
+  group.add(red, green);
+}
+
+function propeller(blades: number, radius: number, spinnerR: number, color = 0x1c1c1f): THREE.Group {
+  const prop = new THREE.Group();
+  prop.name = 'prop';
+  const spinner = mesh(new THREE.ConeGeometry(spinnerR, spinnerR * 2.4, 10), std(0xd8d8de, 0.3, 0.7));
+  spinner.rotation.x = -Math.PI / 2;
+  spinner.position.z = -spinnerR * 1.1;
+  prop.add(spinner);
+  const bladeGeo = new THREE.BoxGeometry(0.16, radius, 0.05);
+  for (let i = 0; i < blades; i++) {
+    const b = mesh(bladeGeo, std(color, 0.6, 0.2));
+    const holder = new THREE.Group();
+    b.position.y = radius / 2;
+    b.rotation.y = 0.32; // blade pitch
+    holder.add(b);
+    holder.rotation.z = (i / blades) * Math.PI * 2;
+    prop.add(holder);
+  }
+  const disc = new THREE.Mesh(
+    new THREE.CircleGeometry(radius, 24),
+    new THREE.MeshBasicMaterial({ color: 0x999999, transparent: true, opacity: 0, depthWrite: false }),
+  );
+  disc.name = 'propDisc';
+  prop.add(disc);
+  return prop;
+}
+
+function wheel(r: number, w: number): THREE.Mesh {
+  const m = mesh(new THREE.CylinderGeometry(r, r, w, 10), std(0x141416, 0.9, 0));
+  m.rotation.z = Math.PI / 2;
+  return m;
+}
+
+function strut(x1: number, y1: number, z1: number, x2: number, y2: number, z2: number, r = 0.05, color = 0x9aa0a6): THREE.Mesh {
+  const a = new THREE.Vector3(x1, y1, z1);
+  const b = new THREE.Vector3(x2, y2, z2);
+  const len = a.distanceTo(b);
+  const m = mesh(new THREE.CylinderGeometry(r, r, len, 6), std(color, 0.5, 0.4));
+  m.position.copy(a).add(b).multiplyScalar(0.5);
+  m.lookAt(b);
+  m.rotateX(Math.PI / 2);
+  return m;
+}
+
+function hinged(name: string, surface: THREE.Mesh, hx: number, hy: number, hz: number): THREE.Group {
+  const g = new THREE.Group();
+  g.name = name;
+  g.position.set(hx, hy, hz);
+  g.add(surface);
+  return g;
+}
+
+/* ================================================================
+   SKYLARK ST-2 — high-wing club trainer, cream & rally red
+   ================================================================ */
+function buildSkylark(): THREE.Group {
+  const g = new THREE.Group();
+  const cream = std(0xf2efe6, 0.45, 0.05);
+  const red = std(0xc8362e, 0.4, 0.1);
+
+  const fuse = mesh(fuseGeo([
+    { z: -3.6, r: 0.18, ry: 0.18, y: -0.1 },
+    { z: -3.1, r: 0.52, ry: 0.55, y: -0.05 },
+    { z: -2.2, r: 0.68, ry: 0.78, y: 0.05 },
+    { z: -0.6, r: 0.72, ry: 0.85, y: 0.1 },
+    { z: 0.8, r: 0.58, ry: 0.68, y: 0.12 },
+    { z: 2.4, r: 0.3, ry: 0.4, y: 0.2 },
+    { z: 3.7, r: 0.12, ry: 0.3, y: 0.32 },
+  ]), cream);
+  g.add(fuse);
+
+  // canopy/glasshouse
+  const cab = mesh(new THREE.SphereGeometry(0.72, 10, 8), GLASS);
+  cab.scale.set(0.85, 0.62, 1.25);
+  cab.position.set(0, 0.62, -1.15);
+  g.add(cab);
+
+  // high wing on top
+  const wing = mesh(wingGeo([
+    { x: -5.3, chord: 1.15, t: 0.13, rise: 0.22, sweep: 0.1 },
+    { x: -1.1, chord: 1.5, t: 0.2 },
+    { x: 1.1, chord: 1.5, t: 0.2 },
+    { x: 5.3, chord: 1.15, t: 0.13, rise: 0.22, sweep: 0.1 },
+  ]), std(0xf2efe6, 0.45, 0.05, true));
+  wing.position.set(0, 1.06, -0.7);
+  g.add(wing);
+  // red wingtips
+  for (const sx of [-1, 1]) {
+    const tip = mesh(new THREE.BoxGeometry(0.5, 0.14, 1.1), red);
+    tip.position.set(5.25 * sx, 1.28, -0.62);
+    g.add(tip);
+  }
+  // wing struts
+  g.add(strut(0.62, -0.15, -0.6, 3.1, 1.02, -0.7));
+  g.add(strut(-0.62, -0.15, -0.6, -3.1, 1.02, -0.7));
+
+  // ailerons
+  for (const sx of [-1, 1]) {
+    const surf = mesh(new THREE.BoxGeometry(2, 0.07, 0.42), red);
+    surf.position.set(0, 0, 0.21);
+    g.add(hinged(sx < 0 ? 'aileronL' : 'aileronR', surf, 3.6 * sx, 1.04, 0.06));
+  }
+
+  // tail
+  const hstab = mesh(wingGeo([
+    { x: -1.85, chord: 0.7, t: 0.08, sweep: 0.18 },
+    { x: 0, chord: 1, t: 0.1 },
+    { x: 1.85, chord: 0.7, t: 0.08, sweep: 0.18 },
+  ]), std(0xf2efe6, 0.45, 0.05, true));
+  hstab.position.set(0, 0.38, 3.2);
+  g.add(hstab);
+  const elevSurf = mesh(new THREE.BoxGeometry(3.5, 0.06, 0.42), red);
+  elevSurf.position.set(0, 0, 0.21);
+  g.add(hinged('elevator', elevSurf, 0, 0.38, 3.72));
+
+  const finGeo = wingGeo([
+    { x: 0, chord: 1.25, t: 0.09 },
+    { x: 1.55, chord: 0.62, t: 0.06, sweep: 0.52 },
+  ]);
+  finGeo.rotateZ(Math.PI / 2);
+  const fin = mesh(finGeo, std(0xc8362e, 0.4, 0.1, true));
+  fin.position.set(0, 0.55, 3.25);
+  g.add(fin);
+  const rudSurf = mesh(new THREE.BoxGeometry(0.06, 1.3, 0.4), cream);
+  rudSurf.position.set(0, 0.55, 0.2);
+  g.add(hinged('rudder', rudSurf, 0, 1.1, 3.85));
+
+  // fixed tricycle gear with wheel pants
+  const gear = new THREE.Group();
+  gear.name = 'gear';
+  const noseW = wheel(0.26, 0.16);
+  noseW.position.set(0, -1.28, -2.6);
+  gear.add(noseW, strut(0, -0.5, -2.55, 0, -1.25, -2.6, 0.06));
+  for (const sx of [-1, 1]) {
+    const w = wheel(0.3, 0.18);
+    w.position.set(1.25 * sx, -1.25, -0.2);
+    const pant = mesh(new THREE.SphereGeometry(0.34, 8, 6), red);
+    pant.scale.set(0.5, 0.75, 1.3);
+    pant.position.set(1.25 * sx, -1.18, -0.2);
+    gear.add(w, pant, strut(0.45 * sx, -0.55, -0.25, 1.22 * sx, -1.2, -0.2, 0.055));
+  }
+  g.add(gear);
+
+  g.add(propeller(2, 0.95, 0.22));
+  g.children[g.children.length - 1].position.set(0, -0.02, -3.72);
+  navLights(g, 5.45, -0.62, 1.18);
+  return g;
+}
+
+/* ================================================================
+   FALCON Mk.IV — polished-aluminium warbird, yellow nose
+   ================================================================ */
+function buildFalcon(): THREE.Group {
+  const g = new THREE.Group();
+  const alu = std(0xb9bec7, 0.32, 0.75);
+  const yellow = std(0xe8a818, 0.4, 0.3);
+  const olive = std(0x4c5435, 0.6, 0.1);
+
+  const fuse = mesh(fuseGeo([
+    { z: -4.9, r: 0.4, ry: 0.4 },
+    { z: -3.9, r: 0.62, ry: 0.66, y: -0.02 },
+    { z: -2.2, r: 0.7, ry: 0.78, y: 0 },
+    { z: -0.4, r: 0.66, ry: 0.8, y: 0.02 },
+    { z: 1.6, r: 0.46, ry: 0.62, y: 0.12 },
+    { z: 3.6, r: 0.26, ry: 0.42, y: 0.22 },
+    { z: 4.9, r: 0.1, ry: 0.26, y: 0.3 },
+  ]), alu);
+  g.add(fuse);
+
+  // yellow nose band + anti-glare olive strip
+  const band = mesh(new THREE.CylinderGeometry(0.69, 0.66, 0.7, 12), yellow);
+  band.rotation.x = Math.PI / 2;
+  band.position.set(0, 0, -3.45);
+  g.add(band);
+  const glare = mesh(new THREE.BoxGeometry(0.5, 0.08, 2.6), olive);
+  glare.position.set(0, 0.74, -2.2);
+  g.add(glare);
+
+  // bubble canopy
+  const can = mesh(new THREE.SphereGeometry(0.58, 12, 8), GLASS);
+  can.scale.set(0.78, 0.72, 1.5);
+  can.position.set(0, 0.74, -0.35);
+  g.add(can);
+
+  // belly scoop
+  const scoop = mesh(new THREE.BoxGeometry(0.55, 0.42, 1.8), alu);
+  scoop.position.set(0, -0.72, 0.3);
+  g.add(scoop);
+
+  // low tapered wing with dihedral
+  const wing = mesh(wingGeo([
+    { x: -5.6, chord: 1.1, t: 0.12, rise: 0.55, sweep: 0.5 },
+    { x: -1.2, chord: 2.35, t: 0.34, rise: 0.05 },
+    { x: 1.2, chord: 2.35, t: 0.34, rise: 0.05 },
+    { x: 5.6, chord: 1.1, t: 0.12, rise: 0.55, sweep: 0.5 },
+  ]), std(0xb9bec7, 0.32, 0.75, true));
+  wing.position.set(0, -0.42, -0.3);
+  g.add(wing);
+
+  for (const sx of [-1, 1]) {
+    const surf = mesh(new THREE.BoxGeometry(2.1, 0.07, 0.5), alu);
+    surf.position.set(0, 0, 0.25);
+    g.add(hinged(sx < 0 ? 'aileronL' : 'aileronR', surf, 3.9 * sx, -0.18, 0.95));
+  }
+
+  // tail
+  const hstab = mesh(wingGeo([
+    { x: -2.1, chord: 0.75, t: 0.08, sweep: 0.35 },
+    { x: 0, chord: 1.2, t: 0.12 },
+    { x: 2.1, chord: 0.75, t: 0.08, sweep: 0.35 },
+  ]), std(0xb9bec7, 0.32, 0.75, true));
+  hstab.position.set(0, 0.3, 4.15);
+  g.add(hstab);
+  const elevSurf = mesh(new THREE.BoxGeometry(3.9, 0.06, 0.5), alu);
+  elevSurf.position.set(0, 0, 0.25);
+  g.add(hinged('elevator', elevSurf, 0, 0.3, 4.75));
+
+  const finGeo = wingGeo([
+    { x: 0, chord: 1.5, t: 0.1 },
+    { x: 1.85, chord: 0.7, t: 0.06, sweep: 0.75 },
+  ]);
+  finGeo.rotateZ(Math.PI / 2);
+  const fin = mesh(finGeo, std(0xc8362e, 0.45, 0.2, true));
+  fin.position.set(0, 0.5, 4.3);
+  g.add(fin);
+  const rudSurf = mesh(new THREE.BoxGeometry(0.06, 1.5, 0.45), std(0xc8362e, 0.45, 0.2));
+  rudSurf.position.set(0, 0.6, 0.22);
+  g.add(hinged('rudder', rudSurf, 0, 0.95, 5.0));
+
+  // retractable tail-dragger gear
+  const gear = new THREE.Group();
+  gear.name = 'gear';
+  for (const sx of [-1, 1]) {
+    const w = wheel(0.42, 0.26);
+    w.position.set(1.9 * sx, -1.7, -0.7);
+    gear.add(w, strut(1.15 * sx, -0.5, -0.5, 1.88 * sx, -1.62, -0.68, 0.08));
+  }
+  const tw = wheel(0.2, 0.12);
+  tw.position.set(0, -0.95, 4.4);
+  gear.add(tw, strut(0, -0.4, 4.2, 0, -0.9, 4.38, 0.05));
+  g.add(gear);
+
+  const prop = propeller(4, 1.55, 0.4, 0x26262a);
+  prop.position.set(0, 0, -5.05);
+  g.add(prop);
+  navLights(g, 5.7, -0.25, 0.22);
+  return g;
+}
+
+/* ================================================================
+   VECTOR V-25 — twin-tail delta multirole, storm grey
+   ================================================================ */
+function buildVector(): THREE.Group {
+  const g = new THREE.Group();
+  const grey = std(0x7d8694, 0.45, 0.35);
+  const dark = std(0x4a525e, 0.5, 0.3);
+
+  const fuse = mesh(fuseGeo([
+    { z: -7.4, r: 0.16, ry: 0.16 },
+    { z: -6.2, r: 0.5, ry: 0.46, y: -0.05 },
+    { z: -4.4, r: 0.74, ry: 0.7, y: 0 },
+    { z: -1.5, r: 0.95, ry: 0.82, y: 0 },
+    { z: 2.5, r: 0.98, ry: 0.78, y: 0 },
+    { z: 5.6, r: 0.62, ry: 0.55, y: 0 },
+    { z: 7.2, r: 0.45, ry: 0.45, y: 0 },
+  ]), grey);
+  g.add(fuse);
+
+  // cockpit canopy, faired into the spine
+  const can = mesh(new THREE.SphereGeometry(0.66, 12, 8), GLASS);
+  can.scale.set(0.72, 0.6, 1.85);
+  can.position.set(0, 0.72, -4.2);
+  g.add(can);
+
+  // boxy intakes either side
+  for (const sx of [-1, 1]) {
+    const intake = mesh(new THREE.BoxGeometry(0.7, 0.85, 3.6), dark);
+    intake.position.set(1.2 * sx, -0.2, -0.9);
+    g.add(intake);
+  }
+
+  // big delta wing
+  const wing = mesh(wingGeo([
+    { x: -5.5, chord: 1.3, t: 0.08, sweep: 2.45 },
+    { x: -1.4, chord: 5.6, t: 0.26, sweep: 0.6 },
+    { x: 1.4, chord: 5.6, t: 0.26, sweep: 0.6 },
+    { x: 5.5, chord: 1.3, t: 0.08, sweep: 2.45 },
+  ]), std(0x7d8694, 0.45, 0.35, true));
+  wing.position.set(0, -0.15, 1.2);
+  g.add(wing);
+
+  // elevons double as ailerons + elevator (named both ways: ailerons here,
+  // separate small tailerons act as elevator)
+  for (const sx of [-1, 1]) {
+    const surf = mesh(new THREE.BoxGeometry(2.6, 0.07, 0.7), dark);
+    surf.position.set(0, 0, 0.35);
+    g.add(hinged(sx < 0 ? 'aileronL' : 'aileronR', surf, 3.4 * sx, -0.12, 4.0));
+  }
+  const elevSurf = mesh(new THREE.BoxGeometry(3.4, 0.08, 0.9), dark);
+  elevSurf.position.set(0, 0, 0.45);
+  g.add(hinged('elevator', elevSurf, 0, -0.1, 6.4));
+
+  // twin canted fins
+  for (const sx of [-1, 1]) {
+    const finGeo = wingGeo([
+      { x: 0, chord: 2.3, t: 0.08 },
+      { x: 2.3, chord: 0.9, t: 0.05, sweep: 1.35 },
+    ]);
+    finGeo.rotateZ(Math.PI / 2);
+    finGeo.rotateZ(sx * -0.32);
+    const fin = mesh(finGeo, std(0x6b7280, 0.45, 0.35, true));
+    fin.position.set(1.1 * sx, 0.55, 5.3);
+    g.add(fin);
+    if (sx > 0) {
+      const rudSurf = mesh(new THREE.BoxGeometry(0.06, 1.6, 0.6), dark);
+      rudSurf.position.set(0, 0.7, 0.3);
+      g.add(hinged('rudder', rudSurf, 1.32, 0.6, 6.2));
+    }
+  }
+
+  // exhaust + afterburner
+  const nozzle = mesh(new THREE.CylinderGeometry(0.52, 0.42, 0.9, 12), std(0x2c2c30, 0.35, 0.9));
+  nozzle.rotation.x = Math.PI / 2;
+  nozzle.position.set(0, 0, 7.5);
+  g.add(nozzle);
+  const burner = new THREE.Mesh(
+    new THREE.ConeGeometry(0.4, 4.2, 10, 1, true),
+    new THREE.MeshBasicMaterial({
+      color: 0xff7a2a, transparent: true, opacity: 0.85,
+      blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
+    }),
+  );
+  burner.name = 'burner';
+  burner.rotation.x = -Math.PI / 2;
+  burner.position.set(0, 0, 9.6);
+  burner.visible = false;
+  g.add(burner);
+
+  // tricycle gear
+  const gear = new THREE.Group();
+  gear.name = 'gear';
+  const nw = wheel(0.32, 0.2);
+  nw.position.set(0, -1.95, -4.6);
+  gear.add(nw, strut(0, -0.6, -4.5, 0, -1.9, -4.6, 0.09));
+  for (const sx of [-1, 1]) {
+    const w = wheel(0.42, 0.3);
+    w.position.set(1.7 * sx, -1.9, 1.6);
+    gear.add(w, strut(1.3 * sx, -0.55, 1.4, 1.68 * sx, -1.82, 1.58, 0.1));
+  }
+  g.add(gear);
+
+  navLights(g, 5.6, 3.4, -0.1);
+  return g;
+}
+
+/* ================================================================
+   MERIDIAN 700 — T-tail executive jet, gloss white over navy
+   ================================================================ */
+function buildMeridian(): THREE.Group {
+  const g = new THREE.Group();
+  const white = std(0xf4f6f8, 0.25, 0.1);
+  const navy = std(0x1f3a64, 0.35, 0.2);
+
+  const fuse = mesh(fuseGeo([
+    { z: -9.6, r: 0.3, ry: 0.3, y: -0.15 },
+    { z: -8.4, r: 0.85, ry: 0.85, y: 0 },
+    { z: -6.5, r: 1.12, ry: 1.12, y: 0.05 },
+    { z: -2, r: 1.18, ry: 1.18, y: 0.05 },
+    { z: 3.5, r: 1.12, ry: 1.12, y: 0.05 },
+    { z: 7, r: 0.72, ry: 0.8, y: 0.32 },
+    { z: 9.8, r: 0.3, ry: 0.4, y: 0.7 },
+  ], 14), white);
+  g.add(fuse);
+
+  // navy belly + cheat line
+  const belly = mesh(new THREE.BoxGeometry(2.05, 0.5, 13.5), navy);
+  belly.position.set(0, -0.78, -1);
+  g.add(belly);
+  const cheat = mesh(new THREE.BoxGeometry(2.32, 0.12, 12), navy);
+  cheat.position.set(0, 0.42, -1.2);
+  g.add(cheat);
+
+  // cockpit windows
+  const windshield = mesh(new THREE.SphereGeometry(0.9, 10, 6), GLASS);
+  windshield.scale.set(1.05, 0.5, 1.0);
+  windshield.position.set(0, 0.66, -7.5);
+  g.add(windshield);
+  // cabin window strip
+  const winStrip = mesh(new THREE.BoxGeometry(2.38, 0.22, 8.5), std(0x10161f, 0.2, 0.7));
+  winStrip.position.set(0, 0.72, -1.4);
+  g.add(winStrip);
+
+  // low swept wing
+  const wing = mesh(wingGeo([
+    { x: -9.6, chord: 1.3, t: 0.13, sweep: 2.7, rise: 0.95 },
+    { x: -2, chord: 3.3, t: 0.42, sweep: 0.3, rise: 0.1 },
+    { x: 2, chord: 3.3, t: 0.42, sweep: 0.3, rise: 0.1 },
+    { x: 9.6, chord: 1.3, t: 0.13, sweep: 2.7, rise: 0.95 },
+  ]), std(0xf4f6f8, 0.25, 0.1, true));
+  wing.position.set(0, -0.85, 0.4);
+  g.add(wing);
+  // winglets
+  for (const sx of [-1, 1]) {
+    const wlGeo = wingGeo([
+      { x: 0, chord: 1.1, t: 0.06 },
+      { x: 1.25, chord: 0.55, t: 0.04, sweep: 0.55 },
+    ]);
+    wlGeo.rotateZ(Math.PI / 2);
+    const wl = mesh(wlGeo, std(0x1f3a64, 0.35, 0.2, true));
+    wl.position.set(9.55 * sx, 0.12, 3.2);
+    g.add(wl);
+  }
+
+  for (const sx of [-1, 1]) {
+    const surf = mesh(new THREE.BoxGeometry(3.4, 0.08, 0.62), white);
+    surf.position.set(0, 0, 0.31);
+    g.add(hinged(sx < 0 ? 'aileronL' : 'aileronR', surf, 6.4 * sx, -0.32, 2.8));
+  }
+
+  // aft engine pods
+  for (const sx of [-1, 1]) {
+    const pod = mesh(fuseGeo([
+      { z: -1.5, r: 0.52 },
+      { z: -0.9, r: 0.66 },
+      { z: 0.9, r: 0.62 },
+      { z: 1.6, r: 0.42 },
+    ], 10), std(0xd5d9de, 0.3, 0.6));
+    pod.position.set(1.95 * sx, 0.45, 5.6);
+    g.add(pod);
+    const pylon = mesh(new THREE.BoxGeometry(0.85, 0.5, 1.6), white);
+    pylon.position.set(1.45 * sx, 0.45, 5.5);
+    g.add(pylon);
+  }
+
+  // T-tail
+  const finGeo = wingGeo([
+    { x: 0, chord: 2.6, t: 0.16 },
+    { x: 3.3, chord: 1.3, t: 0.1, sweep: 1.9 },
+  ]);
+  finGeo.rotateZ(Math.PI / 2);
+  const fin = mesh(finGeo, std(0x1f3a64, 0.35, 0.2, true));
+  fin.position.set(0, 0.8, 7.6);
+  g.add(fin);
+  const rudSurf = mesh(new THREE.BoxGeometry(0.08, 2.6, 0.7), std(0xc8362e, 0.4, 0.15));
+  rudSurf.position.set(0, 1.3, 0.35);
+  g.add(hinged('rudder', rudSurf, 0, 1.2, 9.0));
+
+  const hstab = mesh(wingGeo([
+    { x: -3.6, chord: 0.95, t: 0.09, sweep: 1.15 },
+    { x: 0, chord: 1.7, t: 0.13 },
+    { x: 3.6, chord: 0.95, t: 0.09, sweep: 1.15 },
+  ]), std(0xf4f6f8, 0.25, 0.1, true));
+  hstab.position.set(0, 4.05, 9.0);
+  g.add(hstab);
+  const elevSurf = mesh(new THREE.BoxGeometry(6.6, 0.07, 0.55), white);
+  elevSurf.position.set(0, 0, 0.27);
+  g.add(hinged('elevator', elevSurf, 0, 4.05, 9.75));
+
+  // tricycle gear
+  const gear = new THREE.Group();
+  gear.name = 'gear';
+  const nw = wheel(0.4, 0.26);
+  nw.position.set(0, -2.2, -6.8);
+  gear.add(nw, strut(0, -0.8, -6.7, 0, -2.15, -6.8, 0.11));
+  for (const sx of [-1, 1]) {
+    for (const dz of [-0.45, 0.45]) {
+      const w = wheel(0.5, 0.34);
+      w.position.set(2.3 * sx, -2.1, 1.3 + dz);
+      gear.add(w);
+    }
+    gear.add(strut(1.7 * sx, -0.9, 1.2, 2.28 * sx, -2.0, 1.3, 0.13));
+  }
+  g.add(gear);
+
+  navLights(g, 9.7, 3.1, -0.7);
+  return g;
+}
+
+export function buildAircraftModel(id: string): THREE.Group {
+  switch (id) {
+    case 'skylark': return buildSkylark();
+    case 'falcon': return buildFalcon();
+    case 'vector': return buildVector();
+    case 'meridian': return buildMeridian();
+    default: return buildSkylark();
+  }
+}
