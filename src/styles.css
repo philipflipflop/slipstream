@@ -256,6 +256,19 @@ html, body {
 /* ---------- in-flight DOM bits ---------- */
 #hud { position: fixed; inset: 0; pointer-events: none; z-index: 20; }
 
+#minimap {
+  position: fixed;
+  top: calc(14px + var(--sat));
+  right: calc(64px + var(--sar));
+  width: 168px; height: 168px;
+  z-index: 22; pointer-events: none;
+  display: none;
+  filter: drop-shadow(0 4px 14px rgba(0, 0, 0, .45));
+}
+@media (max-width: 880px), (max-height: 520px) {
+  #minimap { width: 118px; height: 118px; right: calc(58px + var(--sar)); }
+}
+
 #toast {
   position: fixed; top: calc(74px + var(--sat)); left: 50%; transform: translateX(-50%) translateY(-8px);
   z-index: 40; pointer-events: none; opacity: 0;

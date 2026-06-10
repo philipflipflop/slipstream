@@ -9,9 +9,28 @@ import { clamp, lerp, smoothstep } from '../core/math';
 
 export const WATER_LEVEL = 0;
 export const AIRPORT_ELEV = 8;
-/** Runway runs along the Z axis, centred at the origin. */
-export const RUNWAY_LENGTH = 1500;
-export const RUNWAY_WIDTH = 36;
+
+/** All runways run along the Z axis (prevailing winds are northerly). */
+export interface AirfieldDef {
+  name: string;
+  code: string;   // single-letter minimap designator
+  x: number;
+  z: number;
+  elev: number;
+  length: number;
+  width: number;
+  major: boolean; // gets hangars, tower, apron buildings
+}
+
+export const AIRPORTS: AirfieldDef[] = [
+  { name: 'MERIDIAN FIELD', code: 'H', x: 0, z: 0, elev: AIRPORT_ELEV, length: 2400, width: 36, major: true },
+  { name: 'NORTHGATE STRIP', code: 'N', x: -2800, z: -16200, elev: 7, length: 1150, width: 26, major: false },
+  { name: 'HIGHMOOR FIELD', code: 'M', x: 14200, z: -8800, elev: 150, length: 1500, width: 30, major: false },
+];
+
+/** Main field dimensions (back-compat for spawn + ring course). */
+export const RUNWAY_LENGTH = AIRPORTS[0].length;
+export const RUNWAY_WIDTH = AIRPORTS[0].width;
 
 export class WorldGen {
   private terra: Simplex2;
@@ -36,6 +55,15 @@ export class WorldGen {
     let c = t.fbm(wx * 0.000095, wz * 0.000095, 3);
     const r0 = Math.hypot(x, z);
     c += smoothstep(9000, 2000, r0) * 0.55; // spawn island boost
+    // …and under every outlying airfield
+    for (let i = 1; i < AIRPORTS.length; i++) {
+      const ap = AIRPORTS[i];
+      const dax = x - ap.x;
+      const daz = z - ap.z;
+      if (Math.abs(dax) < 5200 && Math.abs(daz) < 5200) {
+        c += smoothstep(5200, 1400, Math.hypot(dax, daz)) * 0.5;
+      }
+    }
     const land = smoothstep(-0.32, 0.22, c);
 
     // continental shelf: deep ocean → coastal plains
@@ -53,10 +81,23 @@ export class WorldGen {
     // fine surface detail
     e += t.noise(wx * 0.0065, wz * 0.0065) * 2.2 * land;
 
-    // flatten an elongated apron around the runway (longer along Z)
-    const fr = Math.hypot(x, z * 0.45);
-    const flat = smoothstep(2400, 650, fr);
-    if (flat > 0) e = lerp(e, AIRPORT_ELEV, flat);
+    // drain the marginal band around sea level: terrain that barely skims
+    // the waterline either deepens into a proper lake or stays clearly dry.
+    // Steep, decisive shorelines render cleanly at every LOD instead of
+    // shimmering as coplanar slivers against the water sheet.
+    const sea = e - 0.6;
+    e -= 2.4 * Math.exp(-(sea * sea) / 5.76);
+
+    // flatten an elongated apron around each runway (longer along Z)
+    for (const ap of AIRPORTS) {
+      const dax = x - ap.x;
+      const daz = z - ap.z;
+      const outer = ap.length * 1.05 + 800;
+      if (Math.abs(dax) > outer || Math.abs(daz) > outer) continue;
+      const fr = Math.hypot(dax, daz * 0.45);
+      const flat = smoothstep(outer, ap.length * 0.3 + 250, fr);
+      if (flat > 0) e = lerp(e, ap.elev, flat);
+    }
 
     return e;
   }
@@ -91,14 +132,23 @@ export class WorldGen {
     return clamp(this.moist.noise(x * 0.0003 + 500, z * 0.0003) * 0.5 + 0.5, 0, 1);
   }
 
-  /** True if (x,z) sits on the flattened airfield apron. */
+  /** True if (x,z) sits on any flattened airfield apron. */
   isOnApron(x: number, z: number): boolean {
-    return Math.hypot(x, z * 0.45) < 900;
+    for (const ap of AIRPORTS) {
+      if (Math.hypot(x - ap.x, (z - ap.z) * 0.45) < ap.length * 0.3 + 300) return true;
+    }
+    return false;
   }
 
-  /** True if (x,z) is on the paved runway strip. */
+  /** True if (x,z) is on any paved runway strip. */
   isOnRunway(x: number, z: number): boolean {
-    return Math.abs(x) < RUNWAY_WIDTH * 0.5 + 6 && Math.abs(z) < RUNWAY_LENGTH * 0.5 + 30;
+    for (const ap of AIRPORTS) {
+      if (
+        Math.abs(x - ap.x) < ap.width * 0.5 + 6 &&
+        Math.abs(z - ap.z) < ap.length * 0.5 + 30
+      ) return true;
+    }
+    return false;
   }
 
   /**
@@ -140,9 +190,16 @@ export class WorldGen {
     // paved runway + apron tint
     if (this.isOnRunway(x, z)) {
       r = 0.16; g = 0.17; b = 0.19;
-    } else if (this.isOnApron(x, z) && h > WATER_LEVEL + 1) {
-      const a = smoothstep(900, 500, Math.hypot(x, z * 0.45)) * 0.4;
-      r = lerp(r, 0.34, a); g = lerp(g, 0.36, a); b = lerp(b, 0.3, a);
+    } else if (h > WATER_LEVEL + 1) {
+      for (const ap of AIRPORTS) {
+        const fr = Math.hypot(x - ap.x, (z - ap.z) * 0.45);
+        const inner = ap.length * 0.3 + 300;
+        if (fr < inner) {
+          const a = smoothstep(inner, inner * 0.55, fr) * 0.4;
+          r = lerp(r, 0.34, a); g = lerp(g, 0.36, a); b = lerp(b, 0.3, a);
+          break;
+        }
+      }
     }
 
     out[0] = r; out[1] = g; out[2] = b;

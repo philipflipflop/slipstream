@@ -21,12 +21,16 @@ export class TouchControls {
   private throttleGrip!: HTMLDivElement;
   private gearBtn!: HTMLButtonElement;
   private flapBtn!: HTMLButtonElement;
+  private apBtn!: HTMLButtonElement;
+  private sbBtn!: HTMLButtonElement;
   private stickPointer: number | null = null;
   private throttlePointer: number | null = null;
   private throttleValue = 0;
 
   onCamera: () => void = () => {};
   onPause: () => void = () => {};
+  onAutopilot: () => void = () => {};
+  onAirbrake: () => void = () => {};
 
   constructor(input: InputManager) {
     this.input = input;
@@ -43,11 +47,21 @@ export class TouchControls {
   }
 
   /** Sync annunciator-style button states from the sim. */
-  syncState(gearDown: boolean, flaps: number, retractable: boolean): void {
+  syncState(
+    gearDown: boolean,
+    flaps: number,
+    retractable: boolean,
+    apOn = false,
+    airbrakeOn = false,
+    hasAirbrake = false,
+  ): void {
     this.gearBtn.style.display = retractable ? 'grid' : 'none';
     this.gearBtn.classList.toggle('lit', gearDown);
     this.flapBtn.textContent = flaps > 0 ? `FLAP ${Math.round(flaps * 3)}` : 'FLAP';
     this.flapBtn.classList.toggle('lit', flaps > 0);
+    this.apBtn.classList.toggle('lit', apOn);
+    this.sbBtn.style.display = hasAirbrake ? 'grid' : 'none';
+    this.sbBtn.classList.toggle('lit', airbrakeOn);
   }
 
   setThrottle(v: number): void {
@@ -157,6 +171,12 @@ export class TouchControls {
 
     const cam = mk('CAM', { top: safeT, left: 'calc(152px + env(safe-area-inset-left, 0px))' });
     cam.addEventListener('pointerdown', (e) => { e.preventDefault(); this.onCamera(); });
+
+    this.apBtn = mk('AP', { top: safeT, left: 'calc(222px + env(safe-area-inset-left, 0px))' });
+    this.apBtn.addEventListener('pointerdown', (e) => { e.preventDefault(); this.onAutopilot(); });
+
+    this.sbBtn = mk('SPBRK', { top: safeT, left: 'calc(292px + env(safe-area-inset-left, 0px))' });
+    this.sbBtn.addEventListener('pointerdown', (e) => { e.preventDefault(); this.onAirbrake(); });
 
     // brake — hold, sits above the throttle
     const brk = mk('BRAKE', {

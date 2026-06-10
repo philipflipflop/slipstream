@@ -6,15 +6,20 @@ import * as THREE from 'three';
 import { WATER_LEVEL } from './heightfield';
 
 const VERT = /* glsl */ `
+  #include <common>
+  #include <logdepthbuf_pars_vertex>
   varying vec3 vWorld;
   void main() {
     vec4 wp = modelMatrix * vec4(position, 1.0);
     vWorld = wp.xyz;
     gl_Position = projectionMatrix * viewMatrix * wp;
+    #include <logdepthbuf_vertex>
   }
 `;
 
 const FRAG = /* glsl */ `
+  #include <common>
+  #include <logdepthbuf_pars_fragment>
   uniform float uTime;
   uniform vec3 uSunDir;
   uniform vec3 uCamPos;
@@ -25,31 +30,41 @@ const FRAG = /* glsl */ `
   uniform float uFogFar;
   varying vec3 vWorld;
 
-  // cheap layered wave normal
+  // three directional swells at non-orthogonal angles and incommensurate
+  // frequencies — interference stays organic instead of forming a dot grid
   vec3 waveNormal(vec2 p, float t) {
-    float a = sin(p.x * 0.045 + t * 0.9) + sin(p.y * 0.032 + t * 0.7);
-    float b = sin((p.x + p.y) * 0.085 + t * 1.7) * 0.6;
-    float c = sin((p.x - p.y * 1.3) * 0.21 + t * 2.3) * 0.25;
-    float dx = cos(p.x * 0.045 + t * 0.9) * 0.045 + cos((p.x + p.y) * 0.085 + t * 1.7) * 0.051
-             + cos((p.x - p.y * 1.3) * 0.21 + t * 2.3) * 0.052;
-    float dy = cos(p.y * 0.032 + t * 0.7) * 0.032 + cos((p.x + p.y) * 0.085 + t * 1.7) * 0.051
-             - cos((p.x - p.y * 1.3) * 0.21 + t * 2.3) * 0.068;
-    return normalize(vec3(-dx * 6.0, 1.0, -dy * 6.0) + vec3(a, 0.0, b + c) * 0.001);
+    vec2 d1 = vec2( 0.8660, 0.5000);
+    vec2 d2 = vec2(-0.3420, 0.9397);
+    vec2 d3 = vec2( 0.6225, -0.7826);
+    float w1 = dot(p, d1) * 0.041 + t * 0.85;
+    float w2 = dot(p, d2) * 0.073 + t * 1.31;
+    float w3 = dot(p, d3) * 0.157 + t * 2.10;
+    vec2 g = d1 * (cos(w1) * 0.058)
+           + d2 * (cos(w2) * 0.052)
+           + d3 * (cos(w3) * 0.038);
+    return normalize(vec3(-g.x * 5.0, 1.0, -g.y * 5.0));
   }
 
   void main() {
+    #include <logdepthbuf_fragment>
+    float dist = distance(uCamPos, vWorld);
+
+    // waves flatten with distance: their world-space frequency would beat
+    // against the pixel grid (moiré) long before they stop being visible
+    float waveAmt = smoothstep(5200.0, 600.0, dist);
     vec3 n = waveNormal(vWorld.xz, uTime);
+    n = normalize(mix(vec3(0.0, 1.0, 0.0), n, waveAmt));
+
     vec3 viewDir = normalize(uCamPos - vWorld);
     float fres = pow(1.0 - max(dot(viewDir, n), 0.0), 3.0);
     vec3 base = mix(uDeep, uShallow, fres * 0.7 + 0.12);
 
-    // sun glint
+    // sun glint (sparkle also calms with distance)
     vec3 hv = normalize(viewDir + uSunDir);
     float spec = pow(max(dot(n, hv), 0.0), 220.0) * 1.6;
-    float sparkle = pow(max(dot(n, hv), 0.0), 36.0) * 0.25;
+    float sparkle = pow(max(dot(n, hv), 0.0), 36.0) * 0.25 * waveAmt;
     vec3 col = base + (spec + sparkle) * vec3(1.0, 0.92, 0.75);
 
-    float dist = distance(uCamPos, vWorld);
     float fog = smoothstep(uFogNear, uFogFar, dist);
     col = mix(col, uFogColor, fog);
     gl_FragColor = vec4(col, 0.93);
@@ -80,7 +95,7 @@ export class Water {
       },
     });
     this.mesh = new THREE.Mesh(geo, this.mat);
-    this.mesh.position.y = WATER_LEVEL;
+    this.mesh.position.y = WATER_LEVEL + 0.18; // sit just proud of the z-fight band
     this.mesh.renderOrder = 1;
     this.mesh.frustumCulled = false;
     scene.add(this.mesh);

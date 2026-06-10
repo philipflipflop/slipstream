@@ -29,7 +29,12 @@ Dependencies are exactly three, pinned: `three`, `vite`, `typescript` (+ `@types
 | Throttle | `Shift` / `Ctrl`, presets `1–9`, `0` = idle |
 | Flaps / Gear | `F` & `V` / `G` |
 | Wheel brakes | `Space` (hold) |
+| Speed brake (jets) | `B` |
+| Autopilot (alt + hdg + speed hold) | `T` — any stick input disengages |
 | Camera (chase / cockpit / orbit) | `C` |
+| Look around / zoom | mouse drag / wheel (recentres on release) |
+| HUD full / minimal / off | `H` |
+| Minimap on/off | `M` |
 | Pause | `Esc` or `P` |
 | Restart flight | `R` |
 
@@ -54,7 +59,10 @@ thrust model) — the handling differences fall out of the numbers, not scripts.
 ### Modes
 
 - **Free Flight** — explore. The world streams in around you forever: coasts, forests,
-  settlements, snow-capped ranges.
+  settlements, snow-capped ranges. Three airfields to find and land at:
+  **Meridian Field** (spawn, 2.4 km runway), **Northgate Strip** (short coastal strip
+  ~16 km north) and **Highmoor Field** (up in the hills to the north-east). The minimap
+  marks every runway.
 - **Ring Rush** — 14 gates against the clock. Best time per aircraft is saved locally.
 
 ## Engineering notes
@@ -66,7 +74,9 @@ thrust model) — the handling differences fall out of the numbers, not scripts.
 - **Flight model**: real force integration — CL(α) curve with post-stall falloff, induced
   drag from aspect ratio, sideslip weathervaning, control authority scaling with dynamic
   pressure, air density falling with altitude, ground roll with brakes/steering and crash
-  detection (sink rate, attitude, slope, water).
+  detection (sink rate, attitude, slope, water). Per-aircraft G-limits cap pitch authority
+  at speed, the fighter has a fly-by-wire alpha limiter, and weathervane stability stiffens
+  with true airspeed so high-Mach flight stays honest.
 - **Audio** is synthesized WebAudio: prop firing tone, jet spool noise, wind that swells
   with airspeed, stall beeper, touchdown thumps.
 - **Quality presets** (low/med/high) scale pixel ratio, shadows, view distance and cloud

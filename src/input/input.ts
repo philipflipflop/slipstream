@@ -6,11 +6,14 @@
 import type { ControlInputs } from '../aircraft/flightModel';
 import { clamp } from '../core/math';
 
-type SimEvent = 'camera' | 'pause' | 'gear' | 'flaps' | 'map' | 'reset';
+type SimEvent =
+  | 'camera' | 'pause' | 'gear' | 'flaps' | 'map' | 'reset'
+  | 'autopilot' | 'airbrake' | 'hud';
 
 export class InputManager {
   readonly controls: ControlInputs = {
-    pitch: 0, roll: 0, yaw: 0, throttle: 0, flaps: 0, gearDown: true, brakes: false,
+    pitch: 0, roll: 0, yaw: 0, throttle: 0, flaps: 0,
+    gearDown: true, brakes: false, airbrake: false,
   };
 
   invertY = false;
@@ -35,6 +38,10 @@ export class InputManager {
         case 'KeyV': this.cycleFlaps(-1); break;
         case 'KeyC': this.emit('camera'); break;
         case 'KeyR': this.emit('reset'); break;
+        case 'KeyT': this.emit('autopilot'); break;
+        case 'KeyB': this.emit('airbrake'); break;
+        case 'KeyH': this.emit('hud'); break;
+        case 'KeyM': this.emit('map'); break;
         case 'Escape': case 'KeyP': this.emit('pause'); break;
         case 'Digit1': case 'Digit2': case 'Digit3': case 'Digit4': case 'Digit5':
         case 'Digit6': case 'Digit7': case 'Digit8': case 'Digit9':
@@ -111,7 +118,22 @@ export class InputManager {
       c.throttle = clamp(c.throttle, 0, 1);
     }
 
-    c.brakes = k.has('KeyB') || k.has('Space') || this.touchBrakes;
+    c.brakes = k.has('Space') || this.touchBrakes;
+  }
+
+  /** True when the pilot is actively deflecting pitch/roll (used to kick off the autopilot). */
+  hasManualStick(): boolean {
+    const k = this.keys;
+    return (
+      this.touchAxes !== null ||
+      k.has('KeyW') || k.has('KeyS') || k.has('KeyA') || k.has('KeyD') ||
+      k.has('ArrowUp') || k.has('ArrowDown') || k.has('ArrowLeft') || k.has('ArrowRight')
+    );
+  }
+
+  toggleAirbrake(): boolean {
+    this.controls.airbrake = !this.controls.airbrake;
+    return this.controls.airbrake;
   }
 
   /** Wipe transient state when (re)starting a flight. */
@@ -123,6 +145,7 @@ export class InputManager {
     this.controls.flaps = 0;
     this.controls.gearDown = true;
     this.controls.brakes = false;
+    this.controls.airbrake = false;
     this.flapsStep = 0;
     this.touchYaw = 0;
     this.touchAxes = null;

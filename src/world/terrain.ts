@@ -102,6 +102,9 @@ export class TerrainManager {
   /** ring radius in chunks; set by quality preset */
   radius = 7;
   buildBudget = 2;
+  /** extra rings streamed in when flying high, set by quality preset */
+  altBonus = 4;
+  private highAlt = false;
 
   constructor(private scene: THREE.Scene, gen: WorldGen) {
     this.gen = gen;
@@ -112,16 +115,31 @@ export class TerrainManager {
     this.houseGeo = buildHouseGeometry();
   }
 
+  // resolutions nest (56 = 2×28 = 4×14): a coarse chunk's vertices are an
+  // exact subset of the fine grid, so shorelines and ridges don't crawl or
+  // "shrink" when a chunk upgrades LOD as you approach
   private resForRing(ring: number): number {
     if (ring <= 1) return 56;
     if (ring <= 3) return 28;
-    return 12;
+    return 14;
   }
 
-  /** Call every frame with the player position. */
-  update(px: number, pz: number): void {
+  /** Current streaming radius (widens at altitude so the view fills out). */
+  effRadius(): number {
+    return this.radius + (this.highAlt ? this.altBonus : 0);
+  }
+
+  /** Call every frame with the player position + height above ground. */
+  update(px: number, pz: number, agl = 0): void {
     const cx = Math.floor(px / CHUNK_SIZE);
     const cz = Math.floor(pz / CHUNK_SIZE);
+
+    // hysteresis so the radius doesn't flap around the threshold
+    const wasHigh = this.highAlt;
+    this.highAlt = agl > (wasHigh ? 750 : 1150);
+    if (this.highAlt !== wasHigh && this.lastCx !== Infinity) {
+      this.requeue(this.lastCx, this.lastCz);
+    }
 
     if (cx !== this.lastCx || cz !== this.lastCz) {
       this.lastCx = cx;
@@ -133,7 +151,7 @@ export class TerrainManager {
     for (let i = 0; i < this.buildBudget && this.queue.length > 0; i++) {
       const job = this.queue.shift()!;
       const ring = Math.max(Math.abs(job.cx - cx), Math.abs(job.cz - cz));
-      if (ring > this.radius) continue; // stale job
+      if (ring > this.effRadius()) continue; // stale job
       this.buildChunk(job.cx, job.cz, this.resForRing(ring));
     }
   }
@@ -149,10 +167,11 @@ export class TerrainManager {
   }
 
   private requeue(cx: number, cz: number): void {
+    const radius = this.effRadius();
     // drop chunks that fell out of range
     for (const [key, chunk] of this.chunks) {
       const ring = Math.max(Math.abs(chunk.cx - cx), Math.abs(chunk.cz - cz));
-      if (ring > this.radius + 1) {
+      if (ring > radius + 1) {
         this.scene.remove(chunk.group);
         for (const d of chunk.disposables) d.dispose();
         this.chunks.delete(key);
@@ -160,8 +179,8 @@ export class TerrainManager {
     }
     // queue missing or under-detailed chunks
     this.queue.length = 0;
-    for (let dz = -this.radius; dz <= this.radius; dz++) {
-      for (let dx = -this.radius; dx <= this.radius; dx++) {
+    for (let dz = -radius; dz <= radius; dz++) {
+      for (let dx = -radius; dx <= radius; dx++) {
         const tx = cx + dx;
         const tz = cz + dz;
         const ring = Math.max(Math.abs(dx), Math.abs(dz));

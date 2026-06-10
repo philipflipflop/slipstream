@@ -28,6 +28,9 @@ export interface AircraftSpec {
   rollRate: number;
   yawRate: number;
   stability: number;  // weathervane/static stability multiplier
+  gLimit: number;     // rated load factor — caps pitch authority at speed
+  airbrakeCd: number; // extra drag with speed brake out (0 = not fitted)
+  fbw?: boolean;      // fly-by-wire alpha limiter (no accidental stalls)
 
   flapsCl: number;
   flapsCd: number;

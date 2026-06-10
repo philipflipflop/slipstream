@@ -19,6 +19,8 @@ export interface HudData {
   gearDown: boolean;
   retractable: boolean;
   brakes: boolean;
+  airbrake: boolean;
+  autopilot: boolean;
   stalled: boolean;
   afterburner: boolean;
   vne: number;        // m/s
@@ -45,6 +47,12 @@ export class Hud {
   private dpr = 1;
   private time = 0;
   visible = false;
+  mode: 'full' | 'min' | 'off' = 'full';
+
+  cycleMode(): 'full' | 'min' | 'off' {
+    this.mode = this.mode === 'full' ? 'min' : this.mode === 'min' ? 'off' : 'full';
+    return this.mode;
+  }
 
   constructor() {
     this.canvas = document.createElement('canvas');
@@ -88,11 +96,19 @@ export class Hud {
     ctx.font = `600 ${Math.round(13 * s)}px 'Chakra Petch', monospace`;
     ctx.textBaseline = 'middle';
 
-    this.attitude(d, cx, cy, s);
-    this.speedTape(d, compact ? 10 : w * 0.13, cy, s, compact);
-    this.altTape(d, compact ? w - 10 : w * 0.87, cy, s, compact);
-    this.headingRibbon(d, cx, (compact ? 46 : 30) + this.safeTop(), s, compact);
-    this.annunciators(d, cx, cy, s);
+    if (this.mode === 'off') {
+      // keep only safety-critical cues + the race clock
+      this.annunciators(d, cx, cy, s, true);
+      if (d.race) this.raceBlock(d, cx, s, compact);
+      return;
+    }
+
+    const full = this.mode === 'full';
+    if (full) this.attitude(d, cx, cy, s);
+    this.speedTape(d, compact ? 10 : w * 0.13, cy, s, compact, full);
+    this.altTape(d, compact ? w - 10 : w * 0.87, cy, s, compact, full);
+    if (full) this.headingRibbon(d, cx, (compact ? 46 : 30) + this.safeTop(), s, compact);
+    this.annunciators(d, cx, cy, s, false);
     if (d.race) this.raceBlock(d, cx, s, compact);
   }
 
@@ -203,31 +219,33 @@ export class Hud {
     ctx.stroke();
   }
 
-  private speedTape(d: HudData, x: number, cy: number, s: number, compact: boolean): void {
+  private speedTape(d: HudData, x: number, cy: number, s: number, compact: boolean, full: boolean): void {
     const ctx = this.ctx;
     const kt = d.airspeed * MS_TO_KT;
     const H = 280 * s;
     const pxPerKt = H / 100;
 
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(x - 2, cy - H / 2, 80 * s, H);
-    ctx.clip();
-    ctx.textAlign = 'left';
-    const vneKt = d.vne * MS_TO_KT;
-    for (let v = Math.floor((kt - 55) / 10) * 10; v <= kt + 55; v += 10) {
-      if (v < 0) continue;
-      const y = cy + (kt - v) * pxPerKt;
-      const danger = v >= vneKt;
-      ctx.strokeStyle = danger ? `rgba(${RED},0.9)` : this.g(0.7);
-      ctx.fillStyle = danger ? `rgba(${RED},0.9)` : this.g(0.8);
+    if (full) {
+      ctx.save();
       ctx.beginPath();
-      ctx.moveTo(x, y);
-      ctx.lineTo(x + 10 * s, y);
-      ctx.stroke();
-      if (v % 20 === 0) ctx.fillText(`${v}`, x + 14 * s, y);
+      ctx.rect(x - 2, cy - H / 2, 80 * s, H);
+      ctx.clip();
+      ctx.textAlign = 'left';
+      const vneKt = d.vne * MS_TO_KT;
+      for (let v = Math.floor((kt - 55) / 10) * 10; v <= kt + 55; v += 10) {
+        if (v < 0) continue;
+        const y = cy + (kt - v) * pxPerKt;
+        const danger = v >= vneKt;
+        ctx.strokeStyle = danger ? `rgba(${RED},0.9)` : this.g(0.7);
+        ctx.fillStyle = danger ? `rgba(${RED},0.9)` : this.g(0.8);
+        ctx.beginPath();
+        ctx.moveTo(x, y);
+        ctx.lineTo(x + 10 * s, y);
+        ctx.stroke();
+        if (v % 20 === 0) ctx.fillText(`${v}`, x + 14 * s, y);
+      }
+      ctx.restore();
     }
-    ctx.restore();
 
     this.tapeBox(x - 2, cy, 64 * s, 30 * s, false);
     ctx.fillStyle = this.g(1);
@@ -237,6 +255,8 @@ export class Hud {
     ctx.font = `600 ${Math.round(11 * s)}px 'Chakra Petch', monospace`;
     ctx.fillStyle = this.g(0.6);
     ctx.fillText('KT', x + 4 * s, cy - H / 2 - 12 * s);
+
+    if (!full) return;
 
     // throttle bar under the tape
     const ty = cy + H / 2 + 18 * s;
@@ -254,28 +274,30 @@ export class Hud {
     }
   }
 
-  private altTape(d: HudData, x: number, cy: number, s: number, compact: boolean): void {
+  private altTape(d: HudData, x: number, cy: number, s: number, compact: boolean, full: boolean): void {
     const ctx = this.ctx;
     const ft = d.altitude * M_TO_FT;
     const H = 280 * s;
     const pxPerFt = H / 1000;
 
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(x - 78 * s, cy - H / 2, 80 * s, H);
-    ctx.clip();
-    ctx.textAlign = 'right';
-    for (let v = Math.floor((ft - 550) / 100) * 100; v <= ft + 550; v += 100) {
-      const y = cy + (v - ft) * -pxPerFt;
-      ctx.strokeStyle = this.g(0.7);
-      ctx.fillStyle = this.g(0.8);
+    if (full) {
+      ctx.save();
       ctx.beginPath();
-      ctx.moveTo(x, y);
-      ctx.lineTo(x - 10 * s, y);
-      ctx.stroke();
-      if (v % 200 === 0) ctx.fillText(`${v}`, x - 14 * s, y);
+      ctx.rect(x - 78 * s, cy - H / 2, 80 * s, H);
+      ctx.clip();
+      ctx.textAlign = 'right';
+      for (let v = Math.floor((ft - 550) / 100) * 100; v <= ft + 550; v += 100) {
+        const y = cy + (v - ft) * -pxPerFt;
+        ctx.strokeStyle = this.g(0.7);
+        ctx.fillStyle = this.g(0.8);
+        ctx.beginPath();
+        ctx.moveTo(x, y);
+        ctx.lineTo(x - 10 * s, y);
+        ctx.stroke();
+        if (v % 200 === 0) ctx.fillText(`${v}`, x - 14 * s, y);
+      }
+      ctx.restore();
     }
-    ctx.restore();
 
     this.tapeBox(x + 2, cy, 72 * s, 30 * s, true);
     ctx.fillStyle = this.g(1);
@@ -285,6 +307,8 @@ export class Hud {
     ctx.font = `600 ${Math.round(11 * s)}px 'Chakra Petch', monospace`;
     ctx.fillStyle = this.g(0.6);
     ctx.fillText('FT', x - 4 * s, cy - H / 2 - 12 * s);
+
+    if (!full) return;
 
     // vertical speed (fpm, abbreviated)
     const fpm = d.vs * M_TO_FT * 60;
@@ -343,19 +367,23 @@ export class Hud {
     ctx.font = `600 ${Math.round(13 * s)}px 'Chakra Petch', monospace`;
   }
 
-  private annunciators(d: HudData, cx: number, cy: number, s: number): void {
+  private annunciators(d: HudData, cx: number, cy: number, s: number, safetyOnly: boolean): void {
     const ctx = this.ctx;
     ctx.textAlign = 'center';
     const y0 = cy + 190 * s;
-    const items: Array<[string, string]> = [];
-    if (d.retractable) items.push(d.gearDown ? ['GEAR ▼', this.g(0.9)] : ['GEAR ▲', this.g(0.45)]);
-    if (d.flaps > 0.01) items.push([`FLAPS ${Math.round(d.flaps * 3)}`, this.g(0.9)]);
-    if (d.brakes) items.push(['BRAKES', `rgba(${AMBER},0.95)`]);
-    const spread = 86 * s;
-    items.forEach(([label, color], i) => {
-      ctx.fillStyle = color;
-      ctx.fillText(label, cx + (i - (items.length - 1) / 2) * spread, y0);
-    });
+    if (!safetyOnly) {
+      const items: Array<[string, string]> = [];
+      if (d.autopilot) items.push(['AP', `rgba(${AMBER},0.95)`]);
+      if (d.retractable) items.push(d.gearDown ? ['GEAR ▼', this.g(0.9)] : ['GEAR ▲', this.g(0.45)]);
+      if (d.flaps > 0.01) items.push([`FLAPS ${Math.round(d.flaps * 3)}`, this.g(0.9)]);
+      if (d.airbrake) items.push(['SPD BRK', `rgba(${AMBER},0.95)`]);
+      if (d.brakes) items.push(['BRAKES', `rgba(${AMBER},0.95)`]);
+      const spread = 86 * s;
+      items.forEach(([label, color], i) => {
+        ctx.fillStyle = color;
+        ctx.fillText(label, cx + (i - (items.length - 1) / 2) * spread, y0);
+      });
+    }
 
     if (d.stalled && Math.sin(this.time * 14) > -0.2) {
       ctx.fillStyle = `rgba(${RED},0.95)`;

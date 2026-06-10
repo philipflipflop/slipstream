@@ -7,7 +7,7 @@
 import * as THREE from 'three';
 import './styles.css';
 
-import { WorldGen } from './world/heightfield';
+import { WorldGen, AIRPORTS } from './world/heightfield';
 import { TerrainManager, CHUNK_SIZE } from './world/terrain';
 import { Water } from './world/water';
 import { Sky } from './world/sky';
@@ -15,14 +15,16 @@ import { Airport } from './world/airport';
 import { RingCourse, RING_COUNT } from './world/rings';
 import { Aircraft } from './aircraft/aircraft';
 import { specById } from './aircraft/catalog';
+import { Autopilot } from './aircraft/autopilot';
 import { InputManager } from './input/input';
 import { TouchControls, isTouchDevice } from './input/touch';
 import { FlightCamera } from './camera';
 import { SoundEngine } from './audio/sound';
 import { Hud, HudData } from './ui/hud';
+import { Minimap } from './ui/minimap';
 import { Screens, DebriefStats } from './ui/screens';
 import { loadSave, persist, Quality } from './save';
-import { clamp, MS_TO_KT, M_TO_FT, wrapAngle } from './core/math';
+import { clamp, damp, MS_TO_KT, M_TO_FT, wrapAngle } from './core/math';
 
 type GameState = 'boot' | 'menu' | 'flying' | 'paused' | 'crashed' | 'victory';
 
@@ -50,8 +52,12 @@ class Game {
   private flightCam: FlightCamera;
   private sound = new SoundEngine();
   private hud = new Hud();
+  private minimap: Minimap;
+  private autopilot = new Autopilot();
   private screens: Screens;
   private save = loadSave();
+  private baseFogNear = 2500;
+  private baseFogFar = 7000;
 
   // state
   private state: GameState = 'boot';
@@ -69,8 +75,9 @@ class Game {
 
   private heightFn = (x: number, z: number): number => this.gen.heightAt(x, z);
 
-  // ?autofly=1[&ac=vector] — demo/smoke-test mode: takes off by itself
+  // ?autofly=1[&ac=vector][&apt=1] — demo/smoke-test mode: takes off by itself
   private autoFly = false;
+  private spawnField = AIRPORTS[0];
 
   constructor() {
     const touch = isTouchDevice();
@@ -78,6 +85,10 @@ class Game {
     this.renderer = new THREE.WebGLRenderer({
       antialias: true,
       powerPreference: 'high-performance',
+      // uniform relative depth precision at any distance — kills shoreline
+      // z-fighting without biasing the water (a bias floods low terrain when
+      // viewed from far away). Skipped on touch GPUs: it defeats early-Z.
+      logarithmicDepthBuffer: !touch,
     });
     this.renderer.domElement.classList.add('gl');
     this.renderer.shadowMap.enabled = false;
@@ -97,15 +108,19 @@ class Game {
 
     this.aircraft = new Aircraft(specById(this.save.aircraft));
     this.scene.add(this.aircraft.model);
-    this.aircraft.resetOnRunway(this.heightFn);
+    this.aircraft.resetOnRunway(this.heightFn, this.spawnField);
 
     this.flightCam = new FlightCamera(window.innerWidth / window.innerHeight);
+    this.minimap = new Minimap(this.gen);
     this.screens = new Screens(this.save, touch);
     if (touch) this.touch = new TouchControls(this.input);
+    this.wireCameraPointer();
 
     const params = new URLSearchParams(location.search);
     this.autoFly = params.get('autofly') === '1';
     if (params.get('mode') === 'race') this.save.mode = 'race';
+    const aptParam = Number(params.get('apt') ?? '0');
+    if (aptParam > 0 && aptParam < AIRPORTS.length) this.spawnField = AIRPORTS[aptParam];
     const acParam = params.get('ac');
     if (acParam && acParam !== this.save.aircraft) {
       this.save.aircraft = acParam;
@@ -126,6 +141,41 @@ class Game {
   }
 
   /* ------------------------------------------------ wiring ---- */
+
+  /** Drag on the 3D canvas orbits the camera; wheel zooms. */
+  private wireCameraPointer(): void {
+    const el = this.renderer.domElement;
+    let activePointer: number | null = null;
+    let lastX = 0;
+    let lastY = 0;
+
+    el.addEventListener('pointerdown', (e) => {
+      if (this.state !== 'flying' || activePointer !== null) return;
+      activePointer = e.pointerId;
+      lastX = e.clientX;
+      lastY = e.clientY;
+      el.setPointerCapture(e.pointerId);
+      this.flightCam.beginDrag();
+    });
+    el.addEventListener('pointermove', (e) => {
+      if (e.pointerId !== activePointer) return;
+      this.flightCam.drag(e.clientX - lastX, e.clientY - lastY);
+      lastX = e.clientX;
+      lastY = e.clientY;
+    });
+    const release = (e: PointerEvent): void => {
+      if (e.pointerId !== activePointer) return;
+      activePointer = null;
+      this.flightCam.endDrag();
+    };
+    el.addEventListener('pointerup', release);
+    el.addEventListener('pointercancel', release);
+    el.addEventListener('wheel', (e) => {
+      if (this.state !== 'flying') return;
+      e.preventDefault();
+      this.flightCam.wheel(e.deltaY);
+    }, { passive: false });
+  }
 
   private wireUi(): void {
     const s = this.screens;
@@ -163,13 +213,53 @@ class Game {
     this.input.on('reset', () => {
       if (this.state === 'flying' || this.state === 'crashed') this.startFlight();
     });
+    this.input.on('autopilot', () => this.toggleAutopilot());
+    this.input.on('airbrake', () => this.toggleAirbrake());
+    this.input.on('hud', () => {
+      if (this.state !== 'flying') return;
+      const mode = this.hud.cycleMode();
+      this.screens.toast(mode === 'full' ? 'HUD FULL' : mode === 'min' ? 'HUD MINIMAL' : 'HUD OFF');
+    });
+    this.input.on('map', () => {
+      if (this.state !== 'flying') return;
+      this.minimap.setVisible(!this.minimap.visible);
+      this.screens.toast(this.minimap.visible ? 'MAP ON' : 'MAP OFF');
+    });
 
     if (this.touch) {
       this.touch.onCamera = () => {
         if (this.state !== 'flying') return;
         this.flightCam.cycle();
       };
+      this.touch.onAutopilot = () => this.toggleAutopilot();
+      this.touch.onAirbrake = () => this.toggleAirbrake();
     }
+  }
+
+  private toggleAutopilot(): void {
+    if (this.state !== 'flying') return;
+    const st = this.aircraft.state;
+    if (this.autopilot.engaged) {
+      this.autopilot.disengage();
+      this.screens.toast('AUTOPILOT OFF');
+    } else if (!st.onGround) {
+      this.autopilot.engage(st, this.input.controls.throttle);
+      const ft = Math.round(st.pos.y * M_TO_FT / 100) * 100;
+      this.screens.toast(`AP HOLDING ${ft} FT`, 2200);
+    } else {
+      this.screens.toast('AP UNAVAILABLE ON THE GROUND');
+    }
+  }
+
+  private toggleAirbrake(): void {
+    if (this.state !== 'flying') return;
+    if (this.aircraft.spec.airbrakeCd <= 0) {
+      this.screens.toast('NO SPEED BRAKE FITTED');
+      return;
+    }
+    const out = this.input.toggleAirbrake();
+    this.sound.gearThunk();
+    this.screens.toast(out ? 'SPEED BRAKE OUT' : 'SPEED BRAKE IN');
   }
 
   /* ------------------------------------------------ settings ---- */
@@ -195,10 +285,13 @@ class Game {
       this.terrain.radius = 8;
       this.terrain.buildBudget = 2;
     }
+    this.terrain.altBonus = q === 'low' ? 2 : 4;
     const view = this.terrain.radius * CHUNK_SIZE;
+    this.baseFogNear = view * 0.38;
+    this.baseFogFar = view * 0.96;
     const fog = this.scene.fog as THREE.Fog;
-    fog.near = view * 0.38;
-    fog.far = view * 0.96;
+    fog.near = this.baseFogNear;
+    fog.far = this.baseFogFar;
     this.water.setFogRange(fog.near, fog.far);
     // force material recompile for shadow toggle
     this.scene.traverse((o) => {
@@ -221,7 +314,7 @@ class Game {
     this.aircraft.dispose();
     this.aircraft = new Aircraft(specById(id));
     this.scene.add(this.aircraft.model);
-    this.aircraft.resetOnRunway(this.heightFn);
+    this.aircraft.resetOnRunway(this.heightFn, this.spawnField);
     this.sound.uiClick();
     persist(this.save);
   }
@@ -229,7 +322,7 @@ class Game {
   private startFlight(): void {
     this.sound.init();
     this.input.resetForFlight();
-    this.aircraft.resetOnRunway(this.heightFn);
+    this.aircraft.resetOnRunway(this.heightFn, this.spawnField);
     this.sound.setEngineKind(this.aircraft.spec.engine);
     this.flightCam.set('chase');
     this.stats = { flightTime: 0, distanceKm: 0, maxAltFt: 0, maxSpdKt: 0 };
@@ -241,9 +334,11 @@ class Game {
     } else {
       this.rings.stop();
     }
+    this.autopilot.disengage();
     this.state = 'flying';
     this.screens.show(null);
     this.hud.visible = true;
+    this.minimap.show(true);
     this.touch?.show(true);
     this.touch?.setThrottle(0);
     this.screens.toast(this.save.mode === 'race' ? 'RING RUSH — GO!' : 'CLEARED FOR TAKEOFF', 2400);
@@ -253,6 +348,7 @@ class Game {
     if (this.state !== 'flying') return;
     this.state = 'paused';
     this.screens.show('pause');
+    this.minimap.show(false);
     this.touch?.show(false);
   }
 
@@ -260,6 +356,7 @@ class Game {
     if (this.state !== 'paused') return;
     this.state = 'flying';
     this.screens.show(null);
+    this.minimap.show(true);
     this.touch?.show(true);
     this.timer.update(); // swallow the pause gap
   }
@@ -269,9 +366,10 @@ class Game {
     this.state = 'menu';
     this.hud.visible = false;
     this.hud.clear();
+    this.minimap.show(false);
     this.touch?.show(false);
     this.rings.stop();
-    this.aircraft.resetOnRunway(this.heightFn);
+    this.aircraft.resetOnRunway(this.heightFn, this.spawnField);
     this.screens.show('menu');
     this.screens.refreshMenu();
   }
@@ -282,6 +380,7 @@ class Game {
     this.flightCam.addShake(1.4);
     this.sound.crashBoom();
     this.hud.visible = false;
+    this.minimap.show(false);
     this.touch?.show(false);
   }
 
@@ -289,6 +388,7 @@ class Game {
     this.state = 'victory';
     this.sound.finishFanfare();
     this.hud.visible = false;
+    this.minimap.show(false);
     this.touch?.show(false);
     const id = this.aircraft.spec.id;
     const prev = this.save.bestTimes[id];
@@ -318,10 +418,18 @@ class Game {
     const st = this.aircraft.state;
 
     // stream the world around the player (also while in menu, for the view)
-    this.terrain.update(st.pos.x, st.pos.z);
+    const agl = st.pos.y - this.gen.heightAt(st.pos.x, st.pos.z);
+    this.terrain.update(st.pos.x, st.pos.z, agl);
     this.water.update(this.simTime, this.flightCam.camera.position);
     this.sky.update(st.pos);
     this.airport.update(this.simTime);
+
+    // fog breathes out as the streamed radius widens at altitude
+    const fog = this.scene.fog as THREE.Fog;
+    const scale = this.terrain.effRadius() / this.terrain.radius;
+    fog.near = clamp(damp(fog.near, this.baseFogNear * scale, 0.8, dt), 100, 40000);
+    fog.far = clamp(damp(fog.far, this.baseFogFar * scale, 0.8, dt), 200, 41000);
+    this.water.setFogRange(fog.near, fog.far);
 
     switch (this.state) {
       case 'boot':
@@ -340,6 +448,15 @@ class Game {
       case 'victory':
         break;
     }
+
+    // in cockpit view the airframe shell is hidden — the models have no
+    // interiors, so clipping through the nose looks far worse than a clean
+    // HUD-only view
+    this.aircraft.model.visible = !(
+      this.flightCam.mode === 'cockpit' &&
+      this.state !== 'menu' &&
+      this.state !== 'boot'
+    );
 
     this.renderer.render(this.scene, this.flightCam.camera);
   }
@@ -401,6 +518,18 @@ class Game {
     const st = this.aircraft.state;
     this.input.update(dt);
     if (this.autoFly) this.applyAutoFly();
+
+    // autopilot: manual stick input kicks it off, like the real thing
+    if (this.autopilot.engaged) {
+      if (this.input.hasManualStick()) {
+        this.autopilot.disengage();
+        this.screens.toast('AP DISENGAGED — MANUAL INPUT');
+      } else {
+        this.autopilot.update(this.aircraft.spec, st, this.input.controls, dt);
+        this.touch?.setThrottle(this.input.controls.throttle);
+      }
+    }
+
     this.aircraft.update(this.input.controls, dt, this.heightFn);
 
     // landing / takeoff transitions
@@ -446,14 +575,20 @@ class Game {
 
     // camera, audio, HUD
     this.flightCam.update(this.aircraft, dt, this.heightFn);
-    if (st.stalled) this.flightCam.addShake(0.06);
+    if (st.stalled) this.flightCam.addShake(0.005); // light pre-stall buffet, not an earthquake
     this.sound.update(
       this.input.controls.throttle, st.thrustFrac, st.airspeed, st.stalled, this.simTime,
     );
     this.hud.draw(this.hudData(), dt);
+    this.minimap.update(st.pos.x, st.pos.z, st.heading, this.rings);
 
     this.touch?.syncState(
-      this.input.controls.gearDown, this.input.controls.flaps, this.aircraft.spec.retractableGear,
+      this.input.controls.gearDown,
+      this.input.controls.flaps,
+      this.aircraft.spec.retractableGear,
+      this.autopilot.engaged,
+      this.input.controls.airbrake,
+      this.aircraft.spec.airbrakeCd > 0,
     );
     this.screens.setPortraitWarning(true);
   }
@@ -495,7 +630,7 @@ class Game {
       const dy = target.pos.y - st.pos.y;
       const dz = target.pos.z - st.pos.z;
       const distH = Math.hypot(dx, dz);
-      const absBearing = Math.atan2(-dx, -dz); // 0 = north
+      const absBearing = Math.atan2(dx, -dz); // compass bearing, 0 = north
       race = {
         gate: this.rings.current + 1,
         total: RING_COUNT,
@@ -521,6 +656,8 @@ class Game {
       gearDown: c.gearDown,
       retractable: spec.retractableGear,
       brakes: c.brakes,
+      airbrake: c.airbrake,
+      autopilot: this.autopilot.engaged,
       stalled: st.stalled,
       afterburner: !!spec.afterburner && c.throttle >= 0.995,
       vne: spec.vne,

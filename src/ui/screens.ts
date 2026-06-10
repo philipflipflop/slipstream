@@ -332,7 +332,12 @@ export class Screens {
       <div class="krow"><span>Flaps</span><kbd>F / V</kbd></div>
       <div class="krow"><span>Landing gear</span><kbd>G</kbd></div>
       <div class="krow"><span>Wheel brakes</span><kbd>Space</kbd></div>
+      <div class="krow"><span>Speed brake</span><kbd>B</kbd></div>
+      <div class="krow"><span>Autopilot hold</span><kbd>T</kbd></div>
       <div class="krow"><span>Camera</span><kbd>C</kbd></div>
+      <div class="krow"><span>Look around / zoom</span><kbd>Mouse drag / wheel</kbd></div>
+      <div class="krow"><span>HUD full / min / off</span><kbd>H</kbd></div>
+      <div class="krow"><span>Minimap</span><kbd>M</kbd></div>
       <div class="krow"><span>Pause</span><kbd>Esc / P</kbd></div>`;
     const h = this.el(`
       <div class="screen" style="z-index:70">

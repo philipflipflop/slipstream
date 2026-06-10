@@ -9,6 +9,7 @@ import { buildAircraftModel } from './models';
 import {
   ControlInputs, FlightState, createState, stepFlight, spawnOnRunway, HeightFn,
 } from './flightModel';
+import type { AirfieldDef } from '../world/heightfield';
 import { damp, clamp } from '../core/math';
 
 const SUBSTEPS = 3;
@@ -50,8 +51,8 @@ export class Aircraft {
     });
   }
 
-  resetOnRunway(heightAt: HeightFn): void {
-    spawnOnRunway(this.spec, this.state, heightAt);
+  resetOnRunway(heightAt: HeightFn, field?: AirfieldDef): void {
+    spawnOnRunway(this.spec, this.state, heightAt, field);
     this.gearAnim = 1;
     this.syncModel();
   }
