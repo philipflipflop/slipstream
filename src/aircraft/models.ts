@@ -76,15 +76,17 @@ function fuseGeo(stations: FuseStation[], segs = 12): THREE.BufferGeometry {
       idx.push(a, b, c, b, d, c);
     }
   }
-  // nose & tail caps
+  // nose & tail caps — wound so the faces point OUT (nose -z, tail +z);
+  // rings go CCW seen from +z, so the tail fan keeps ring order and the
+  // nose fan reverses it
   const g0 = stations[0];
   const gn = stations[stations.length - 1];
   const base = verts.length / 3;
   verts.push(0, g0.y ?? 0, g0.z, 0, gn.y ?? 0, gn.z);
   const lastRing = (stations.length - 1) * segs;
   for (let i = 0; i < segs; i++) {
-    idx.push(base, i, (i + 1) % segs);
-    idx.push(base + 1, lastRing + ((i + 1) % segs), lastRing + i);
+    idx.push(base, (i + 1) % segs, i);
+    idx.push(base + 1, lastRing + i, lastRing + ((i + 1) % segs));
   }
   const g = new THREE.BufferGeometry();
   g.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
@@ -313,6 +315,17 @@ function buildFalcon(): THREE.Group {
   scoop.position.set(0, -0.72, 0.3);
   g.add(scoop);
 
+  // exhaust stacks along the cowl
+  const stackMat = std(0x2e2a26, 0.6, 0.7);
+  for (const sx of [-1, 1]) {
+    for (let i = 0; i < 3; i++) {
+      const stack = mesh(new THREE.BoxGeometry(0.1, 0.12, 0.34), stackMat);
+      stack.position.set(0.58 * sx, 0.28, -3.15 + i * 0.48);
+      stack.rotation.x = 0.25;
+      g.add(stack);
+    }
+  }
+
   // low tapered wing with dihedral
   const wing = mesh(wingGeo([
     { x: -5.6, chord: 1.1, t: 0.12, rise: 0.55, sweep: 0.5 },
@@ -449,6 +462,20 @@ function buildVector(): THREE.Group {
   nozzle.rotation.x = Math.PI / 2;
   nozzle.position.set(0, 0, 7.5);
   g.add(nozzle);
+  // turbine face inside the pipe (no more hollow tail)
+  const turbine = new THREE.Mesh(
+    new THREE.CircleGeometry(0.4, 14),
+    std(0x17191d, 0.4, 0.85),
+  );
+  turbine.position.set(0, 0, 7.88);
+  g.add(turbine);
+  // intake fan faces inside the boxy ducts (rotated to face forward)
+  for (const sx of [-1, 1]) {
+    const duct = new THREE.Mesh(new THREE.PlaneGeometry(0.62, 0.78), std(0x17191d, 0.4, 0.85));
+    duct.position.set(1.2 * sx, -0.2, -2.69);
+    duct.rotation.y = Math.PI;
+    g.add(duct);
+  }
   const burner = new THREE.Mesh(
     new THREE.ConeGeometry(0.4, 4.2, 10, 1, true),
     new THREE.MeshBasicMaterial({
@@ -543,19 +570,38 @@ function buildMeridian(): THREE.Group {
     g.add(hinged(sx < 0 ? 'aileronL' : 'aileronR', surf, 6.4 * sx, -0.32, 2.8));
   }
 
-  // aft engine pods
+  // aft engine pods, with visible fan and exhaust internals
+  const fanMat = std(0x1b1e24, 0.35, 0.85);
+  const exhaustMat = std(0x3a3530, 0.45, 0.9);
   for (const sx of [-1, 1]) {
     const pod = mesh(fuseGeo([
       { z: -1.5, r: 0.52 },
       { z: -0.9, r: 0.66 },
       { z: 0.9, r: 0.62 },
       { z: 1.6, r: 0.42 },
-    ], 10), std(0xd5d9de, 0.3, 0.6));
+    ], 12), std(0xd5d9de, 0.3, 0.6));
     pod.position.set(1.95 * sx, 0.45, 5.6);
     g.add(pod);
     const pylon = mesh(new THREE.BoxGeometry(0.85, 0.5, 1.6), white);
     pylon.position.set(1.45 * sx, 0.45, 5.5);
     g.add(pylon);
+
+    // intake lip ring + fan face
+    const lip = mesh(new THREE.TorusGeometry(0.5, 0.07, 8, 18), std(0xb8bdc4, 0.3, 0.8));
+    lip.position.set(1.95 * sx, 0.45, 4.12);
+    g.add(lip);
+    const fan = new THREE.Mesh(new THREE.CircleGeometry(0.46, 18), fanMat);
+    fan.position.set(1.95 * sx, 0.45, 4.14);
+    fan.rotation.y = Math.PI; // face forward
+    g.add(fan);
+    // exhaust cone + hot nozzle disc
+    const cone = mesh(new THREE.ConeGeometry(0.2, 0.7, 10), exhaustMat);
+    cone.rotation.x = -Math.PI / 2;
+    cone.position.set(1.95 * sx, 0.45, 7.0);
+    g.add(cone);
+    const nozzle = new THREE.Mesh(new THREE.CircleGeometry(0.4, 14), fanMat);
+    nozzle.position.set(1.95 * sx, 0.45, 7.21);
+    g.add(nozzle);
   }
 
   // T-tail
@@ -599,6 +645,9 @@ function buildMeridian(): THREE.Group {
   g.add(gear);
 
   navLights(g, 9.7, 3.1, -0.7);
+
+  // regional-jet proportions: meaningfully bigger than the fighter
+  g.scale.setScalar(1.45);
   return g;
 }
 

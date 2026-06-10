@@ -6,7 +6,8 @@
 import { clamp, MS_TO_KT, M_TO_FT, RAD2DEG, formatTime, wrapAngle } from '../core/math';
 
 export interface HudData {
-  airspeed: number;   // m/s
+  airspeed: number;   // m/s (true airspeed)
+  groundspeed: number; // m/s over the ground
   altitude: number;   // m ASL
   radarAlt: number;   // m AGL
   heading: number;    // rad
@@ -255,6 +256,10 @@ export class Hud {
     ctx.font = `600 ${Math.round(11 * s)}px 'Chakra Petch', monospace`;
     ctx.fillStyle = this.g(0.6);
     ctx.fillText('KT', x + 4 * s, cy - H / 2 - 12 * s);
+
+    // groundspeed readout just under the airspeed box
+    ctx.fillStyle = this.g(0.85);
+    ctx.fillText(`GS ${Math.round(d.groundspeed * MS_TO_KT)}`, x + 4 * s, cy + 26 * s);
 
     if (!full) return;
 

@@ -31,6 +31,7 @@ Dependencies are exactly three, pinned: `three`, `vite`, `typescript` (+ `@types
 | Wheel brakes | `Space` (hold) |
 | Speed brake (jets) | `B` |
 | Autopilot (alt + hdg + speed hold) | `T` — any stick input disengages |
+| Autopilot bugs | on-screen panel, or `[` `]` heading · `PgUp` `PgDn` altitude · `Home` `End` speed |
 | Camera (chase / cockpit / orbit) | `C` |
 | Look around / zoom | mouse drag / wheel (recentres on release) |
 | HUD full / minimal / off | `H` |
@@ -59,18 +60,20 @@ thrust model) — the handling differences fall out of the numbers, not scripts.
 ### Modes
 
 - **Free Flight** — explore. The world streams in around you forever: coasts, forests,
-  settlements, snow-capped ranges. Three airfields to find and land at:
-  **Meridian Field** (spawn, 2.4 km runway), **Northgate Strip** (short coastal strip
-  ~16 km north) and **Highmoor Field** (up in the hills to the north-east). The minimap
-  marks every runway.
+  settlements, snow-capped ranges. The home cluster has three airfields — **Meridian
+  Field** (spawn, 2.4 km runway), **Northgate Strip** and **Highmoor Field** — and
+  beyond them, procedural strips appear every ~15–25 km of land, deterministically
+  seeded so they're always in the same place. The minimap marks every runway and
+  always points the way home.
 - **Ring Rush** — 14 gates against the clock. Best time per aircraft is saved locally.
 
 ## Engineering notes
 
 - **Terrain** is an analytic heightfield (domain-warped FBM + ridged multifractal,
   seeded simplex). The render mesh, tree/settlement scattering *and* collision all sample
-  the same function, so what you see is exactly what you hit. Chunks stream in around the
-  aircraft with ring-based LOD and skirt geometry, budgeted per frame.
+  the same function, so what you see is exactly what you hit. Chunk generation runs in a
+  **Web Worker** — payloads arrive as transferable typed arrays, so the main thread never
+  hitches while streaming nested-LOD chunks around the aircraft.
 - **Flight model**: real force integration — CL(α) curve with post-stall falloff, induced
   drag from aspect ratio, sideslip weathervaning, control authority scaling with dynamic
   pressure, air density falling with altitude, ground roll with brakes/steering and crash

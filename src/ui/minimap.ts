@@ -3,7 +3,7 @@
  * analytic heightfield, refreshed a few rows per frame), runway strips,
  * Ring Rush gates and a north arrow. Toggle with M.
  */
-import { WorldGen, AIRPORTS, WATER_LEVEL } from '../world/heightfield';
+import { WorldGen, AirfieldDef, AIRPORTS, WATER_LEVEL } from '../world/heightfield';
 import type { RingCourse } from '../world/rings';
 
 const GRID = 44;        // terrain sample grid
@@ -20,6 +20,8 @@ export class Minimap {
   private sampleRow = 0;
   private centerX = 0;
   private centerZ = 0;
+  private fields: AirfieldDef[] = [];
+  private fieldTimer = 0;
 
   constructor(private gen: WorldGen) {
     this.canvas = document.createElement('canvas');
@@ -62,6 +64,14 @@ export class Minimap {
       if (this.sampleRow >= GRID) this.sampleRow = 0;
     } else if (this.sampleRow === 0) {
       this.sampleRow = 1; // kick off the first fill
+    }
+
+    // refresh the airfield set every couple of seconds (home + procedural)
+    if (--this.fieldTimer <= 0) {
+      this.fieldTimer = 120;
+      this.gen.airfieldsNear(px, pz, 32000, this.fields);
+      // the home beacon stays on the rim no matter how far you roam
+      if (!this.fields.some((f) => f.major)) this.fields.push(AIRPORTS[0]);
     }
 
     this.draw(px, pz, heading, rings);
@@ -107,7 +117,7 @@ export class Minimap {
     }
 
     // runway strips (only meaningful when in range)
-    for (const ap of AIRPORTS) {
+    for (const ap of this.fields) {
       const mx = (ap.x - px) * toMap;
       const mz = (ap.z - pz) * toMap;
       if (Math.hypot(mx, mz) > c - 10) continue;
@@ -131,7 +141,7 @@ export class Minimap {
 
     // airport beacons — always visible; beyond range they clamp to the rim
     // with an outward pointer so you always know which way home is
-    for (const ap of AIRPORTS) {
+    for (const ap of this.fields) {
       let mx = (ap.x - px) * toMap;
       let mz = (ap.z - pz) * toMap;
       const dist = Math.hypot(mx, mz);

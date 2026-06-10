@@ -1,11 +1,15 @@
 /**
  * The single analytic source of truth for the world: elevation, biomes,
- * forests and settlements are all pure functions of (x, z). The terrain
- * mesh, object scattering AND physics collision sample the same functions,
- * so what you see is exactly what you hit.
+ * forests, settlements AND airfields are all pure functions of (x, z).
+ * The terrain mesh, object scattering, physics collision and the minimap
+ * all sample the same functions, so what you see is exactly what you hit.
+ *
+ * Airfields come in two flavours: the hand-placed home cluster (AIRPORTS)
+ * and procedural strips seeded on a sparse 12 km cell grid, generated
+ * lazily and deterministically as you explore.
  */
 import { Simplex2 } from '../core/noise';
-import { clamp, lerp, smoothstep } from '../core/math';
+import { clamp, lerp, smoothstep, hash2 } from '../core/math';
 
 export const WATER_LEVEL = 0;
 export const AIRPORT_ELEV = 8;
@@ -32,10 +36,22 @@ export const AIRPORTS: AirfieldDef[] = [
 export const RUNWAY_LENGTH = AIRPORTS[0].length;
 export const RUNWAY_WIDTH = AIRPORTS[0].width;
 
+/** Procedural airfield grid: one candidate per CELL×CELL region. */
+const CELL = 12000;
+const cellKey = (cx: number, cz: number) => (cx + 8192) * 16384 + (cz + 8192);
+
+const FIELD_NAMES = [
+  'KESTREL', 'SADDLEBACK', 'REDSTONE', 'FOXTROT', 'WINDERMERE', 'CALDERA',
+  'JUNIPER', 'HALCYON', 'BASALT', 'THISTLEDOWN', 'MIRAGE', 'OSPREY',
+  'GRANITE', 'LANTERN', 'SOLSTICE', 'PILGRIM', 'COPPERLINE', 'DRIFTWOOD',
+];
+
 export class WorldGen {
   private terra: Simplex2;
   private moist: Simplex2;
   private town: Simplex2;
+  private fieldCache = new Map<number, AirfieldDef | null>();
+  private scratch: AirfieldDef[] = [];
 
   constructor(public readonly seed = 20260610) {
     this.terra = new Simplex2(seed);
@@ -43,8 +59,8 @@ export class WorldGen {
     this.town = new Simplex2(seed ^ 0x70a57);
   }
 
-  /** Terrain elevation in metres at world (x, z). */
-  heightAt(x: number, z: number): number {
+  /** Terrain elevation BEFORE runway flattening (used to site airfields). */
+  baseHeightAt(x: number, z: number): number {
     const t = this.terra;
 
     // gentle domain warp keeps coastlines and ridgelines from looking gridded
@@ -55,7 +71,7 @@ export class WorldGen {
     let c = t.fbm(wx * 0.000095, wz * 0.000095, 3);
     const r0 = Math.hypot(x, z);
     c += smoothstep(9000, 2000, r0) * 0.55; // spawn island boost
-    // …and under every outlying airfield
+    // …and under the hand-placed outlying fields
     for (let i = 1; i < AIRPORTS.length; i++) {
       const ap = AIRPORTS[i];
       const dax = x - ap.x;
@@ -88,8 +104,15 @@ export class WorldGen {
     const sea = e - 0.6;
     e -= 2.4 * Math.exp(-(sea * sea) / 5.76);
 
-    // flatten an elongated apron around each runway (longer along Z)
-    for (const ap of AIRPORTS) {
+    return e;
+  }
+
+  /** Terrain elevation in metres at world (x, z), runways flattened in. */
+  heightAt(x: number, z: number): number {
+    let e = this.baseHeightAt(x, z);
+    const n = this.gatherFields(x, z);
+    for (let i = 0; i < n; i++) {
+      const ap = this.scratch[i];
       const dax = x - ap.x;
       const daz = z - ap.z;
       const outer = ap.length * 1.05 + 800;
@@ -98,9 +121,95 @@ export class WorldGen {
       const flat = smoothstep(outer, ap.length * 0.3 + 250, fr);
       if (flat > 0) e = lerp(e, ap.elev, flat);
     }
-
     return e;
   }
+
+  /* ---------------- airfield grid ---------------- */
+
+  /** The (possibly absent) procedural airfield of a 12 km grid cell. */
+  fieldForCell(cx: number, cz: number): AirfieldDef | null {
+    const key = cellKey(cx, cz);
+    const hit = this.fieldCache.get(key);
+    if (hit !== undefined) return hit;
+    const f = this.makeField(cx, cz);
+    this.fieldCache.set(key, f);
+    return f;
+  }
+
+  private makeField(cx: number, cz: number): AirfieldDef | null {
+    // roughly half the cells host a candidate; terrain rejects (water,
+    // mountains) thin that out further → strips every ~15-25 km of land
+    if (hash2(cx * 3 + 11, cz * 5 - 17) > 0.52) return null;
+
+    const jx = (hash2(cx * 7 + 1, cz * 7 + 3) - 0.5) * 6000;
+    const jz = (hash2(cx * 13 + 5, cz * 11 + 9) - 0.5) * 6000;
+    const ax = cx * CELL + CELL / 2 + jx;
+    const az = cz * CELL + CELL / 2 + jz;
+
+    // stay clear of the hand-placed home cluster
+    for (const ap of AIRPORTS) {
+      if (Math.hypot(ax - ap.x, az - ap.z) < 9000) return null;
+    }
+
+    // must sit on plausibly flat, dry land
+    const elev = this.baseHeightAt(ax, az);
+    if (elev < 4 || elev > 240) return null;
+    if (Math.abs(this.baseHeightAt(ax, az - 800) - elev) > 35) return null;
+    if (Math.abs(this.baseHeightAt(ax, az + 800) - elev) > 35) return null;
+
+    const h3 = hash2(cx * 17 - 3, cz * 19 + 7);
+    const name = `${FIELD_NAMES[Math.floor(hash2(cx + 31, cz - 47) * FIELD_NAMES.length)]} STRIP`;
+    return {
+      name,
+      code: name[0],
+      x: ax,
+      z: az,
+      elev,
+      length: 1100 + Math.floor(h3 * 3) * 280,
+      width: 26,
+      major: false,
+    };
+  }
+
+  /** Every airfield (fixed + procedural) within `radius` of (x, z). */
+  airfieldsNear(x: number, z: number, radius: number, out: AirfieldDef[] = []): AirfieldDef[] {
+    out.length = 0;
+    for (const ap of AIRPORTS) {
+      if (Math.hypot(x - ap.x, z - ap.z) < radius) out.push(ap);
+    }
+    const r = Math.ceil(radius / CELL);
+    const cx = Math.floor(x / CELL);
+    const cz = Math.floor(z / CELL);
+    for (let dz = -r; dz <= r; dz++) {
+      for (let dx = -r; dx <= r; dx++) {
+        const f = this.fieldForCell(cx + dx, cz + dz);
+        if (f && Math.hypot(x - f.x, z - f.z) < radius) out.push(f);
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Fill the scratch list with every airfield whose flatten/paint influence
+   * could reach (x,z): the fixed trio plus the 3×3 surrounding grid cells.
+   * Returns the count. (Scratch is reused — don't hold references.)
+   */
+  private gatherFields(x: number, z: number): number {
+    const s = this.scratch;
+    let n = 0;
+    for (const ap of AIRPORTS) s[n++] = ap;
+    const cx = Math.floor(x / CELL);
+    const cz = Math.floor(z / CELL);
+    for (let dz = -1; dz <= 1; dz++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        const f = this.fieldForCell(cx + dx, cz + dz);
+        if (f) s[n++] = f;
+      }
+    }
+    return n;
+  }
+
+  /* ---------------- sampling helpers ---------------- */
 
   /** Approximate surface normal via central differences. */
   normalAt(x: number, z: number, eps = 4): { x: number; y: number; z: number } {
@@ -134,7 +243,9 @@ export class WorldGen {
 
   /** True if (x,z) sits on any flattened airfield apron. */
   isOnApron(x: number, z: number): boolean {
-    for (const ap of AIRPORTS) {
+    const n = this.gatherFields(x, z);
+    for (let i = 0; i < n; i++) {
+      const ap = this.scratch[i];
       if (Math.hypot(x - ap.x, (z - ap.z) * 0.45) < ap.length * 0.3 + 300) return true;
     }
     return false;
@@ -142,7 +253,9 @@ export class WorldGen {
 
   /** True if (x,z) is on any paved runway strip. */
   isOnRunway(x: number, z: number): boolean {
-    for (const ap of AIRPORTS) {
+    const n = this.gatherFields(x, z);
+    for (let i = 0; i < n; i++) {
+      const ap = this.scratch[i];
       if (
         Math.abs(x - ap.x) < ap.width * 0.5 + 6 &&
         Math.abs(z - ap.z) < ap.length * 0.5 + 30
@@ -187,11 +300,18 @@ export class WorldGen {
       r = lerp(r, 0.42, rock); g = lerp(g, 0.38, rock); b = lerp(b, 0.36, rock);
     }
 
-    // paved runway + apron tint
-    if (this.isOnRunway(x, z)) {
-      r = 0.16; g = 0.17; b = 0.19;
-    } else if (h > WATER_LEVEL + 1) {
-      for (const ap of AIRPORTS) {
+    // paved runway + apron tint (one gather covers both checks)
+    if (h > WATER_LEVEL + 1) {
+      const n = this.gatherFields(x, z);
+      for (let i = 0; i < n; i++) {
+        const ap = this.scratch[i];
+        if (
+          Math.abs(x - ap.x) < ap.width * 0.5 + 6 &&
+          Math.abs(z - ap.z) < ap.length * 0.5 + 30
+        ) {
+          r = 0.16; g = 0.17; b = 0.19;
+          break;
+        }
         const fr = Math.hypot(x - ap.x, (z - ap.z) * 0.45);
         const inner = ap.length * 0.3 + 300;
         if (fr < inner) {

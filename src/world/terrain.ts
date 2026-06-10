@@ -1,14 +1,16 @@
 /**
- * Infinite streamed terrain: square chunks ringed around the aircraft,
- * built incrementally (budgeted per frame) from the analytic heightfield,
- * with distance-based LOD, skirt geometry to hide seams, and per-chunk
- * instanced trees & settlements.
+ * Infinite streamed terrain: square chunks ringed around the aircraft with
+ * distance-based nested LOD and skirt geometry. The heavy generation math
+ * runs in a Web Worker (terrain.worker.ts) so the main thread never hitches
+ * while flying — chunks arrive as transferable typed arrays and only the
+ * cheap GPU upload happens here. Falls back to synchronous generation if
+ * workers are unavailable.
  */
 import * as THREE from 'three';
-import { WorldGen, WATER_LEVEL } from './heightfield';
-import { hash2, makeRng } from '../core/math';
+import { WorldGen } from './heightfield';
+import { buildChunkPayload, ChunkPayload, CHUNK_SIZE } from './terrainBuilder';
 
-export const CHUNK_SIZE = 900;
+export { CHUNK_SIZE };
 
 interface Chunk {
   key: string;
@@ -38,8 +40,6 @@ function buildTreeGeometry(): THREE.BufferGeometry {
 }
 
 function buildHouseGeometry(): THREE.BufferGeometry {
-  // simple gabled house; walls + roof get separate vertex colours,
-  // overall tint comes from per-instance colour
   const parts: THREE.BufferGeometry[] = [];
   const walls = new THREE.BoxGeometry(1, 1, 1);
   walls.translate(0, 0.5, 0);
@@ -64,7 +64,6 @@ function paintGeometry(g: THREE.BufferGeometry, r: number, gr: number, b: number
   g.setAttribute('color', new THREE.BufferAttribute(colors, 3));
 }
 
-/** Minimal non-indexed geometry merge (avoids pulling in example utils). */
 function mergeGeoms(geoms: THREE.BufferGeometry[]): THREE.BufferGeometry {
   const nonIndexed = geoms.map((g) => (g.index ? g.toNonIndexed() : g));
   let vCount = 0;
@@ -87,10 +86,16 @@ function mergeGeoms(geoms: THREE.BufferGeometry[]): THREE.BufferGeometry {
   return out;
 }
 
+const MAX_INFLIGHT = 3;
+
 export class TerrainManager {
   readonly gen: WorldGen;
   private chunks = new Map<string, Chunk>();
   private queue: Array<{ cx: number; cz: number; res: number; priority: number }> = [];
+  private pending = new Map<string, number>(); // key → res being built
+  private results: ChunkPayload[] = [];
+  private worker: Worker | null = null;
+
   private terrainMat: THREE.MeshLambertMaterial;
   private treeMat: THREE.MeshLambertMaterial;
   private houseMat: THREE.MeshLambertMaterial;
@@ -101,6 +106,7 @@ export class TerrainManager {
 
   /** ring radius in chunks; set by quality preset */
   radius = 7;
+  /** payload finalizations (GPU uploads) per frame */
   buildBudget = 2;
   /** extra rings streamed in when flying high, set by quality preset */
   altBonus = 4;
@@ -113,15 +119,35 @@ export class TerrainManager {
     this.houseMat = new THREE.MeshLambertMaterial({ vertexColors: true });
     this.treeGeo = buildTreeGeometry();
     this.houseGeo = buildHouseGeometry();
+
+    try {
+      this.worker = new Worker(new URL('./terrain.worker.ts', import.meta.url), { type: 'module' });
+      this.worker.postMessage({ type: 'init', seed: gen.seed });
+      this.worker.onmessage = (e: MessageEvent<ChunkPayload>) => {
+        this.results.push(e.data);
+      };
+      this.worker.onerror = () => {
+        // worker died — fall back to synchronous builds
+        this.worker = null;
+        this.pending.clear();
+      };
+    } catch {
+      this.worker = null;
+    }
   }
 
   // resolutions nest (56 = 2×28 = 4×14): a coarse chunk's vertices are an
-  // exact subset of the fine grid, so shorelines and ridges don't crawl or
-  // "shrink" when a chunk upgrades LOD as you approach
+  // exact subset of the fine grid, so shorelines and ridges don't crawl
+  // when a chunk upgrades LOD as you approach
   private resForRing(ring: number): number {
     if (ring <= 1) return 56;
     if (ring <= 3) return 28;
     return 14;
+  }
+
+  private scatterForRing(ring: number): 0 | 1 | 2 {
+    if (ring > 4) return 0;
+    return ring <= 2 ? 2 : 1;
   }
 
   /** Current streaming radius (widens at altitude so the view fills out). */
@@ -147,16 +173,34 @@ export class TerrainManager {
       this.requeue(cx, cz);
     }
 
-    // build a few chunks per frame, nearest first
-    for (let i = 0; i < this.buildBudget && this.queue.length > 0; i++) {
+    // upload finished payloads (budgeted — uploads are cheap but not free)
+    for (let i = 0; i < this.buildBudget && this.results.length > 0; i++) {
+      this.finalize(this.results.shift()!);
+    }
+
+    // keep the worker fed, nearest jobs first
+    while (this.pending.size < MAX_INFLIGHT && this.queue.length > 0) {
       const job = this.queue.shift()!;
       const ring = Math.max(Math.abs(job.cx - cx), Math.abs(job.cz - cz));
-      if (ring > this.effRadius()) continue; // stale job
-      this.buildChunk(job.cx, job.cz, this.resForRing(ring));
+      if (ring > this.effRadius()) continue; // stale
+      const key = `${job.cx},${job.cz}`;
+      const res = this.resForRing(ring);
+      const existing = this.chunks.get(key);
+      if (existing && existing.res >= res) continue;
+      if ((this.pending.get(key) ?? 0) >= res) continue;
+      this.pending.set(key, res);
+      const msg = { type: 'build', cx: job.cx, cz: job.cz, res, scatter: this.scatterForRing(ring) };
+      if (this.worker) {
+        this.worker.postMessage(msg);
+      } else {
+        // synchronous fallback: one chunk per frame at most
+        this.results.push(buildChunkPayload(this.gen, job.cx, job.cz, res, this.scatterForRing(ring)));
+        break;
+      }
     }
   }
 
-  /** True when every chunk in the current ring set exists (any LOD). */
+  /** True when every chunk in the given ring set exists (any LOD). */
   isReadyAround(px: number, pz: number, rings = 2): boolean {
     const cx = Math.floor(px / CHUNK_SIZE);
     const cz = Math.floor(pz / CHUNK_SIZE);
@@ -168,7 +212,6 @@ export class TerrainManager {
 
   private requeue(cx: number, cz: number): void {
     const radius = this.effRadius();
-    // drop chunks that fell out of range
     for (const [key, chunk] of this.chunks) {
       const ring = Math.max(Math.abs(chunk.cx - cx), Math.abs(chunk.cz - cz));
       if (ring > radius + 1) {
@@ -177,7 +220,6 @@ export class TerrainManager {
         this.chunks.delete(key);
       }
     }
-    // queue missing or under-detailed chunks
     this.queue.length = 0;
     for (let dz = -radius; dz <= radius; dz++) {
       for (let dx = -radius; dx <= radius; dx++) {
@@ -193,95 +235,30 @@ export class TerrainManager {
     this.queue.sort((a, b) => a.priority - b.priority);
   }
 
-  private buildChunk(cx: number, cz: number, res: number): void {
-    const key = `${cx},${cz}`;
+  /** Wrap a worker payload in GPU objects and swap it into the scene. */
+  private finalize(p: ChunkPayload): void {
+    const key = `${p.cx},${p.cz}`;
+    if ((this.pending.get(key) ?? 0) === p.res) this.pending.delete(key);
+
+    const ring = Math.max(Math.abs(p.cx - this.lastCx), Math.abs(p.cz - this.lastCz));
+    if (ring > this.effRadius() + 1) return; // flew away while it was baking
+
     const old = this.chunks.get(key);
     if (old) {
-      if (old.res >= res) return;
+      if (old.res >= p.res) return;
       this.scene.remove(old.group);
       for (const d of old.disposables) d.dispose();
       this.chunks.delete(key);
     }
 
-    const x0 = cx * CHUNK_SIZE;
-    const z0 = cz * CHUNK_SIZE;
-    const step = CHUNK_SIZE / res;
-    const gen = this.gen;
-
-    // height lattice padded by 2 cells for normal estimation
-    const latN = res + 5;
-    const lat = new Float32Array(latN * latN);
-    for (let j = 0; j < latN; j++) {
-      const wz = z0 + (j - 2) * step;
-      for (let i = 0; i < latN; i++) {
-        lat[j * latN + i] = gen.heightAt(x0 + (i - 2) * step, wz);
-      }
-    }
-    const latH = (ci: number, cj: number) => lat[(cj + 2) * latN + (ci + 2)];
-
-    // vertex grid includes one skirt ring on each side
-    const gridN = res + 3;
-    const vCount = gridN * gridN;
-    const positions = new Float32Array(vCount * 3);
-    const normals = new Float32Array(vCount * 3);
-    const colors = new Float32Array(vCount * 3);
-    const skirtDrop = 14 + step * 0.8;
-    const colorTmp: number[] = [0, 0, 0];
-
-    let v = 0;
-    for (let j = -1; j <= res + 1; j++) {
-      const cj = Math.min(Math.max(j, 0), res);
-      const isSkirtJ = j !== cj;
-      const wz = z0 + cj * step;
-      for (let i = -1; i <= res + 1; i++) {
-        const ci = Math.min(Math.max(i, 0), res);
-        const isSkirt = isSkirtJ || i !== ci;
-        const wx = x0 + ci * step;
-        let h = latH(ci, cj);
-        if (isSkirt) h -= skirtDrop;
-        positions[v * 3] = wx - x0;
-        positions[v * 3 + 1] = h;
-        positions[v * 3 + 2] = wz - z0;
-
-        // normal from lattice central differences (at clamped cell)
-        const nx = latH(ci - 1, cj) - latH(ci + 1, cj);
-        const nz = latH(ci, cj - 1) - latH(ci, cj + 1);
-        const ny = 2 * step;
-        const il = 1 / Math.hypot(nx, ny, nz);
-        normals[v * 3] = nx * il;
-        normals[v * 3 + 1] = ny * il;
-        normals[v * 3 + 2] = nz * il;
-
-        gen.colorAt(wx, wz, latH(ci, cj), 1 - ny * il, colorTmp);
-        colors[v * 3] = colorTmp[0];
-        colors[v * 3 + 1] = colorTmp[1];
-        colors[v * 3 + 2] = colorTmp[2];
-        v++;
-      }
-    }
-
-    const quads = (gridN - 1) * (gridN - 1);
-    const index = new Uint32Array(quads * 6);
-    let q = 0;
-    for (let j = 0; j < gridN - 1; j++) {
-      for (let i = 0; i < gridN - 1; i++) {
-        const a = j * gridN + i;
-        const b = a + 1;
-        const c = a + gridN;
-        const d = c + 1;
-        index[q++] = a; index[q++] = c; index[q++] = b;
-        index[q++] = b; index[q++] = c; index[q++] = d;
-      }
-    }
-
     const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-    geo.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
-    geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-    geo.setIndex(new THREE.BufferAttribute(index, 1));
+    geo.setAttribute('position', new THREE.BufferAttribute(p.positions, 3));
+    geo.setAttribute('normal', new THREE.BufferAttribute(p.normals, 3));
+    geo.setAttribute('color', new THREE.BufferAttribute(p.colors, 3));
+    geo.setIndex(new THREE.BufferAttribute(p.index, 1));
 
     const mesh = new THREE.Mesh(geo, this.terrainMat);
-    mesh.position.set(x0, 0, z0);
+    mesh.position.set(p.cx * CHUNK_SIZE, 0, p.cz * CHUNK_SIZE);
     mesh.receiveShadow = true;
     mesh.matrixAutoUpdate = false;
     mesh.updateMatrix();
@@ -290,97 +267,25 @@ export class TerrainManager {
     group.add(mesh);
     const disposables: Array<{ dispose(): void }> = [geo];
 
-    // scatter vegetation & buildings on nearer rings only
-    const ringNow = Math.max(Math.abs(cx - this.lastCx), Math.abs(cz - this.lastCz));
-    if (ringNow <= 4) {
-      this.scatter(group, disposables, cx, cz, ringNow);
+    const treeCount = p.treeMats.length / 16;
+    if (treeCount > 0) {
+      const im = new THREE.InstancedMesh(this.treeGeo, this.treeMat, treeCount);
+      (im.instanceMatrix.array as Float32Array).set(p.treeMats);
+      im.instanceMatrix.needsUpdate = true;
+      group.add(im);
+      disposables.push({ dispose: () => im.dispose() });
+    }
+    const houseCount = p.houseMats.length / 16;
+    if (houseCount > 0) {
+      const im = new THREE.InstancedMesh(this.houseGeo, this.houseMat, houseCount);
+      (im.instanceMatrix.array as Float32Array).set(p.houseMats);
+      im.instanceMatrix.needsUpdate = true;
+      im.instanceColor = new THREE.InstancedBufferAttribute(p.houseTints, 3);
+      group.add(im);
+      disposables.push({ dispose: () => im.dispose() });
     }
 
     this.scene.add(group);
-    this.chunks.set(key, { key, cx, cz, res, group, disposables });
-  }
-
-  private scatter(
-    group: THREE.Group,
-    disposables: Array<{ dispose(): void }>,
-    cx: number,
-    cz: number,
-    ring: number,
-  ): void {
-    const gen = this.gen;
-    const rng = makeRng(Math.floor(hash2(cx, cz) * 0xffffffff));
-    const x0 = cx * CHUNK_SIZE;
-    const z0 = cz * CHUNK_SIZE;
-
-    const treeTries = ring <= 2 ? 170 : 70;
-    const treeMatrices: THREE.Matrix4[] = [];
-    const houseMatrices: THREE.Matrix4[] = [];
-    const m = new THREE.Matrix4();
-    const pos = new THREE.Vector3();
-    const quat = new THREE.Quaternion();
-    const scl = new THREE.Vector3();
-    const up = new THREE.Vector3(0, 1, 0);
-
-    for (let t = 0; t < treeTries; t++) {
-      const wx = x0 + rng() * CHUNK_SIZE;
-      const wz = z0 + rng() * CHUNK_SIZE;
-      if (gen.isOnApron(wx, wz)) continue;
-      const f = gen.forestAt(wx, wz);
-      if (rng() > f * f) continue;
-      const h = gen.heightAt(wx, wz);
-      if (h < WATER_LEVEL + 3 || h > 460) continue;
-      const n = gen.normalAt(wx, wz, 6);
-      if (n.y < 0.82) continue;
-      const s = 0.8 + rng() * 1.1;
-      pos.set(wx, h - 0.4, wz);
-      quat.setFromAxisAngle(up, rng() * Math.PI * 2);
-      scl.set(s, s * (0.85 + rng() * 0.4), s);
-      m.compose(pos, quat, scl);
-      treeMatrices.push(m.clone());
-    }
-
-    const houseTries = ring <= 2 ? 50 : 16;
-    for (let t = 0; t < houseTries; t++) {
-      const wx = x0 + rng() * CHUNK_SIZE;
-      const wz = z0 + rng() * CHUNK_SIZE;
-      if (gen.isOnApron(wx, wz)) continue;
-      const s = gen.settlementAt(wx, wz);
-      if (rng() > s) continue;
-      const h = gen.heightAt(wx, wz);
-      if (h < WATER_LEVEL + 2.5 || h > 160) continue;
-      const n = gen.normalAt(wx, wz, 8);
-      if (n.y < 0.97) continue;
-      const w = 7 + rng() * 9;
-      const d = 7 + rng() * 9;
-      const ht = 4 + rng() * 7;
-      pos.set(wx, h - 0.3, wz);
-      quat.setFromAxisAngle(up, Math.floor(rng() * 4) * (Math.PI / 2) + (rng() - 0.5) * 0.3);
-      scl.set(w, ht, d);
-      m.compose(pos, quat, scl);
-      houseMatrices.push(m.clone());
-    }
-
-    if (treeMatrices.length > 0) {
-      const im = new THREE.InstancedMesh(this.treeGeo, this.treeMat, treeMatrices.length);
-      treeMatrices.forEach((mat, i) => im.setMatrixAt(i, mat));
-      im.instanceMatrix.needsUpdate = true;
-      im.frustumCulled = true;
-      group.add(im);
-      disposables.push({ dispose: () => im.dispose() });
-    }
-    if (houseMatrices.length > 0) {
-      const im = new THREE.InstancedMesh(this.houseGeo, this.houseMat, houseMatrices.length);
-      const tint = new THREE.Color();
-      houseMatrices.forEach((mat, i) => {
-        im.setMatrixAt(i, mat);
-        const k = 0.7 + rng() * 0.3;
-        tint.setRGB(0.85 * k, 0.8 * k, 0.72 * k);
-        im.setColorAt(i, tint);
-      });
-      im.instanceMatrix.needsUpdate = true;
-      if (im.instanceColor) im.instanceColor.needsUpdate = true;
-      group.add(im);
-      disposables.push({ dispose: () => im.dispose() });
-    }
+    this.chunks.set(key, { key, cx: p.cx, cz: p.cz, res: p.res, group, disposables });
   }
 }

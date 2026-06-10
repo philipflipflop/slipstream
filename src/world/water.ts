@@ -65,9 +65,11 @@ const FRAG = /* glsl */ `
     float sparkle = pow(max(dot(n, hv), 0.0), 36.0) * 0.25 * waveAmt;
     vec3 col = base + (spec + sparkle) * vec3(1.0, 0.92, 0.75);
 
-    float fog = smoothstep(uFogNear, uFogFar, dist);
+    // LINEAR falloff matching THREE.Fog exactly — terrain and water must
+    // fade identically or the boundary between them reads as a "map edge"
+    float fog = clamp((dist - uFogNear) / (uFogFar - uFogNear), 0.0, 1.0);
     col = mix(col, uFogColor, fog);
-    gl_FragColor = vec4(col, 0.93);
+    gl_FragColor = vec4(col, mix(0.93, 1.0, fog));
   }
 `;
 

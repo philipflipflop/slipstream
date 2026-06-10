@@ -1,10 +1,14 @@
 /**
- * Airfield furniture, built per entry in AIRPORTS: painted runway, edge
- * lighting and a windsock everywhere; the major field also gets hangars,
- * a control tower and an apron.
+ * Airfield furniture, built on demand for whichever airfields (hand-placed
+ * or procedural) are near the player: painted runway, edge lighting and a
+ * windsock everywhere; the major home field also gets hangars, a control
+ * tower and an apron. Far fields are disposed again.
  */
 import * as THREE from 'three';
-import { AIRPORTS, AirfieldDef } from './heightfield';
+import { WorldGen, AirfieldDef } from './heightfield';
+
+const BUILD_RADIUS = 14000;
+const DROP_RADIUS = 17000;
 
 function runwayTexture(): THREE.CanvasTexture {
   const c = document.createElement('canvas');
@@ -14,22 +18,17 @@ function runwayTexture(): THREE.CanvasTexture {
 
   ctx.fillStyle = '#2a2c30';
   ctx.fillRect(0, 0, 256, 2048);
-  // weathering streaks
   for (let i = 0; i < 220; i++) {
     ctx.fillStyle = `rgba(${20 + Math.random() * 40},${20 + Math.random() * 40},${22 + Math.random() * 40},0.16)`;
     ctx.fillRect(Math.random() * 256, Math.random() * 2048, 2 + Math.random() * 8, 14 + Math.random() * 80);
   }
   ctx.fillStyle = '#e8e4da';
-  // threshold piano keys, both ends
   for (const yBase of [18, 2048 - 58]) {
     for (let i = 0; i < 8; i++) ctx.fillRect(14 + i * 30, yBase, 18, 40);
   }
-  // centreline dashes
   for (let y = 160; y < 1900; y += 96) ctx.fillRect(122, y, 12, 52);
-  // edge stripes
   ctx.fillRect(4, 0, 5, 2048);
   ctx.fillRect(247, 0, 5, 2048);
-  // runway designators (everything runs 18/36)
   ctx.font = 'bold 84px sans-serif';
   ctx.textAlign = 'center';
   ctx.fillText('36', 128, 188);
@@ -45,32 +44,69 @@ function runwayTexture(): THREE.CanvasTexture {
   return tex;
 }
 
-export class Airport {
-  group = new THREE.Group();
-  private beacon: THREE.Mesh | null = null;
-  private socks: THREE.Mesh[] = [];
+interface BuiltField {
+  def: AirfieldDef;
+  group: THREE.Group;
+  sock: THREE.Mesh;
+  beacon: THREE.Mesh | null;
+}
 
-  constructor(scene: THREE.Scene) {
-    const tex = runwayTexture();
-    for (const ap of AIRPORTS) this.buildField(ap, tex);
-    scene.add(this.group);
+export class Airport {
+  private built = new Map<string, BuiltField>();
+  private tex: THREE.CanvasTexture;
+  private rwMat: THREE.MeshLambertMaterial;
+  private scanTimer = 0;
+  private queryScratch: AirfieldDef[] = [];
+
+  constructor(private scene: THREE.Scene, private gen: WorldGen) {
+    this.tex = runwayTexture();
+    this.rwMat = new THREE.MeshLambertMaterial({ map: this.tex });
   }
 
-  private buildField(ap: AirfieldDef, tex: THREE.CanvasTexture): void {
-    const g = this.group;
+  update(time: number, px: number, pz: number): void {
+    // animate whatever exists
+    for (const f of this.built.values()) {
+      f.sock.rotation.x = Math.sin(time * 2.1) * 0.08;
+      f.sock.rotation.y = Math.sin(time * 0.7) * 0.2;
+      if (f.beacon) {
+        const pulse = (Math.sin(time * 4.2) + 1) * 0.5;
+        (f.beacon.material as THREE.MeshBasicMaterial).color.setRGB(0.45 + pulse, 0.08, 0.08);
+      }
+    }
+
+    // (re)scan for nearby fields twice a second
+    this.scanTimer -= 1;
+    if (this.scanTimer > 0) return;
+    this.scanTimer = 30;
+
+    const near = this.gen.airfieldsNear(px, pz, BUILD_RADIUS, this.queryScratch);
+    for (const def of near) {
+      const key = `${def.x},${def.z}`;
+      if (!this.built.has(key)) this.buildField(def, key);
+    }
+    for (const [key, f] of this.built) {
+      if (Math.hypot(f.def.x - px, f.def.z - pz) > DROP_RADIUS) {
+        this.scene.remove(f.group);
+        f.group.traverse((o) => {
+          const m = o as THREE.Mesh;
+          if (m.isMesh && m.geometry) m.geometry.dispose();
+        });
+        this.built.delete(key);
+      }
+    }
+  }
+
+  private buildField(ap: AirfieldDef, key: string): void {
+    const g = new THREE.Group();
     const E = ap.elev;
 
-    // paved runway with painted markings
-    const rw = new THREE.Mesh(
-      new THREE.PlaneGeometry(ap.width, ap.length),
-      new THREE.MeshLambertMaterial({ map: tex }),
-    );
+    const rw = new THREE.Mesh(new THREE.PlaneGeometry(ap.width, ap.length), this.rwMat);
     rw.rotation.x = -Math.PI / 2;
     rw.position.set(ap.x, E + 0.06, ap.z);
     rw.receiveShadow = true;
     g.add(rw);
 
-    // runway edge lights
+    // edge lights
     const lightGeo = new THREE.SphereGeometry(0.42, 6, 5);
     const edgeMat = new THREE.MeshBasicMaterial({ color: 0xffd070 });
     const n = Math.floor(ap.length / 60);
@@ -101,11 +137,18 @@ export class Airport {
     sock.rotation.z = Math.PI / 2;
     sock.position.set(sockX + 2.75, E + 8.6, sockZ);
     g.add(sock);
-    this.socks.push(sock);
 
-    if (!ap.major) return;
+    let beacon: THREE.Mesh | null = null;
+    if (ap.major) {
+      beacon = this.buildMajorExtras(g, ap);
+    }
 
-    // ---- major-field extras (apron east of the runway) ----
+    this.scene.add(g);
+    this.built.set(key, { def: ap, group: g, sock, beacon });
+  }
+
+  private buildMajorExtras(g: THREE.Group, ap: AirfieldDef): THREE.Mesh {
+    const E = ap.elev;
     const ax = ap.x + 110;
     const az = ap.z - 80;
 
@@ -152,22 +195,13 @@ export class Airport {
     cab.position.set(ap.x + 120, E + 28.5, ap.z + 30);
     cab.castShadow = true;
     g.add(cab);
-    this.beacon = new THREE.Mesh(
+
+    const beacon = new THREE.Mesh(
       new THREE.SphereGeometry(0.9, 8, 6),
       new THREE.MeshBasicMaterial({ color: 0xff4040 }),
     );
-    this.beacon.position.set(ap.x + 120, E + 33, ap.z + 30);
-    g.add(this.beacon);
-  }
-
-  update(time: number): void {
-    if (this.beacon) {
-      const pulse = (Math.sin(time * 4.2) + 1) * 0.5;
-      (this.beacon.material as THREE.MeshBasicMaterial).color.setRGB(0.45 + pulse, 0.08, 0.08);
-    }
-    for (const sock of this.socks) {
-      sock.rotation.x = Math.sin(time * 2.1) * 0.08;
-      sock.rotation.y = Math.sin(time * 0.7) * 0.2;
-    }
+    beacon.position.set(ap.x + 120, E + 33, ap.z + 30);
+    g.add(beacon);
+    return beacon;
   }
 }

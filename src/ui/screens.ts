@@ -26,6 +26,8 @@ export class Screens {
   onMode: (mode: 'free' | 'race') => void = () => {};
   onSettings: () => void = () => {};
   onAnyClick: () => void = () => {};
+  /** kind: 'hdg' | 'alt' | 'spd'; dir: -1 | 1 */
+  onApAdjust: (kind: 'hdg' | 'alt' | 'spd', dir: number) => void = () => {};
 
   private save: SaveData;
   private menuEl!: HTMLDivElement;
@@ -37,6 +39,8 @@ export class Screens {
   private toastEl!: HTMLDivElement;
   private pauseBtn!: HTMLButtonElement;
   private rotateHint!: HTMLDivElement;
+  private apPanel!: HTMLDivElement;
+  private apVals!: { hdg: HTMLElement; alt: HTMLElement; spd: HTMLElement };
   private toastTimer = 0;
   private isTouch: boolean;
 
@@ -73,6 +77,7 @@ export class Screens {
     if (name !== null) {
       this.helpEl.classList.remove('on');
       this.settingsEl.classList.remove('on');
+      this.apPanel.classList.remove('show'); // flight HUD re-shows it if engaged
     }
   }
 
@@ -431,7 +436,66 @@ export class Screens {
 
   /* ---------------- misc ---------------- */
 
+  /** Show/refresh the autopilot target panel (values pre-formatted). */
+  setApPanel(visible: boolean, hdg?: string, alt?: string, spd?: string): void {
+    this.apPanel.classList.toggle('show', visible);
+    if (visible) {
+      if (hdg !== undefined) this.apVals.hdg.textContent = hdg;
+      if (alt !== undefined) this.apVals.alt.textContent = alt;
+      if (spd !== undefined) this.apVals.spd.textContent = spd;
+    }
+  }
+
+  private buildApPanel(): void {
+    this.apPanel = this.el(`
+      <div id="appanel">
+        <div class="ap-title">AUTOPILOT</div>
+        <div class="ap-row" data-k="hdg">
+          <span class="ap-lbl">HDG</span><button data-d="-1">−</button>
+          <span class="ap-val" data-v="hdg">000°</span><button data-d="1">+</button>
+        </div>
+        <div class="ap-row" data-k="alt">
+          <span class="ap-lbl">ALT</span><button data-d="-1">−</button>
+          <span class="ap-val" data-v="alt">0 FT</span><button data-d="1">+</button>
+        </div>
+        <div class="ap-row" data-k="spd">
+          <span class="ap-lbl">SPD</span><button data-d="-1">−</button>
+          <span class="ap-val" data-v="spd">0 KT</span><button data-d="1">+</button>
+        </div>
+      </div>`);
+    document.body.appendChild(this.apPanel);
+    this.apVals = {
+      hdg: this.apPanel.querySelector('[data-v="hdg"]')!,
+      alt: this.apPanel.querySelector('[data-v="alt"]')!,
+      spd: this.apPanel.querySelector('[data-v="spd"]')!,
+    };
+
+    // press = one tick; hold = auto-repeat, like a real AP bug knob
+    this.apPanel.querySelectorAll<HTMLButtonElement>('button').forEach((b) => {
+      const kind = (b.parentElement as HTMLElement).dataset.k as 'hdg' | 'alt' | 'spd';
+      const dir = Number(b.dataset.d);
+      let timer = 0;
+      let repeater = 0;
+      const fire = (): void => this.onApAdjust(kind, dir);
+      b.addEventListener('pointerdown', (e) => {
+        e.preventDefault();
+        fire();
+        timer = window.setTimeout(() => {
+          repeater = window.setInterval(fire, 110);
+        }, 380);
+      });
+      const stop = (): void => {
+        window.clearTimeout(timer);
+        window.clearInterval(repeater);
+      };
+      b.addEventListener('pointerup', stop);
+      b.addEventListener('pointercancel', stop);
+      b.addEventListener('pointerleave', stop);
+    });
+  }
+
   private buildMisc(): void {
+    this.buildApPanel();
     this.toastEl = this.el(`<div id="toast"></div>`);
     document.body.appendChild(this.toastEl);
 

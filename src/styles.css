@@ -269,6 +269,40 @@ html, body {
   #minimap { width: 118px; height: 118px; right: calc(58px + var(--sar)); }
 }
 
+/* ---------- autopilot target panel ---------- */
+#appanel {
+  position: fixed; z-index: 26;
+  top: calc(64px + var(--sat));
+  left: calc(12px + var(--sal));
+  display: none; flex-direction: column; gap: 5px;
+  background: rgba(10, 19, 34, .68);
+  border: 1px solid rgba(255, 179, 64, .55);
+  border-radius: 8px; padding: 8px 10px;
+  backdrop-filter: blur(4px);
+  font-family: var(--font-ui);
+}
+#appanel.show { display: flex; }
+#appanel .ap-title {
+  color: var(--amber); font-size: 10px; font-weight: 700;
+  letter-spacing: .28em; text-align: center;
+}
+#appanel .ap-row { display: flex; align-items: center; gap: 6px; }
+#appanel .ap-lbl { color: var(--fog); font-size: 10px; letter-spacing: .14em; width: 28px; }
+#appanel .ap-val {
+  color: var(--phos); font-weight: 700; font-size: 13px;
+  font-variant-numeric: tabular-nums; width: 64px; text-align: center;
+}
+#appanel button {
+  width: 30px; height: 28px; border-radius: 6px; cursor: pointer;
+  background: #15233d; border: 1px solid var(--line); color: var(--amber-hot);
+  font-family: var(--font-ui); font-weight: 700; font-size: 14px;
+}
+#appanel button:active { background: var(--amber); color: #1d1304; }
+@media (max-height: 520px) {
+  #appanel { top: calc(60px + var(--sat)); padding: 6px 8px; }
+  #appanel button { width: 34px; height: 30px; }
+}
+
 #toast {
   position: fixed; top: calc(74px + var(--sat)); left: 50%; transform: translateX(-50%) translateY(-8px);
   z-index: 40; pointer-events: none; opacity: 0;

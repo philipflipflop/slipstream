@@ -80,8 +80,10 @@ export class Sky {
       uniforms: {
         uSunDir: { value: this.sunDir.clone() },
         uZenith: { value: new THREE.Color(0x2c63b8) },
-        uHorizon: { value: new THREE.Color(0xd9e2ea) },
-        uGroundGlow: { value: new THREE.Color(0x8da4b8) },
+        // horizon band IS the fog colour — fogged geometry then melts
+        // seamlessly into the sky instead of silhouetting a "map edge"
+        uHorizon: { value: this.fogColor.clone() },
+        uGroundGlow: { value: this.fogColor.clone().multiplyScalar(0.82) },
       },
     });
     this.dome = new THREE.Mesh(geo, mat);

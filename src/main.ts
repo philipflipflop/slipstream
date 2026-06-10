@@ -103,7 +103,7 @@ class Game {
 
     this.terrain = new TerrainManager(this.scene, this.gen);
     this.water = new Water(this.scene, this.sky.fogColor, this.sky.sunDir);
-    this.airport = new Airport(this.scene);
+    this.airport = new Airport(this.scene, this.gen);
     this.rings = new RingCourse(this.scene, this.gen);
 
     this.aircraft = new Aircraft(specById(this.save.aircraft));
@@ -190,6 +190,20 @@ class Game {
     };
     s.onRestart = () => { this.sound.uiClick(); this.startFlight(); };
     s.onHangar = () => this.toHangar();
+    s.onApAdjust = (kind, dir) => this.apAdjust(kind, dir);
+
+    // desktop AP bug hotkeys (repeat allowed — hold to slew)
+    window.addEventListener('keydown', (e) => {
+      if (this.state !== 'flying' || !this.autopilot.engaged) return;
+      switch (e.code) {
+        case 'BracketLeft': this.apAdjust('hdg', -1); break;
+        case 'BracketRight': this.apAdjust('hdg', 1); break;
+        case 'PageUp': e.preventDefault(); this.apAdjust('alt', 1); break;
+        case 'PageDown': e.preventDefault(); this.apAdjust('alt', -1); break;
+        case 'Home': e.preventDefault(); this.apAdjust('spd', 1); break;
+        case 'End': e.preventDefault(); this.apAdjust('spd', -1); break;
+      }
+    });
 
     this.input.on('pause', () => {
       if (this.state === 'flying') this.pause();
@@ -241,6 +255,7 @@ class Game {
     const st = this.aircraft.state;
     if (this.autopilot.engaged) {
       this.autopilot.disengage();
+      this.screens.setApPanel(false);
       this.screens.toast('AUTOPILOT OFF');
     } else if (!st.onGround) {
       this.autopilot.engage(st, this.input.controls.throttle);
@@ -249,6 +264,14 @@ class Game {
     } else {
       this.screens.toast('AP UNAVAILABLE ON THE GROUND');
     }
+  }
+
+  /** Slew an autopilot target bug: hdg ±5°, alt ±500 ft, spd ±10 kt. */
+  private apAdjust(kind: 'hdg' | 'alt' | 'spd', dir: number): void {
+    if (!this.autopilot.engaged) return;
+    if (kind === 'hdg') this.autopilot.adjustHeading(dir * 5 * Math.PI / 180);
+    else if (kind === 'alt') this.autopilot.adjustAltitude(dir * 152.4);
+    else this.autopilot.adjustSpeed(dir * 5.144, this.aircraft.spec.vne * 0.92);
   }
 
   private toggleAirbrake(): void {
@@ -413,7 +436,9 @@ class Game {
 
   private frame(): void {
     this.timer.update();
-    const dt = clamp(this.timer.getDelta(), 0, 0.1);
+    // tight clamp: a dropped frame slows the sim a hair instead of letting
+    // the world visibly jump ("rubber banding")
+    const dt = clamp(this.timer.getDelta(), 0, 0.04);
     this.simTime += dt;
     const st = this.aircraft.state;
 
@@ -422,7 +447,7 @@ class Game {
     this.terrain.update(st.pos.x, st.pos.z, agl);
     this.water.update(this.simTime, this.flightCam.camera.position);
     this.sky.update(st.pos);
-    this.airport.update(this.simTime);
+    this.airport.update(this.simTime, st.pos.x, st.pos.z);
 
     // fog breathes out as the streamed radius widens at altitude
     const fog = this.scene.fog as THREE.Fog;
@@ -481,6 +506,10 @@ class Game {
             if (this.aircraft.state.crashed) break;
           }
           this.wasOnGround = this.aircraft.state.onGround;
+          // &ap=1 — engage the autopilot after the fast-forward (smoke test)
+          if (new URLSearchParams(location.search).get('ap') === '1' && !this.aircraft.state.onGround) {
+            this.toggleAutopilot();
+          }
         }
       }
     }
@@ -523,10 +552,18 @@ class Game {
     if (this.autopilot.engaged) {
       if (this.input.hasManualStick()) {
         this.autopilot.disengage();
+        this.screens.setApPanel(false);
         this.screens.toast('AP DISENGAGED — MANUAL INPUT');
       } else {
         this.autopilot.update(this.aircraft.spec, st, this.input.controls, dt);
         this.touch?.setThrottle(this.input.controls.throttle);
+        const hdg = ((this.autopilot.targetHdg * 180 / Math.PI) % 360 + 360) % 360;
+        this.screens.setApPanel(
+          true,
+          `${String(Math.round(hdg)).padStart(3, '0')}°`,
+          `${Math.round(this.autopilot.targetAlt * M_TO_FT / 50) * 50} FT`,
+          `${Math.round(this.autopilot.targetSpd * MS_TO_KT)} KT`,
+        );
       }
     }
 
@@ -644,6 +681,7 @@ class Game {
 
     return {
       airspeed: st.airspeed,
+      groundspeed: Math.hypot(st.vel.x, st.vel.z),
       altitude: st.pos.y,
       radarAlt: st.pos.y - this.gen.heightAt(st.pos.x, st.pos.z),
       heading: st.heading,

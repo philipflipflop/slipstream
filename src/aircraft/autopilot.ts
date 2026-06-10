@@ -29,6 +29,20 @@ export class Autopilot {
     this.engaged = false;
   }
 
+  /* -------- pilot-adjustable targets (real-AP style bug setting) -------- */
+
+  adjustHeading(deltaRad: number): void {
+    this.targetHdg = wrapAngle(this.targetHdg + deltaRad);
+  }
+
+  adjustAltitude(deltaM: number): void {
+    this.targetAlt = clamp(this.targetAlt + deltaM, 80, 12500);
+  }
+
+  adjustSpeed(deltaMs: number, maxMs: number): void {
+    this.targetSpd = clamp(this.targetSpd + deltaMs, 30, maxMs);
+  }
+
   /** Overwrites pitch/roll/yaw/throttle in `c`. Call once per frame. */
   update(spec: AircraftSpec, st: FlightState, c: ControlInputs, dt: number): void {
     if (!this.engaged) return;
