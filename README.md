@@ -98,3 +98,21 @@ thrust model) — the handling differences fall out of the numbers, not scripts.
 - `&ac=vector` — select aircraft (`skylark`, `falcon`, `vector`, `meridian`)
 - `&mode=race` — start in Ring Rush
 - `&touch=1` — force the touch UI on desktop
+- `&apt=1` — spawn at another fixed airfield (1 = Northgate, 2 = Highmoor)
+- `&ap=1` — engage the autopilot after the fast-forward
+
+## Deploying
+
+The site is fully static (`npm run build` → `dist/`) and deploys on Cloudflare Pages
+(build command `npm run build`, output `dist`). Two lockfile rules keep `npm ci` green
+on Cloudflare's **npm 10.9.2**:
+
+1. **After changing dependencies**, regenerate the lockfile with Cloudflare's npm —
+   npm 11 builds a different ideal tree that npm 10 rejects:
+   `npx -y npm@10.9.2 install --package-lock-only --ignore-scripts`
+2. **Before committing, check `git status package-lock.json`.** A cold-cache `npx` run
+   (npm 11) can silently *prune* the top-level `@emnapi/core` / `@emnapi/runtime`
+   entries (~26 lines) that npm 10 requires. If the lockfile shrank and you didn't
+   change dependencies, restore it: `git checkout HEAD -- package-lock.json`.
+   (The test runner calls the local `tsc` directly rather than `npx tsc` for this
+   reason.)
