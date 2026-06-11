@@ -28,7 +28,7 @@ Dependencies are exactly three, pinned: `three`, `vite`, `typescript` (+ `@types
 | Rudder | `Q` / `E` |
 | Throttle | `Shift` / `Ctrl`, presets `1–9`, `0` = idle |
 | Flaps / Gear | `F` & `V` / `G` |
-| Wheel brakes | `Space` (hold) |
+| Wheel brakes / **fire cannon** (airborne, Vector) | `Space` (hold) |
 | Speed brake (jets) | `B` |
 | Autopilot (alt + hdg + speed hold) | `T` — any stick input disengages |
 | Autopilot bugs | on-screen panel, or `[` `]` heading · `PgUp` `PgDn` altitude · `Home` `End` speed |
@@ -51,7 +51,7 @@ speed tape. If `STALL` flashes — nose down, power up.
 | --- | --- |
 | **Skylark ST-2** | Forgiving high-wing trainer. Slow, stable, lands anywhere. |
 | **Falcon Mk.IV** | WWII warbird. Huge roll rate, bites in the stall, tail-dragger. |
-| **Vector V-25** | Delta-wing fighter. Afterburner at 100% throttle, 900+ kt. |
+| **Vector V-25** | Delta-wing fighter. Afterburner at 100% throttle, 900+ kt, internal cannon — pop the target balloons east of Meridian Field. |
 | **Meridian 700** | 16-tonne executive jet. Stately, fast in cruise, needs planning. |
 
 Each one is parameterised physically (mass, wing area, lift slope, stall angle, drag,
@@ -85,7 +85,9 @@ thrust model) — the handling differences fall out of the numbers, not scripts.
   pressure, air density falling with altitude, ground roll with brakes/steering and crash
   detection (sink rate, attitude, slope, water). Per-aircraft G-limits cap pitch authority
   at speed, the fighter has a fly-by-wire alpha limiter, and weathervane stability stiffens
-  with true airspeed so high-Mach flight stays honest.
+  with true airspeed so high-Mach flight stays honest. Engines spool (jets take seconds to
+  wind up), ground effect floats the flare, prop torque wants right rudder on takeoff, and
+  light low-altitude turbulence keeps cruise alive.
 - **Audio** is synthesized WebAudio: prop firing tone, jet spool noise, wind that swells
   with airspeed, stall beeper, touchdown thumps.
 - **Quality presets** (low/med/high) scale pixel ratio, shadows, view distance and cloud

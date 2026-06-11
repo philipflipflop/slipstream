@@ -31,6 +31,7 @@ export interface AircraftSpec {
   gLimit: number;     // rated load factor — caps pitch authority at speed
   airbrakeCd: number; // extra drag with speed brake out (0 = not fitted)
   fbw?: boolean;      // fly-by-wire alpha limiter (no accidental stalls)
+  gun?: boolean;      // internal cannon (hold Space / FIRE in the air)
 
   flapsCl: number;
   flapsCd: number;

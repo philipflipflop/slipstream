@@ -13,6 +13,8 @@ import { Water } from './world/water';
 import { Sky } from './world/sky';
 import { Airport } from './world/airport';
 import { RingCourse, RING_COUNT } from './world/rings';
+import { GunneryRange } from './combat/range';
+import { setTurbulence } from './aircraft/flightModel';
 import { Aircraft } from './aircraft/aircraft';
 import { specById } from './aircraft/catalog';
 import { Autopilot } from './aircraft/autopilot';
@@ -44,6 +46,7 @@ class Game {
   private sky: Sky;
   private airport: Airport;
   private rings: RingCourse;
+  private range: GunneryRange;
 
   // actors & systems
   private aircraft: Aircraft;
@@ -106,6 +109,10 @@ class Game {
     this.water = new Water(this.scene, this.sky.fogColor, this.sky.sunDir);
     this.airport = new Airport(this.scene, this.gen);
     this.rings = new RingCourse(this.scene, this.gen);
+    this.range = new GunneryRange(this.scene, this.gen);
+    this.range.onHit = (hits, total) => this.screens.toast(`TARGET DOWN — ${hits}/${total}`);
+    this.range.onClear = () => this.screens.toast('RANGE CLEAR — ALL TARGETS DESTROYED');
+    setTurbulence(0.7); // light chop down low; tests run with 0
 
     this.aircraft = new Aircraft(specById(this.save.aircraft));
     this.scene.add(this.aircraft.model);
@@ -370,6 +377,7 @@ class Game {
     this.raceTime = 0;
     this.raceRunning = false;
     this.wasOnGround = true;
+    this.range.reset();
     if (this.save.mode === 'race') {
       this.rings.start(this.aircraft.state.pos);
     } else {
@@ -597,6 +605,11 @@ class Game {
 
     this.aircraft.update(this.input.controls, dt, this.heightFn);
 
+    // cannon: brake control doubles as the trigger once airborne
+    const firing =
+      !!this.aircraft.spec.gun && !st.onGround && !st.crashed && this.input.controls.brakes;
+    this.range.update(dt, st, firing);
+
     // landing / takeoff transitions
     if (!st.crashed) {
       if (this.wasOnGround && !st.onGround) {
@@ -727,6 +740,14 @@ class Game {
       stalled: st.stalled,
       afterburner: !!spec.afterburner && c.throttle >= 0.995,
       vne: spec.vne,
+      gun: spec.gun
+        ? {
+            ammo: this.range.ammo,
+            firing: !st.onGround && c.brakes,
+            hits: this.range.hits,
+            targets: this.range.total,
+          }
+        : null,
       race,
     };
   }

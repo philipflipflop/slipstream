@@ -25,6 +25,7 @@ export interface HudData {
   stalled: boolean;
   afterburner: boolean;
   vne: number;        // m/s
+  gun: null | { ammo: number; firing: boolean; hits: number; targets: number };
   race: null | {
     gate: number;
     total: number;
@@ -110,7 +111,38 @@ export class Hud {
     this.altTape(d, compact ? w - 10 : w * 0.87, cy, s, compact, full);
     if (full) this.headingRibbon(d, cx, (compact ? 46 : 30) + this.safeTop(), s, compact);
     this.annunciators(d, cx, cy, s, false);
+    if (d.gun) this.gunBlock(d, cx, cy, s);
     if (d.race) this.raceBlock(d, cx, s, compact);
+  }
+
+  /** Cannon reticle + ammo/targets readout (gun-equipped aircraft only). */
+  private gunBlock(d: HudData, cx: number, cy: number, s: number): void {
+    const gun = d.gun!;
+    const ctx = this.ctx;
+
+    // boresight reticle: ring with stadia ticks, brightens while firing
+    const r = 26 * s;
+    ctx.strokeStyle = gun.firing ? `rgba(${AMBER},0.95)` : this.g(0.55);
+    ctx.beginPath();
+    ctx.arc(cx, cy - 38 * s, r, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.beginPath();
+    for (const a of [0, Math.PI / 2, Math.PI, Math.PI * 1.5]) {
+      ctx.moveTo(cx + Math.cos(a) * (r - 6 * s), cy - 38 * s + Math.sin(a) * (r - 6 * s));
+      ctx.lineTo(cx + Math.cos(a) * (r + 4 * s), cy - 38 * s + Math.sin(a) * (r + 4 * s));
+    }
+    ctx.stroke();
+    ctx.fillStyle = ctx.strokeStyle;
+    ctx.beginPath();
+    ctx.arc(cx, cy - 38 * s, 1.6 * s, 0, Math.PI * 2);
+    ctx.fill();
+
+    // ammo + range score, bottom centre-left
+    ctx.textAlign = 'center';
+    ctx.fillStyle = gun.ammo > 40 ? this.g(0.9) : `rgba(${RED},0.95)`;
+    ctx.fillText(`GUN ${gun.ammo}`, cx - 60 * s, cy + 214 * s);
+    ctx.fillStyle = this.g(0.75);
+    ctx.fillText(`TGT ${gun.hits}/${gun.targets}`, cx + 60 * s, cy + 214 * s);
   }
 
   private safeTop(): number {

@@ -100,6 +100,7 @@ export const CATALOG: AircraftSpec[] = [
     gLimit: 9,
     airbrakeCd: 0.09,
     fbw: true,
+    gun: true,
     flapsCl: 0.4,
     flapsCd: 0.04,
     gearCd: 0.025,

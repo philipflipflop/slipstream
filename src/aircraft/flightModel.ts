@@ -38,6 +38,8 @@ export interface FlightState {
   pitchAngle: number;        // rad
   rollAngle: number;         // rad
   thrustFrac: number;        // realized thrust 0..~1.5 (AB)
+  spool: number;             // realized engine fraction (jets lag the lever)
+  gustT: number;             // turbulence phase accumulator
 }
 
 export function createState(): FlightState {
@@ -57,10 +59,19 @@ export function createState(): FlightState {
     pitchAngle: 0,
     rollAngle: 0,
     thrustFrac: 0,
+    spool: 0,
+    gustT: 0,
   };
 }
 
 const GRAV = 9.81;
+
+/**
+ * Global turbulence intensity (0 = calm). The game sets a light default;
+ * tests run with 0 so physics stay exactly deterministic and assertable.
+ */
+let turbulence = 0;
+export function setTurbulence(t: number): void { turbulence = t; }
 
 // scratch (no per-frame allocation)
 const _qInv = new THREE.Quaternion();
@@ -90,6 +101,15 @@ export function stepFlight(
   const rho = 1.225 * Math.exp(-Math.max(st.pos.y, 0) / 8500);
   const V = st.vel.length();
   st.airspeed = V;
+
+  const groundY = heightAt(st.pos.x, st.pos.z);
+  const agl = st.pos.y - Math.max(groundY, WATER_LEVEL) - spec.gearHeight;
+
+  // ground effect: within roughly a wingspan of the surface the wingtip
+  // vortices are suppressed — induced drag falls away and lift firms up,
+  // which is what makes a real flare float and a heavy takeoff "unstick"
+  const span = Math.sqrt(spec.wingArea * spec.aspect);
+  const ge = clamp(1 - agl / (span * 0.9), 0, 1);
 
   _qInv.copy(st.quat).invert();
   _vLocal.copy(st.vel).applyQuaternion(_qInv);
@@ -123,7 +143,7 @@ export function stepFlight(
       stalled = over > 0.15;
     }
 
-    const cdInduced = (cl * cl) / (Math.PI * 0.72 * spec.aspect);
+    const cdInduced = ((cl * cl) / (Math.PI * 0.72 * spec.aspect)) * (1 - 0.42 * ge * ge);
     const cd =
       spec.cd0 +
       cdInduced +
@@ -135,7 +155,7 @@ export function stepFlight(
 
     // lift ⟂ relative wind, in the plane of symmetry
     _liftDir.crossVectors(_right, _wDir).normalize();
-    const L = qbar * S * cl;
+    const L = qbar * S * cl * (1 + 0.07 * ge * ge);
     const D = qbar * S * cd;
     const Y = qbar * S * -1.1 * slip; // sideforce opposes slip
 
@@ -146,8 +166,14 @@ export function stepFlight(
   st.stalled = stalled && !st.onGround;
 
   // --- thrust ---
-  let thrustMul = inp.throttle;
-  if (spec.afterburner && inp.throttle >= 0.995) thrustMul *= spec.afterburner;
+  // engines spool: a turbojet takes seconds to wind from idle to full power
+  // while a prop responds almost immediately — the lever commands, the
+  // spool delivers
+  const spoolUp = spec.engine === 'jet' ? 0.5 : 2.4;
+  const spoolDown = spec.engine === 'jet' ? 0.65 : 2.8;
+  st.spool += clamp(inp.throttle - st.spool, -spoolDown * dt, spoolUp * dt);
+  let thrustMul = st.spool;
+  if (spec.afterburner && inp.throttle >= 0.995 && st.spool > 0.96) thrustMul *= spec.afterburner;
   const speedLoss = 1 - spec.propFalloff * clamp(V / spec.vne, 0, 1);
   const altLoss = spec.engine === 'jet' ? 0.45 + 0.55 * (rho / 1.225) : 0.6 + 0.4 * (rho / 1.225);
   const T = spec.maxThrust * thrustMul * speedLoss * altLoss;
@@ -203,8 +229,29 @@ export function stepFlight(
     -inp.roll * spec.rollRate * 5.8 * eff * vDamp -
     av.z * (5.2 * eff * vDamp + 0.4);
 
+  // prop torque + slipstream/P-factor: at high power and low airspeed the
+  // propeller rolls the airframe left and the corkscrewing slipstream yaws
+  // the nose left — a full-power takeoff wants a touch of right rudder.
+  // Faded out by ~45 m/s so cruise stays hands-off trimmable.
+  if (spec.engine === 'prop' && T > 0) {
+    const lowV = clamp(1 - V / 45, 0, 1);
+    aaZ += (T / spec.mass) * 0.05 * lowV;
+    aaY += (T / spec.mass) * 0.04 * lowV;
+  }
+
+  // light turbulence: smooth deterministic gusts, strongest down low where
+  // thermals and terrain rotor live, fading out by ~2.5 km
+  if (turbulence > 0 && !st.onGround) {
+    st.gustT += dt;
+    const g = st.gustT;
+    const ti = turbulence * (0.35 + 0.65 * clamp(1 - st.pos.y / 2500, 0, 1));
+    aaX += (Math.sin(g * 2.17) + Math.sin(g * 5.3 + 2.0)) * 0.05 * ti;
+    aaZ += (Math.sin(g * 1.73 + 4.0) + Math.sin(g * 4.1 + 1.0)) * 0.085 * ti;
+    aaY += Math.sin(g * 1.31 + 2.6) * 0.028 * ti;
+    st.vel.y += Math.sin(g * 2.43 + 0.7) * 0.5 * ti * dt;
+  }
+
   // --- ground interaction ---
-  const groundY = heightAt(st.pos.x, st.pos.z);
   const surfaceY = Math.max(groundY, WATER_LEVEL - 0.5);
   const contactY = surfaceY + spec.gearHeight;
 
@@ -323,4 +370,6 @@ export function spawnOnRunway(
   st.crashReason = '';
   st.stalled = false;
   st.gForce = 1;
+  st.spool = 0;
+  st.gustT = 0;
 }
