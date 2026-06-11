@@ -157,14 +157,20 @@ export class TerrainManager {
     }
   }
 
+  // how far out each resolution reaches, in rings; set by quality preset
+  fineRing = 3;
+  midRing = 5;
+  fineRingHigh = 5;
+  midRingHigh = 8;
+
   // resolutions nest (56 = 2×28 = 4×14): a coarse chunk's vertices are an
   // exact subset of the fine grid, so shorelines and ridges don't crawl when
   // a chunk upgrades LOD — and geomorph starts can reproduce the coarse
   // surface exactly. At altitude the whole area below is in plain view, so
   // the fine rings reach further out.
   private resForRing(ring: number): number {
-    if (ring <= (this.highAlt ? 3 : 2)) return 56;
-    if (ring <= (this.highAlt ? 6 : 4)) return 28;
+    if (ring <= (this.highAlt ? this.fineRingHigh : this.fineRing)) return 56;
+    if (ring <= (this.highAlt ? this.midRingHigh : this.midRing)) return 28;
     return 14;
   }
 

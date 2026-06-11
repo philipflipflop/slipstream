@@ -310,16 +310,21 @@ class Game {
       this.terrain.buildBudget = 2;
     }
     this.terrain.altBonus = q === 'low' ? 2 : 4;
-    // far horizon shell density and how far the fog may open up at altitude
-    // (cap stays well inside the shell so its edge is never visible)
+    // far horizon shell density, how far each LOD reaches (in rings), and
+    // how far the fog may open up at altitude (cap stays well inside the
+    // shell so its edge is never visible)
+    const t = this.terrain;
     if (q === 'low') {
-      this.terrain.configureFar(80, 600); // 48 km shell
+      t.configureFar(80, 600); // 48 km shell
+      [t.fineRing, t.midRing, t.fineRingHigh, t.midRingHigh] = [2, 4, 3, 5];
       this.fogFarCap = 14000;
     } else if (q === 'medium') {
-      this.terrain.configureFar(150, 360); // 54 km shell
+      t.configureFar(150, 360); // 54 km shell
+      [t.fineRing, t.midRing, t.fineRingHigh, t.midRingHigh] = [3, 5, 4, 6];
       this.fogFarCap = 20000;
     } else {
-      this.terrain.configureFar(210, 300); // 63 km shell
+      t.configureFar(210, 300); // 63 km shell
+      [t.fineRing, t.midRing, t.fineRingHigh, t.midRingHigh] = [3, 5, 5, 8];
       this.fogFarCap = 26000;
     }
     const view = this.terrain.radius * CHUNK_SIZE;
@@ -455,9 +460,13 @@ class Game {
     this.simTime += dt;
     const st = this.aircraft.state;
 
-    // stream the world around the player (also while in menu, for the view)
+    // stream the world around a point led ahead of the aircraft (~3 s of
+    // travel, capped at 3 chunks): chunks in the direction of flight reach
+    // full resolution before you arrive, not as you cross into each ring
     const agl = st.pos.y - this.gen.heightAt(st.pos.x, st.pos.z);
-    this.terrain.update(st.pos.x, st.pos.z, agl, dt);
+    const leadX = st.pos.x + clamp(st.vel.x * 3, -2700, 2700);
+    const leadZ = st.pos.z + clamp(st.vel.z * 3, -2700, 2700);
+    this.terrain.update(leadX, leadZ, agl, dt);
 
     // fog opens out with the streamed radius and, above that, with altitude:
     // the far shell carries the horizon out to ~30 km, so the higher you fly
