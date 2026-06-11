@@ -73,7 +73,10 @@ thrust model) — the handling differences fall out of the numbers, not scripts.
   seeded simplex). The render mesh, tree/settlement scattering *and* collision all sample
   the same function, so what you see is exactly what you hit. Chunk generation runs in a
   **Web Worker** — payloads arrive as transferable typed arrays, so the main thread never
-  hitches while streaming nested-LOD chunks around the aircraft. Beneath the chunk ring a
+  hitches while streaming nested-LOD chunks around the aircraft. Every LOD swap
+  **geomorphs**: a chunk's vertices start on the exact surface they replace (the coarser
+  chunk, or the horizon shell) and swell to full detail over a second, so terrain never
+  pops. Beneath the chunk ring a
   single coarse **horizon shell** (~60 km of the same heightfield, built as a conservative
   lower envelope) carries the terrain to the horizon; the fog opens up with altitude, so
   from 10,000 ft you see fading coastlines instead of the edge of the streamed grid.

@@ -16,10 +16,39 @@ export interface ChunkPayload {
   positions: Float32Array;
   normals: Float32Array;
   colors: Float32Array;
+  /** per-vertex geomorph start height: the exact surface this chunk replaces */
+  baseY: Float32Array;
   index: Uint32Array;
   treeMats: Float32Array;   // 16 floats per instance (column-major)
   houseMats: Float32Array;
   houseTints: Float32Array; // 3 floats per instance
+}
+
+/**
+ * The far shell's vertex height at lattice point (gx·cell, gz·cell): a
+ * conservative lower envelope — min of the centre and four half-step samples,
+ * dropped 6 m. buildFarPayload and chunk geomorph starts share this one rule,
+ * so a brand-new chunk at morph 0 sits exactly on the rendered shell surface.
+ */
+export function shellVertexHeight(gen: WorldGen, gx: number, gz: number, cell: number): number {
+  const hs = cell / 2;
+  const wx = gx * cell;
+  const wz = gz * cell;
+  return Math.min(
+    gen.heightAt(wx, wz),
+    gen.heightAt(wx - hs, wz), gen.heightAt(wx + hs, wz),
+    gen.heightAt(wx, wz - hs), gen.heightAt(wx, wz + hs),
+  ) - 6;
+}
+
+/**
+ * Interpolate within a quad split along the b–c diagonal — the same
+ * triangulation every mesh here uses — so interpolated geomorph starts are
+ * exactly coplanar with the rendered coarse surface.
+ */
+function splitLerp(ha: number, hb: number, hc: number, hd: number, u: number, v: number): number {
+  if (u + v <= 1) return ha + (hb - ha) * u + (hc - ha) * v;
+  return hd + (hb - hd) * (1 - v) + (hc - hd) * (1 - u);
 }
 
 /** Write T·R_y(θ)·S into out at offset (column-major, three.js layout). */
@@ -42,6 +71,8 @@ export function buildChunkPayload(
   cz: number,
   res: number,
   scatterLevel: 0 | 1 | 2,
+  prevRes = 0,
+  shellCell = 450,
 ): ChunkPayload {
   const x0 = cx * CHUNK_SIZE;
   const z0 = cz * CHUNK_SIZE;
@@ -58,12 +89,47 @@ export function buildChunkPayload(
   }
   const latH = (ci: number, cj: number) => lat[(cj + 2) * latN + (ci + 2)];
 
+  // geomorph start surface: either the coarser chunk being replaced
+  // (LOD grids nest, so its surface can be reproduced exactly), or the far
+  // shell for a brand-new chunk (+0.5 m so morph start isn't coplanar)
+  const shellCache = new Map<string, number>();
+  const shellH = (gx: number, gz: number): number => {
+    const key = `${gx},${gz}`;
+    let h = shellCache.get(key);
+    if (h === undefined) {
+      h = shellVertexHeight(gen, gx, gz, shellCell);
+      shellCache.set(key, h);
+    }
+    return h;
+  };
+  const k = prevRes > 0 ? res / prevRes : 0;
+  const startH = (ci: number, cj: number): number => {
+    if (prevRes > 0) {
+      const pi = Math.min(Math.floor(ci / k), prevRes - 1);
+      const pj = Math.min(Math.floor(cj / k), prevRes - 1);
+      return splitLerp(
+        latH(pi * k, pj * k), latH((pi + 1) * k, pj * k),
+        latH(pi * k, (pj + 1) * k), latH((pi + 1) * k, (pj + 1) * k),
+        ci / k - pi, cj / k - pj,
+      );
+    }
+    const wx = x0 + ci * step;
+    const wz = z0 + cj * step;
+    const gx = Math.floor(wx / shellCell);
+    const gz = Math.floor(wz / shellCell);
+    return splitLerp(
+      shellH(gx, gz), shellH(gx + 1, gz), shellH(gx, gz + 1), shellH(gx + 1, gz + 1),
+      wx / shellCell - gx, wz / shellCell - gz,
+    ) + 0.5;
+  };
+
   // vertex grid includes one skirt ring on each side
   const gridN = res + 3;
   const vCount = gridN * gridN;
   const positions = new Float32Array(vCount * 3);
   const normals = new Float32Array(vCount * 3);
   const colors = new Float32Array(vCount * 3);
+  const baseY = new Float32Array(vCount);
   const skirtDrop = 14 + step * 0.8;
   const colorTmp: number[] = [0, 0, 0];
 
@@ -77,6 +143,7 @@ export function buildChunkPayload(
       const isSkirt = isSkirtJ || i !== ci;
       const wx = x0 + ci * step;
       let h = latH(ci, cj);
+      baseY[v] = startH(ci, cj) - (isSkirt ? skirtDrop : 0);
       if (isSkirt) h -= skirtDrop;
       positions[v * 3] = wx - x0;
       positions[v * 3 + 1] = h;
@@ -164,7 +231,7 @@ export function buildChunkPayload(
 
   return {
     cx, cz, res,
-    positions, normals, colors, index,
+    positions, normals, colors, baseY, index,
     treeMats: Float32Array.from(treeList),
     houseMats: Float32Array.from(houseList),
     houseTints: Float32Array.from(tintList),
@@ -174,7 +241,7 @@ export function buildChunkPayload(
 /** The transferable buffers of a payload (for zero-copy postMessage). */
 export function payloadTransfers(p: ChunkPayload): ArrayBuffer[] {
   return [
-    p.positions.buffer, p.normals.buffer, p.colors.buffer, p.index.buffer,
+    p.positions.buffer, p.normals.buffer, p.colors.buffer, p.baseY.buffer, p.index.buffer,
     p.treeMats.buffer, p.houseMats.buffer, p.houseTints.buffer,
   ] as ArrayBuffer[]; // typed arrays here are always plain ArrayBuffer-backed
 }
@@ -211,6 +278,10 @@ export function buildFarPayload(
 ): FarPayload {
   const n = cells + 1;
   const half = (cells * cellSize) / 2;
+  // the lattice origin lands on whole cell multiples (recentre snapping
+  // guarantees it), so shellVertexHeight grid coords are exact integers
+  const gx0 = Math.round((ox - half) / cellSize);
+  const gz0 = Math.round((oz - half) / cellSize);
   const lat = new Float32Array(n * n);
   for (let j = 0; j < n; j++) {
     const wz = oz - half + j * cellSize;
@@ -224,7 +295,6 @@ export function buildFarPayload(
   const positions = new Float32Array(n * n * 3);
   const normals = new Float32Array(n * n * 3);
   const colors = new Float32Array(n * n * 3);
-  const hs = cellSize / 2;
   const colorTmp: number[] = [0, 0, 0];
 
   let v = 0;
@@ -233,11 +303,7 @@ export function buildFarPayload(
     for (let i = 0; i < n; i++) {
       const wx = ox - half + i * cellSize;
       const hc = lat[j * n + i];
-      const h = Math.min(
-        hc,
-        gen.heightAt(wx - hs, wz), gen.heightAt(wx + hs, wz),
-        gen.heightAt(wx, wz - hs), gen.heightAt(wx, wz + hs),
-      ) - 6;
+      const h = shellVertexHeight(gen, gx0 + i, gz0 + j, cellSize);
       positions[v * 3] = wx - ox;
       positions[v * 3 + 1] = h;
       positions[v * 3 + 2] = wz - oz;

@@ -128,6 +128,9 @@ export class TerrainManager {
   private farCells = 140;
   private farCellSize = 450;
 
+  // running geomorph animations (one per freshly finalized chunk)
+  private morphs: Array<{ u: { value: number }; t: number }> = [];
+
   constructor(private scene: THREE.Scene, gen: WorldGen) {
     this.gen = gen;
     this.terrainMat = new THREE.MeshLambertMaterial({ vertexColors: true });
@@ -155,11 +158,13 @@ export class TerrainManager {
   }
 
   // resolutions nest (56 = 2×28 = 4×14): a coarse chunk's vertices are an
-  // exact subset of the fine grid, so shorelines and ridges don't crawl
-  // when a chunk upgrades LOD as you approach
+  // exact subset of the fine grid, so shorelines and ridges don't crawl when
+  // a chunk upgrades LOD — and geomorph starts can reproduce the coarse
+  // surface exactly. At altitude the whole area below is in plain view, so
+  // the fine rings reach further out.
   private resForRing(ring: number): number {
-    if (ring <= 1) return 56;
-    if (ring <= 3) return 28;
+    if (ring <= (this.highAlt ? 3 : 2)) return 56;
+    if (ring <= (this.highAlt ? 6 : 4)) return 28;
     return 14;
   }
 
@@ -174,9 +179,20 @@ export class TerrainManager {
   }
 
   /** Call every frame with the player position + height above ground. */
-  update(px: number, pz: number, agl = 0): void {
+  update(px: number, pz: number, agl = 0, dt = 0.016): void {
     const cx = Math.floor(px / CHUNK_SIZE);
     const cz = Math.floor(pz / CHUNK_SIZE);
+
+    // advance geomorphs: fresh chunks swell from the surface they replaced
+    for (let i = this.morphs.length - 1; i >= 0; i--) {
+      const m = this.morphs[i];
+      m.t = Math.min(m.t + dt / 1.1, 1);
+      m.u.value = m.t * m.t * (3 - 2 * m.t);
+      if (m.t >= 1) {
+        this.morphs[i] = this.morphs[this.morphs.length - 1];
+        this.morphs.pop();
+      }
+    }
 
     // hysteresis so the radius doesn't flap around the threshold
     const wasHigh = this.highAlt;
@@ -196,22 +212,11 @@ export class TerrainManager {
       this.finalize(this.results.shift()!);
     }
 
-    // far shell: swap in a freshly baked horizon, recentre when we drift
+    // far shell: swap in a freshly baked horizon
     if (this.farResult) {
       const p = this.farResult;
       this.farResult = null;
       this.finalizeFar(p);
-    }
-    if (!this.farPending && (Math.abs(px - this.farOx) > 4500 || Math.abs(pz - this.farOz) > 4500)) {
-      const snap = this.farSnap();
-      const ox = Math.round(px / snap) * snap;
-      const oz = Math.round(pz / snap) * snap;
-      this.farPending = true;
-      if (this.worker) {
-        this.worker.postMessage({ type: 'far', ox, oz, cells: this.farCells, cellSize: this.farCellSize });
-      } else {
-        this.farResult = buildFarPayload(this.gen, ox, oz, this.farCells, this.farCellSize);
-      }
     }
 
     // keep the worker fed, nearest jobs first
@@ -225,13 +230,33 @@ export class TerrainManager {
       if (existing && existing.res >= res) continue;
       if ((this.pending.get(key) ?? 0) >= res) continue;
       this.pending.set(key, res);
-      const msg = { type: 'build', cx: job.cx, cz: job.cz, res, scatter: this.scatterForRing(ring) };
+      const prev = existing?.res ?? 0;
+      const shellCell = this.farGeo ? this.farGeoCell : this.farCellSize;
+      const scatter = this.scatterForRing(ring);
       if (this.worker) {
-        this.worker.postMessage(msg);
+        this.worker.postMessage({ type: 'build', cx: job.cx, cz: job.cz, res, scatter, prev, shellCell });
       } else {
         // synchronous fallback: one chunk per frame at most
-        this.results.push(buildChunkPayload(this.gen, job.cx, job.cz, res, this.scatterForRing(ring)));
+        this.results.push(buildChunkPayload(this.gen, job.cx, job.cz, res, scatter, prev, shellCell));
         break;
+      }
+    }
+
+    // recentre the horizon shell only when no chunk work is outstanding —
+    // it's the biggest single job and must never delay nearby terrain
+    // (the queue drains between chunk crossings even at fighter speeds)
+    if (
+      !this.farPending && this.pending.size === 0 && this.queue.length === 0 &&
+      (Math.abs(px - this.farOx) > 4500 || Math.abs(pz - this.farOz) > 4500)
+    ) {
+      const snap = this.farSnap();
+      const ox = Math.round(px / snap) * snap;
+      const oz = Math.round(pz / snap) * snap;
+      this.farPending = true;
+      if (this.worker) {
+        this.worker.postMessage({ type: 'far', ox, oz, cells: this.farCells, cellSize: this.farCellSize });
+      } else {
+        this.farResult = buildFarPayload(this.gen, ox, oz, this.farCells, this.farCellSize);
       }
     }
   }
@@ -373,6 +398,27 @@ export class TerrainManager {
     (this.farGeo.index as THREE.BufferAttribute).needsUpdate = true;
   }
 
+  /**
+   * A Lambert clone whose vertices blend from baseY (the surface this chunk
+   * replaces — coarser LOD or the far shell) up to their true heights as
+   * uMorph runs 0→1: LOD swaps read as a smooth swell instead of a pop.
+   * All clones share one GL program via the custom cache key.
+   */
+  private makeChunkMat(u: { value: number }): THREE.MeshLambertMaterial {
+    const mat = new THREE.MeshLambertMaterial({ vertexColors: true });
+    mat.onBeforeCompile = (sh) => {
+      sh.uniforms.uMorph = u;
+      sh.vertexShader =
+        'attribute float baseY;\nuniform float uMorph;\n' +
+        sh.vertexShader.replace(
+          '#include <begin_vertex>',
+          '#include <begin_vertex>\n\ttransformed.y = mix(baseY, position.y, uMorph);',
+        );
+    };
+    mat.customProgramCacheKey = () => 'terrain-geomorph';
+    return mat;
+  }
+
   /** Wrap a worker payload in GPU objects and swap it into the scene. */
   private finalize(p: ChunkPayload): void {
     const key = `${p.cx},${p.cz}`;
@@ -393,9 +439,14 @@ export class TerrainManager {
     geo.setAttribute('position', new THREE.BufferAttribute(p.positions, 3));
     geo.setAttribute('normal', new THREE.BufferAttribute(p.normals, 3));
     geo.setAttribute('color', new THREE.BufferAttribute(p.colors, 3));
+    geo.setAttribute('baseY', new THREE.BufferAttribute(p.baseY, 1));
     geo.setIndex(new THREE.BufferAttribute(p.index, 1));
 
-    const mesh = new THREE.Mesh(geo, this.terrainMat);
+    const morph = { u: { value: 0 }, t: 0 };
+    this.morphs.push(morph);
+    const mat = this.makeChunkMat(morph.u);
+
+    const mesh = new THREE.Mesh(geo, mat);
     mesh.position.set(p.cx * CHUNK_SIZE, 0, p.cz * CHUNK_SIZE);
     mesh.receiveShadow = true;
     mesh.matrixAutoUpdate = false;
@@ -403,7 +454,7 @@ export class TerrainManager {
 
     const group = new THREE.Group();
     group.add(mesh);
-    const disposables: Array<{ dispose(): void }> = [geo];
+    const disposables: Array<{ dispose(): void }> = [geo, mat];
 
     const treeCount = p.treeMats.length / 16;
     if (treeCount > 0) {

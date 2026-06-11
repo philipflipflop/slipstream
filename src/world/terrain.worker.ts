@@ -6,7 +6,10 @@ import { WorldGen } from './heightfield';
 import { buildChunkPayload, payloadTransfers, buildFarPayload, farTransfers } from './terrainBuilder';
 
 interface InitMsg { type: 'init'; seed: number }
-interface BuildMsg { type: 'build'; cx: number; cz: number; res: number; scatter: 0 | 1 | 2 }
+interface BuildMsg {
+  type: 'build'; cx: number; cz: number; res: number; scatter: 0 | 1 | 2;
+  prev: number; shellCell: number;
+}
 interface FarMsg { type: 'far'; ox: number; oz: number; cells: number; cellSize: number }
 type Msg = InitMsg | BuildMsg | FarMsg;
 
@@ -24,6 +27,6 @@ self.onmessage = (e: MessageEvent<Msg>) => {
     (self as unknown as Worker).postMessage(p, farTransfers(p));
     return;
   }
-  const payload = buildChunkPayload(gen, msg.cx, msg.cz, msg.res, msg.scatter);
+  const payload = buildChunkPayload(gen, msg.cx, msg.cz, msg.res, msg.scatter, msg.prev, msg.shellCell);
   (self as unknown as Worker).postMessage(payload, payloadTransfers(payload));
 };

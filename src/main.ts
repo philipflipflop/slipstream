@@ -316,10 +316,10 @@ class Game {
       this.terrain.configureFar(80, 600); // 48 km shell
       this.fogFarCap = 14000;
     } else if (q === 'medium') {
-      this.terrain.configureFar(120, 450); // 54 km shell
+      this.terrain.configureFar(150, 360); // 54 km shell
       this.fogFarCap = 20000;
     } else {
-      this.terrain.configureFar(140, 450); // 63 km shell
+      this.terrain.configureFar(210, 300); // 63 km shell
       this.fogFarCap = 26000;
     }
     const view = this.terrain.radius * CHUNK_SIZE;
@@ -457,7 +457,7 @@ class Game {
 
     // stream the world around the player (also while in menu, for the view)
     const agl = st.pos.y - this.gen.heightAt(st.pos.x, st.pos.z);
-    this.terrain.update(st.pos.x, st.pos.z, agl);
+    this.terrain.update(st.pos.x, st.pos.z, agl, dt);
 
     // fog opens out with the streamed radius and, above that, with altitude:
     // the far shell carries the horizon out to ~30 km, so the higher you fly
@@ -506,7 +506,8 @@ class Game {
 
   private bootFrame(): void {
     this.menuFrame(0.016);
-    const ready = this.terrain.isReadyAround(0, 0, 1) || this.simTime > 8;
+    const st = this.aircraft.state;
+    const ready = this.terrain.isReadyAround(st.pos.x, st.pos.z, 1) || this.simTime > 8;
     if (ready) {
       document.getElementById('boot')?.classList.add('gone');
       this.state = 'menu';
