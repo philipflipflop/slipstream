@@ -8,7 +8,8 @@ import { clamp } from '../core/math';
 
 type SimEvent =
   | 'camera' | 'pause' | 'gear' | 'flaps' | 'map' | 'reset'
-  | 'autopilot' | 'airbrake' | 'hud';
+  | 'autopilot' | 'airbrake' | 'hud'
+  | 'nav' | 'navzoomin' | 'navzoomout';
 
 export class InputManager {
   readonly controls: ControlInputs = {
@@ -42,6 +43,9 @@ export class InputManager {
         case 'KeyB': this.emit('airbrake'); break;
         case 'KeyH': this.emit('hud'); break;
         case 'KeyM': this.emit('map'); break;
+        case 'KeyN': this.emit('nav'); break;
+        case 'Comma': this.emit('navzoomout'); break;
+        case 'Period': this.emit('navzoomin'); break;
         case 'Escape': case 'KeyP': this.emit('pause'); break;
         case 'Digit1': case 'Digit2': case 'Digit3': case 'Digit4': case 'Digit5':
         case 'Digit6': case 'Digit7': case 'Digit8': case 'Digit9':

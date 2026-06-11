@@ -25,15 +25,27 @@ console.log('  ✓ generation is fully deterministic');
 for (const f of found) {
   const h = gen.heightAt(f.x, f.z);
   assert.ok(Math.abs(h - f.elev) < 0.5, `${f.name}: terrain ${h.toFixed(1)} vs ${f.elev.toFixed(1)}`);
-  const hEnd = gen.heightAt(f.x, f.z - f.length / 2 + 40);
+  // threshold lies along the runway's own heading now
+  const d = f.length / 2 - 40;
+  const hEnd = gen.heightAt(f.x + f.sinH * d, f.z - f.cosH * d);
   assert.ok(Math.abs(hEnd - f.elev) < 0.5, `${f.name}: threshold not flat`);
   assert.ok(f.elev > 3, `${f.name}: too close to the water`);
   assert.ok(gen.isOnRunway(f.x, f.z), `${f.name}: centre not paved`);
+  // paving follows the heading: a point down the centreline is paved, a
+  // point the same distance perpendicular is not
+  const a = d * 0.8;
+  assert.ok(gen.isOnRunway(f.x + f.sinH * a, f.z - f.cosH * a), `${f.name}: centreline not paved`);
+  assert.ok(!gen.isOnRunway(f.x + f.cosH * a, f.z + f.sinH * a), `${f.name}: paved sideways?!`);
   for (const ap of AIRPORTS) {
     assert.ok(Math.hypot(f.x - ap.x, f.z - ap.z) > 8500, `${f.name} crowds ${ap.name}`);
   }
 }
-console.log('  ✓ all strips flat, paved, on land, clear of the home cluster');
+console.log('  ✓ all strips flat, paved along their own headings, on land');
+
+// runway directions vary across the world
+const headings = new Set(found.map((f) => Math.round(f.heading * 100)));
+assert.ok(headings.size >= 3, `only ${headings.size} distinct runway headings in 200 km`);
+console.log(`  ✓ ${headings.size} distinct runway headings among ${found.length} strips`);
 
 // minimum spacing between any two strips
 let minD = Infinity;

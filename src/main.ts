@@ -15,6 +15,7 @@ import { Airport } from './world/airport';
 import { RingCourse, RING_COUNT } from './world/rings';
 import { GunneryRange } from './combat/range';
 import { setTurbulence } from './aircraft/flightModel';
+import { Route, bearingTo, distanceTo } from './nav/route';
 import { Aircraft } from './aircraft/aircraft';
 import { specById } from './aircraft/catalog';
 import { Autopilot } from './aircraft/autopilot';
@@ -47,6 +48,7 @@ class Game {
   private airport: Airport;
   private rings: RingCourse;
   private range: GunneryRange;
+  private route = new Route();
 
   // actors & systems
   private aircraft: Aircraft;
@@ -120,6 +122,13 @@ class Game {
 
     this.flightCam = new FlightCamera(window.innerWidth / window.innerHeight);
     this.minimap = new Minimap(this.gen);
+    this.minimap.onWaypoint = (wp) => {
+      if (!wp.name) wp.name = `WP${this.route.waypoints.length + 1}`;
+      this.route.add(wp);
+    };
+    this.minimap.onUndo = () => this.route.removeLast();
+    this.minimap.onClear = () => { this.route.clear(); this.screens.toast('FLIGHT PLAN CLEARED'); };
+    this.minimap.onEngage = () => this.toggleNavEngage();
     this.screens = new Screens(this.save, touch);
     if (touch) this.touch = new TouchControls(this.input);
     this.wireCameraPointer();
@@ -214,9 +223,13 @@ class Game {
     });
 
     this.input.on('pause', () => {
+      if (this.minimap.expanded) { this.toggleNav(); return; } // ESC closes the chart first
       if (this.state === 'flying') this.pause();
       else if (this.state === 'paused') this.resume();
     });
+    this.input.on('nav', () => this.toggleNav());
+    this.input.on('navzoomin', () => this.minimap.zoom(-1));
+    this.input.on('navzoomout', () => this.minimap.zoom(1));
     this.input.on('camera', () => {
       if (this.state !== 'flying') return;
       const mode = this.flightCam.cycle();
@@ -256,6 +269,35 @@ class Game {
       this.touch.onAutopilot = () => this.toggleAutopilot();
       this.touch.onAirbrake = () => this.toggleAirbrake();
     }
+  }
+
+  /** Open/close the expanded planning chart (the onboard computer). */
+  private toggleNav(): void {
+    if (this.state !== 'flying' && !this.minimap.expanded) return;
+    this.minimap.setExpanded(!this.minimap.expanded);
+    this.minimap.show(true);
+  }
+
+  /** ENGAGE NAV: autopilot flies the flight plan, sequencing waypoints. */
+  private toggleNavEngage(): void {
+    const st = this.aircraft.state;
+    if (this.route.engaged) {
+      this.route.engaged = false;
+      this.screens.toast('NAV DISENGAGED');
+      return;
+    }
+    if (this.route.isEmpty) {
+      this.screens.toast('NO FLIGHT PLAN — CLICK THE CHART TO ADD WAYPOINTS');
+      return;
+    }
+    if (st.onGround) {
+      this.screens.toast('AIRBORNE FIRST — THEN ENGAGE NAV');
+      return;
+    }
+    if (this.route.complete) this.route.arm();
+    this.route.engaged = true;
+    if (!this.autopilot.engaged) this.toggleAutopilot();
+    this.screens.toast('NAV ENGAGED — AUTOPILOT TRACKING FLIGHT PLAN');
   }
 
   private toggleAutopilot(): void {
@@ -546,6 +588,8 @@ class Game {
           if (new URLSearchParams(location.search).get('ap') === '1' && !this.aircraft.state.onGround) {
             this.toggleAutopilot();
           }
+          // &nav=1 — open the planning chart (smoke test)
+          if (new URLSearchParams(location.search).get('nav') === '1') this.toggleNav();
         }
       }
     }
@@ -583,6 +627,19 @@ class Game {
     const st = this.aircraft.state;
     this.input.update(dt);
     if (this.autoFly) this.applyAutoFly();
+
+    // NAV mode: sequence waypoints and slave the AP heading bug to the route
+    if (this.route.engaged && !this.rings.active) {
+      const passed = this.route.sequence(st.pos.x, st.pos.z);
+      if (passed) this.screens.toast(`${passed.name} — WAYPOINT PASSED`, 1800);
+      const want = this.route.desiredHeading(st.pos.x, st.pos.z);
+      if (want === null) {
+        this.route.engaged = false;
+        this.screens.toast('FLIGHT PLAN COMPLETE — HOLDING HEADING', 3000);
+      } else if (this.autopilot.engaged) {
+        this.autopilot.targetHdg = want;
+      }
+    }
 
     // autopilot: manual stick input kicks it off, like the real thing
     if (this.autopilot.engaged) {
@@ -658,7 +715,10 @@ class Game {
       this.input.controls.throttle, st.thrustFrac, st.airspeed, st.stalled, this.simTime,
     );
     this.hud.draw(this.hudData(), dt);
-    this.minimap.update(st.pos.x, st.pos.z, st.heading, this.rings);
+    this.minimap.update(
+      st.pos.x, st.pos.z, st.heading, this.rings, this.route,
+      Math.hypot(st.vel.x, st.vel.z),
+    );
 
     this.touch?.syncState(
       this.input.controls.gearDown,
@@ -748,6 +808,19 @@ class Game {
             targets: this.range.total,
           }
         : null,
+      nav: (() => {
+        if (race || !this.route.engaged) return null;
+        const wp = this.route.target();
+        if (!wp) return null;
+        const dist = distanceTo(st.pos.x, st.pos.z, wp.x, wp.z);
+        const gs = Math.hypot(st.vel.x, st.vel.z);
+        return {
+          name: wp.name,
+          distance: dist,
+          bearing: wrapAngle(bearingTo(st.pos.x, st.pos.z, wp.x, wp.z) - st.heading),
+          eteSec: gs > 2 ? dist / gs : null,
+        };
+      })(),
       race,
     };
   }

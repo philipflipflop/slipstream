@@ -36,6 +36,7 @@ Dependencies are exactly three, pinned: `three`, `vite`, `typescript` (+ `@types
 | Look around / zoom | mouse drag / wheel (recentres on release) |
 | HUD full / minimal / off | `H` |
 | Minimap on/off | `M` |
+| Nav chart / flight computer | `N` (zoom `,` `.`) |
 | Pause | `Esc` or `P` |
 | Restart flight | `R` |
 
@@ -63,8 +64,12 @@ thrust model) — the handling differences fall out of the numbers, not scripts.
   settlements, snow-capped ranges. The home cluster has three airfields — **Meridian
   Field** (spawn, 2.4 km runway), **Northgate Strip** and **Highmoor Field** — and
   beyond them, procedural strips appear every ~15–25 km of land, deterministically
-  seeded so they're always in the same place. The minimap marks every runway and
-  always points the way home.
+  seeded so they're always in the same place — each with its own runway heading. The
+  minimap marks every runway as an oriented strip (so you can line up an approach from
+  miles out) and always points the way home. Press `N` for the **flight computer**: a
+  zoomable north-up chart — click to drop waypoints (clicks near a runway snap to it),
+  read per-leg true headings, distances and ETE, then ENGAGE NAV and the autopilot
+  flies the plan, sequencing each fix.
 - **Ring Rush** — 14 gates against the clock. Best time per aircraft is saved locally.
 
 ## Engineering notes

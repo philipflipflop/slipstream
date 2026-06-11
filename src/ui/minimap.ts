@@ -1,58 +1,186 @@
 /**
- * Heading-up circular minimap: coarse terrain radar (sampled from the
- * analytic heightfield, refreshed a few rows per frame), runway strips,
- * Ring Rush gates and a north arrow. Toggle with M.
+ * Navigation display. Two modes sharing one renderer:
+ *  - docked: small heading-up circular minimap (M toggles visibility)
+ *  - expanded: large north-up planning chart (N toggles) with zoom, every
+ *    runway drawn as an oriented strip, and click-to-build flight-plan
+ *    waypoints with a leg readout panel (the "onboard computer").
  */
 import { WorldGen, AirfieldDef, AIRPORTS, WATER_LEVEL } from '../world/heightfield';
 import type { RingCourse } from '../world/rings';
+import type { Route, Waypoint } from '../nav/route';
+import { MS_TO_KT, RAD2DEG } from '../core/math';
 
-const GRID = 44;        // terrain sample grid
-const RANGE = 9000;     // metres shown from centre to edge
+const GRID = 52;          // terrain sample grid
+const RANGES = [4500, 9000, 18000, 36000, 72000];
 
 export class Minimap {
   visible = true;
+  expanded = false;
+
+  /** a click on the chart resolved to a waypoint (airfield-snapped) */
+  onWaypoint: (wp: Waypoint) => void = () => {};
+  onUndo: () => void = () => {};
+  onClear: () => void = () => {};
+  onEngage: () => void = () => {};
+  onCloseNav: () => void = () => {};
+
   private canvas: HTMLCanvasElement;
   private ctx: CanvasRenderingContext2D;
+  private wrap: HTMLDivElement;
+  private panel: HTMLDivElement;
+  private legList: HTMLDivElement;
+  private engageBtn: HTMLButtonElement;
   private size = 168;
   private dpr = 1;
+  private rangeIdx = 1;
 
-  private samples = new Float32Array(GRID * GRID); // terrain heights
+  private samples = new Float32Array(GRID * GRID);
   private sampleRow = 0;
   private centerX = 0;
   private centerZ = 0;
+  private sampleRange = 0;
   private fields: AirfieldDef[] = [];
   private fieldTimer = 0;
+  private panelTimer = 0;
+  private lastPx = 0;
+  private lastPz = 0;
 
   constructor(private gen: WorldGen) {
+    this.wrap = document.createElement('div');
+    this.wrap.id = 'navwrap';
     this.canvas = document.createElement('canvas');
     this.canvas.id = 'minimap';
-    document.body.appendChild(this.canvas);
+    this.wrap.appendChild(this.canvas);
+
+    // planning panel (visible only when expanded)
+    this.panel = document.createElement('div');
+    this.panel.id = 'navpanel';
+    this.panel.innerHTML = `
+      <div class="nav-title">FLIGHT COMPUTER</div>
+      <div class="nav-hint">Click the chart to add waypoints.<br>Clicks near a runway snap to it.</div>
+      <div class="nav-legs"></div>
+      <div class="nav-buttons">
+        <button data-act="zoomout">−</button>
+        <button data-act="zoomin">+</button>
+        <button data-act="undo">UNDO</button>
+        <button data-act="clear">CLEAR</button>
+      </div>
+      <button class="nav-engage" data-act="engage">ENGAGE NAV</button>
+      <div class="nav-close-hint">N or ESC to close</div>
+    `;
+    this.legList = this.panel.querySelector('.nav-legs')!;
+    this.engageBtn = this.panel.querySelector('.nav-engage')!;
+    this.wrap.appendChild(this.panel);
+    document.body.appendChild(this.wrap);
+
     this.ctx = this.canvas.getContext('2d')!;
     this.dpr = Math.min(window.devicePixelRatio || 1, 2);
-    this.canvas.width = this.size * this.dpr;
-    this.canvas.height = this.size * this.dpr;
+    this.applySize();
     this.samples.fill(-100);
+
+    this.panel.addEventListener('click', (e) => {
+      const act = (e.target as HTMLElement).dataset?.act;
+      if (act === 'zoomin') this.zoom(-1);
+      else if (act === 'zoomout') this.zoom(1);
+      else if (act === 'undo') this.onUndo();
+      else if (act === 'clear') this.onClear();
+      else if (act === 'engage') this.onEngage();
+    });
+
+    this.canvas.addEventListener('pointerdown', (e) => {
+      if (!this.expanded) return;
+      const rect = this.canvas.getBoundingClientRect();
+      const mx = e.clientX - rect.left;
+      const my = e.clientY - rect.top;
+      const c = this.size / 2;
+      const toMap = (this.size * 0.5) / this.range();
+      const wx = this.lastPx + (mx - c) / toMap;
+      const wz = this.lastPz + (my - c) / toMap;
+
+      // snap to a runway when the click lands near its icon
+      let snapped: AirfieldDef | null = null;
+      let bestPx = 16; // pixels
+      for (const ap of this.fields) {
+        const d = Math.hypot((ap.x - wx) * toMap, (ap.z - wz) * toMap);
+        if (d < bestPx) { bestPx = d; snapped = ap; }
+      }
+      if (snapped) {
+        this.onWaypoint({
+          x: snapped.x, z: snapped.z, name: snapped.name,
+          airfield: {
+            code: snapped.code, heading: snapped.heading,
+            elev: snapped.elev, length: snapped.length,
+          },
+        });
+      } else {
+        this.onWaypoint({ x: wx, z: wz, name: '' });
+      }
+    });
+  }
+
+  private range(): number { return RANGES[this.rangeIdx]; }
+
+  zoom(dir: number): void {
+    const next = Math.min(Math.max(this.rangeIdx + dir, 0), RANGES.length - 1);
+    if (next !== this.rangeIdx) {
+      this.rangeIdx = next;
+      this.resample();
+    }
+  }
+
+  private resample(): void {
+    this.sampleRow = 0;
+    this.samples.fill(-100);
+    this.sampleRange = 0; // force recentre next update
+  }
+
+  private applySize(): void {
+    const small = window.innerWidth < 880 || window.innerHeight < 520;
+    this.size = this.expanded
+      ? Math.min(window.innerWidth, window.innerHeight) * 0.72
+      : small ? 118 : 168;
+    this.canvas.width = Math.floor(this.size * this.dpr);
+    this.canvas.height = Math.floor(this.size * this.dpr);
+    this.canvas.style.width = `${this.size}px`;
+    this.canvas.style.height = `${this.size}px`;
+  }
+
+  setExpanded(on: boolean): void {
+    this.expanded = on;
+    this.wrap.classList.toggle('expanded', on);
+    this.applySize();
+    this.resample();
+    if (on && this.rangeIdx < 2) this.rangeIdx = 2; // open the chart wide
   }
 
   setVisible(v: boolean): void {
     this.visible = v;
-    this.canvas.style.display = v ? 'block' : 'none';
+    this.syncDisplay();
   }
 
   show(on: boolean): void {
-    this.canvas.style.display = on && this.visible ? 'block' : 'none';
+    this.wrap.style.display = on && (this.visible || this.expanded) ? 'block' : 'none';
   }
 
-  update(px: number, pz: number, heading: number, rings: RingCourse): void {
-    if (!this.visible) return;
+  private syncDisplay(): void {
+    this.wrap.style.display = this.visible || this.expanded ? 'block' : 'none';
+  }
+
+  update(px: number, pz: number, heading: number, rings: RingCourse, route: Route | null, gs = 0): void {
+    if (!this.visible && !this.expanded) return;
+    this.lastPx = px;
+    this.lastPz = pz;
+    const RANGE = this.range();
 
     // refresh a few sample rows per frame, re-centring lazily
-    if (Math.hypot(px - this.centerX, pz - this.centerZ) > RANGE * 0.22 || this.sampleRow > 0) {
+    const stale = Math.hypot(px - this.centerX, pz - this.centerZ) > RANGE * 0.22 || this.sampleRange !== RANGE;
+    if (stale || this.sampleRow > 0) {
       if (this.sampleRow === 0) {
         this.centerX = px;
         this.centerZ = pz;
+        this.sampleRange = RANGE;
       }
-      const rows = 4;
+      const rows = this.expanded ? 8 : 4;
       for (let r = 0; r < rows && this.sampleRow < GRID; r++, this.sampleRow++) {
         const j = this.sampleRow;
         const wz = this.centerZ - RANGE + (j / (GRID - 1)) * RANGE * 2;
@@ -66,21 +194,31 @@ export class Minimap {
       this.sampleRow = 1; // kick off the first fill
     }
 
-    // refresh the airfield set every couple of seconds (home + procedural)
+    // refresh the airfield set every couple of seconds (scales with zoom)
     if (--this.fieldTimer <= 0) {
       this.fieldTimer = 120;
-      this.gen.airfieldsNear(px, pz, 32000, this.fields);
-      // the home beacon stays on the rim no matter how far you roam
+      this.gen.airfieldsNear(px, pz, Math.max(32000, RANGE * 1.4), this.fields);
       if (!this.fields.some((f) => f.major)) this.fields.push(AIRPORTS[0]);
     }
 
-    this.draw(px, pz, heading, rings);
+    this.draw(px, pz, heading, rings, route);
+
+    // route panel refresh (4 Hz is plenty for text)
+    if (this.expanded && --this.panelTimer <= 0) {
+      this.panelTimer = 15;
+      this.renderPanel(px, pz, gs, route);
+    }
   }
 
-  private draw(px: number, pz: number, heading: number, rings: RingCourse): void {
+  /* ------------------------------------------------------------ draw ---- */
+
+  private draw(px: number, pz: number, heading: number, rings: RingCourse, route: Route | null): void {
     const ctx = this.ctx;
     const S = this.size;
     const c = S / 2;
+    const RANGE = this.range();
+    // expanded chart is north-up; docked map is heading-up
+    const rot = this.expanded ? 0 : -heading;
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     ctx.clearRect(0, 0, S, S);
 
@@ -89,23 +227,21 @@ export class Minimap {
     ctx.arc(c, c, c - 2, 0, Math.PI * 2);
     ctx.clip();
 
-    // base
-    ctx.fillStyle = 'rgba(7, 13, 24, 0.78)';
+    ctx.fillStyle = this.expanded ? 'rgba(7, 13, 24, 0.92)' : 'rgba(7, 13, 24, 0.78)';
     ctx.fillRect(0, 0, S, S);
 
-    // rotate world so heading-up
     ctx.translate(c, c);
-    ctx.rotate(-heading);
+    ctx.rotate(rot);
 
-    // terrain blobs (sampled around a possibly stale centre — fine at this scale)
+    // terrain blobs (sampled around a possibly stale centre — fine here)
     const cell = (S / GRID) * 1.45;
-    const toMap = RANGE > 0 ? (S * 0.5) / RANGE : 0;
+    const toMap = (S * 0.5) / RANGE;
     for (let j = 0; j < GRID; j++) {
-      const wz = this.centerZ - RANGE + (j / (GRID - 1)) * RANGE * 2;
+      const wz = this.centerZ - this.sampleRange + (j / (GRID - 1)) * this.sampleRange * 2;
       for (let i = 0; i < GRID; i++) {
         const h = this.samples[j * GRID + i];
-        if (h <= WATER_LEVEL) continue; // leave water as base colour
-        const wx = this.centerX - RANGE + (i / (GRID - 1)) * RANGE * 2;
+        if (h <= WATER_LEVEL) continue;
+        const wx = this.centerX - this.sampleRange + (i / (GRID - 1)) * this.sampleRange * 2;
         const mx = (wx - px) * toMap;
         const mz = (wz - pz) * toMap;
         if (mx * mx + mz * mz > c * c * 1.45) continue;
@@ -116,14 +252,61 @@ export class Minimap {
       }
     }
 
-    // runway strips (only meaningful when in range)
+    // runway strips, oriented to their true headings
     for (const ap of this.fields) {
       const mx = (ap.x - px) * toMap;
       const mz = (ap.z - pz) * toMap;
-      if (Math.hypot(mx, mz) > c - 10) continue;
-      const len = Math.max(ap.length * toMap, 7);
+      if (Math.hypot(mx, mz) > c - 8) continue;
+      const len = Math.max(ap.length * toMap, 9);
+      ctx.save();
+      ctx.translate(mx, mz);
+      ctx.rotate(ap.heading);
       ctx.fillStyle = '#e8eef7';
-      ctx.fillRect(mx - 1.6, mz - len / 2, 3.2, len);
+      ctx.fillRect(-1.7, -len / 2, 3.4, len);
+      ctx.restore();
+    }
+
+    // flight-plan route
+    if (route && !route.isEmpty) {
+      ctx.strokeStyle = 'rgba(43, 217, 255, 0.85)';
+      ctx.lineWidth = 1.6;
+      ctx.setLineDash([6, 5]);
+      ctx.beginPath();
+      let fx = 0;
+      let fz = 0; // player at origin of this rotated frame
+      ctx.moveTo(fx, fz);
+      for (let i = route.active; i < route.waypoints.length; i++) {
+        const wp = route.waypoints[i];
+        fx = (wp.x - px) * toMap;
+        fz = (wp.z - pz) * toMap;
+        ctx.lineTo(fx, fz);
+      }
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      for (let i = 0; i < route.waypoints.length; i++) {
+        const wp = route.waypoints[i];
+        const mx = (wp.x - px) * toMap;
+        const mz = (wp.z - pz) * toMap;
+        const activeWp = i === route.active;
+        const passed = i < route.active;
+        ctx.fillStyle = passed ? 'rgba(120,140,160,0.6)' : activeWp ? '#ffb340' : '#2bd9ff';
+        ctx.save();
+        ctx.translate(mx, mz);
+        ctx.rotate(Math.PI / 4);
+        ctx.fillRect(-3.4, -3.4, 6.8, 6.8);
+        ctx.restore();
+        if (this.expanded) {
+          ctx.fillStyle = 'rgba(232, 238, 247, 0.85)';
+          ctx.font = `600 10px 'Chakra Petch', monospace`;
+          ctx.textAlign = 'left';
+          ctx.save();
+          ctx.translate(mx + 7, mz - 6);
+          ctx.rotate(-rot);
+          ctx.fillText(wp.name || `WP${i + 1}`, 0, 0);
+          ctx.restore();
+        }
+      }
     }
 
     // ring course
@@ -139,8 +322,7 @@ export class Minimap {
       }
     }
 
-    // airport beacons — always visible; beyond range they clamp to the rim
-    // with an outward pointer so you always know which way home is
+    // airport beacons — beyond range they clamp to the rim with a pointer
     for (const ap of this.fields) {
       let mx = (ap.x - px) * toMap;
       let mz = (ap.z - pz) * toMap;
@@ -158,7 +340,6 @@ export class Minimap {
       const color = ap.major ? '#ffb340' : '#7dffa8';
 
       if (offMap) {
-        // outward pointer on the rim
         ctx.fillStyle = color;
         ctx.beginPath();
         ctx.moveTo(mx + ux * 9, mz + uz * 9);
@@ -167,7 +348,7 @@ export class Minimap {
         ctx.closePath();
         ctx.fill();
       }
-      // beacon disc with designator
+      // beacon disc with a runway-direction bar through it
       ctx.fillStyle = 'rgba(7, 13, 24, 0.9)';
       ctx.beginPath();
       ctx.arc(mx, mz, 6, 0, Math.PI * 2);
@@ -175,13 +356,24 @@ export class Minimap {
       ctx.strokeStyle = color;
       ctx.lineWidth = 1.4;
       ctx.stroke();
+      // the bar shows which way the runway runs even from the rim
+      ctx.save();
+      ctx.translate(mx, mz);
+      ctx.rotate(ap.heading);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(0, -9);
+      ctx.lineTo(0, 9);
+      ctx.stroke();
+      ctx.restore();
       ctx.fillStyle = color;
       ctx.font = `700 8px 'Chakra Petch', monospace`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.save();
       ctx.translate(mx, mz);
-      ctx.rotate(heading); // keep the letter upright in heading-up mode
+      ctx.rotate(-rot); // keep the letter upright
       ctx.fillText(ap.code, 0, 0.5);
       ctx.restore();
     }
@@ -195,22 +387,68 @@ export class Minimap {
     ctx.arc(c, c, c - 2, 0, Math.PI * 2);
     ctx.stroke();
 
-    // player chevron (always centre, pointing up)
+    // player marker: centre chevron pointing along the heading
+    ctx.save();
+    ctx.translate(c, c);
+    if (this.expanded) ctx.rotate(heading); // north-up chart: rotate the chevron
     ctx.fillStyle = '#ffb340';
     ctx.beginPath();
-    ctx.moveTo(c, c - 7);
-    ctx.lineTo(c + 5, c + 6);
-    ctx.lineTo(c, c + 3);
-    ctx.lineTo(c - 5, c + 6);
+    ctx.moveTo(0, -7);
+    ctx.lineTo(5, 6);
+    ctx.lineTo(0, 3);
+    ctx.lineTo(-5, 6);
     ctx.closePath();
     ctx.fill();
+    ctx.restore();
 
-    // north tick on the rim
-    const na = -heading - Math.PI / 2;
+    // north tick + range readout
+    const na = rot - Math.PI / 2;
     ctx.fillStyle = 'rgba(125, 255, 168, 0.95)';
     ctx.font = `700 10px 'Chakra Petch', monospace`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText('N', c + Math.cos(na) * (c - 11), c + Math.sin(na) * (c - 11));
+    ctx.font = `600 9px 'Chakra Petch', monospace`;
+    ctx.fillStyle = 'rgba(125, 255, 168, 0.7)';
+    ctx.textAlign = 'left';
+    ctx.fillText(`${(RANGE / 1000).toFixed(0)} km`, 8, S - 10);
   }
+
+  /* ----------------------------------------------------------- panel ---- */
+
+  private renderPanel(px: number, pz: number, gs: number, route: Route | null): void {
+    this.engageBtn.textContent = route?.engaged ? 'DISENGAGE NAV' : 'ENGAGE NAV';
+    this.engageBtn.classList.toggle('armed', !!route?.engaged);
+
+    if (!route || route.isEmpty) {
+      this.legList.innerHTML = `<div class="nav-empty">NO FLIGHT PLAN</div>`;
+      return;
+    }
+    const legs = route.legs(px, pz, gs);
+    let total = 0;
+    let totalEte = 0;
+    let haveEte = true;
+    let html = '';
+    for (const leg of legs) {
+      total += leg.distance;
+      if (leg.eteSec === null) haveEte = false;
+      else totalEte += leg.eteSec;
+      const brg = String(Math.round(leg.bearing * RAD2DEG) % 360).padStart(3, '0');
+      const km = (leg.distance / 1000).toFixed(1);
+      const ete = leg.eteSec !== null ? fmtEte(leg.eteSec) : '--:--';
+      html += `<div class="nav-leg"><span>${leg.to || 'WPT'}</span><span>${brg}°</span><span>${km} km</span><span>${ete}</span></div>`;
+    }
+    html += `<div class="nav-leg total"><span>TOTAL</span><span></span><span>${(total / 1000).toFixed(1)} km</span><span>${haveEte ? fmtEte(totalEte) : '--:--'}</span></div>`;
+    if (gs > 2) {
+      html += `<div class="nav-gs">GS ${Math.round(gs * MS_TO_KT)} KT</div>`;
+    }
+    this.legList.innerHTML = html;
+  }
+}
+
+function fmtEte(sec: number): string {
+  const m = Math.floor(sec / 60);
+  const s = Math.floor(sec % 60);
+  if (m >= 100) return `${Math.floor(m / 60)}h${String(m % 60).padStart(2, '0')}`;
+  return `${m}:${String(s).padStart(2, '0')}`;
 }

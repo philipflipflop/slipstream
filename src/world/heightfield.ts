@@ -14,7 +14,6 @@ import { clamp, lerp, smoothstep, hash2 } from '../core/math';
 export const WATER_LEVEL = 0;
 export const AIRPORT_ELEV = 8;
 
-/** All runways run along the Z axis (prevailing winds are northerly). */
 export interface AirfieldDef {
   name: string;
   code: string;   // single-letter minimap designator
@@ -24,12 +23,17 @@ export interface AirfieldDef {
   length: number;
   width: number;
   major: boolean; // gets hangars, tower, apron buildings
+  /** runway direction, rad clockwise from north (0 = runway 36/18) */
+  heading: number;
+  cosH: number;   // cached for the hot flatten/paint path
+  sinH: number;
 }
 
+/** The home cluster runs north–south; procedural strips point anywhere. */
 export const AIRPORTS: AirfieldDef[] = [
-  { name: 'MERIDIAN FIELD', code: 'H', x: 0, z: 0, elev: AIRPORT_ELEV, length: 2400, width: 36, major: true },
-  { name: 'NORTHGATE STRIP', code: 'N', x: -2800, z: -16200, elev: 7, length: 1150, width: 26, major: false },
-  { name: 'HIGHMOOR FIELD', code: 'M', x: 14200, z: -8800, elev: 150, length: 1500, width: 30, major: false },
+  { name: 'MERIDIAN FIELD', code: 'H', x: 0, z: 0, elev: AIRPORT_ELEV, length: 2400, width: 36, major: true, heading: 0, cosH: 1, sinH: 0 },
+  { name: 'NORTHGATE STRIP', code: 'N', x: -2800, z: -16200, elev: 7, length: 1150, width: 26, major: false, heading: 0, cosH: 1, sinH: 0 },
+  { name: 'HIGHMOOR FIELD', code: 'M', x: 14200, z: -8800, elev: 150, length: 1500, width: 30, major: false, heading: 0, cosH: 1, sinH: 0 },
 ];
 
 /** Main field dimensions (back-compat for spawn + ring course). */
@@ -117,7 +121,10 @@ export class WorldGen {
       const daz = z - ap.z;
       const outer = ap.length * 1.05 + 800;
       if (Math.abs(dax) > outer || Math.abs(daz) > outer) continue;
-      const fr = Math.hypot(dax, daz * 0.45);
+      // rotate into the runway frame: `along` runs down the centreline
+      const along = dax * ap.sinH - daz * ap.cosH;
+      const across = dax * ap.cosH + daz * ap.sinH;
+      const fr = Math.hypot(across, along * 0.45);
       const flat = smoothstep(outer, ap.length * 0.3 + 250, fr);
       if (flat > 0) e = lerp(e, ap.elev, flat);
     }
@@ -151,11 +158,16 @@ export class WorldGen {
       if (Math.hypot(ax - ap.x, az - ap.z) < 9000) return null;
     }
 
-    // must sit on plausibly flat, dry land
+    // each strip gets its own runway direction (25° steps, ±75° off north)
+    const heading = (Math.floor(hash2(cx * 23 + 13, cz * 29 - 5) * 7) - 3) * 0.4363;
+    const sinH = Math.sin(heading);
+    const cosH = Math.cos(heading);
+
+    // must sit on plausibly flat, dry land along the runway direction
     const elev = this.baseHeightAt(ax, az);
     if (elev < 4 || elev > 240) return null;
-    if (Math.abs(this.baseHeightAt(ax, az - 800) - elev) > 35) return null;
-    if (Math.abs(this.baseHeightAt(ax, az + 800) - elev) > 35) return null;
+    if (Math.abs(this.baseHeightAt(ax + sinH * 800, az - cosH * 800) - elev) > 35) return null;
+    if (Math.abs(this.baseHeightAt(ax - sinH * 800, az + cosH * 800) - elev) > 35) return null;
 
     const h3 = hash2(cx * 17 - 3, cz * 19 + 7);
     const name = `${FIELD_NAMES[Math.floor(hash2(cx + 31, cz - 47) * FIELD_NAMES.length)]} STRIP`;
@@ -168,6 +180,9 @@ export class WorldGen {
       length: 1100 + Math.floor(h3 * 3) * 280,
       width: 26,
       major: false,
+      heading,
+      cosH,
+      sinH,
     };
   }
 
@@ -246,7 +261,11 @@ export class WorldGen {
     const n = this.gatherFields(x, z);
     for (let i = 0; i < n; i++) {
       const ap = this.scratch[i];
-      if (Math.hypot(x - ap.x, (z - ap.z) * 0.45) < ap.length * 0.3 + 300) return true;
+      const dax = x - ap.x;
+      const daz = z - ap.z;
+      const along = dax * ap.sinH - daz * ap.cosH;
+      const across = dax * ap.cosH + daz * ap.sinH;
+      if (Math.hypot(across, along * 0.45) < ap.length * 0.3 + 300) return true;
     }
     return false;
   }
@@ -256,9 +275,13 @@ export class WorldGen {
     const n = this.gatherFields(x, z);
     for (let i = 0; i < n; i++) {
       const ap = this.scratch[i];
+      const dax = x - ap.x;
+      const daz = z - ap.z;
+      const along = dax * ap.sinH - daz * ap.cosH;
+      const across = dax * ap.cosH + daz * ap.sinH;
       if (
-        Math.abs(x - ap.x) < ap.width * 0.5 + 6 &&
-        Math.abs(z - ap.z) < ap.length * 0.5 + 30
+        Math.abs(across) < ap.width * 0.5 + 6 &&
+        Math.abs(along) < ap.length * 0.5 + 30
       ) return true;
     }
     return false;
@@ -305,14 +328,18 @@ export class WorldGen {
       const n = this.gatherFields(x, z);
       for (let i = 0; i < n; i++) {
         const ap = this.scratch[i];
+        const dax = x - ap.x;
+        const daz = z - ap.z;
+        const along = dax * ap.sinH - daz * ap.cosH;
+        const across = dax * ap.cosH + daz * ap.sinH;
         if (
-          Math.abs(x - ap.x) < ap.width * 0.5 + 6 &&
-          Math.abs(z - ap.z) < ap.length * 0.5 + 30
+          Math.abs(across) < ap.width * 0.5 + 6 &&
+          Math.abs(along) < ap.length * 0.5 + 30
         ) {
           r = 0.16; g = 0.17; b = 0.19;
           break;
         }
-        const fr = Math.hypot(x - ap.x, (z - ap.z) * 0.45);
+        const fr = Math.hypot(across, along * 0.45);
         const inner = ap.length * 0.3 + 300;
         if (fr < inner) {
           const a = smoothstep(inner, inner * 0.55, fr) * 0.4;

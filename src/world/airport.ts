@@ -143,8 +143,19 @@ export class Airport {
       beacon = this.buildMajorExtras(g, ap);
     }
 
-    this.scene.add(g);
-    this.built.set(key, { def: ap, group: g, sock, beacon });
+    // furniture is laid out as if the runway ran north–south; spin the whole
+    // field around its centre to the actual runway heading
+    let root: THREE.Object3D = g;
+    if (ap.heading !== 0) {
+      const pivot = new THREE.Group();
+      pivot.position.set(ap.x, 0, ap.z);
+      pivot.rotation.y = -ap.heading;
+      g.position.set(-ap.x, 0, -ap.z);
+      pivot.add(g);
+      root = pivot;
+    }
+    this.scene.add(root);
+    this.built.set(key, { def: ap, group: root as THREE.Group, sock, beacon });
   }
 
   private buildMajorExtras(g: THREE.Group, ap: AirfieldDef): THREE.Mesh {

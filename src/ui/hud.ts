@@ -26,6 +26,12 @@ export interface HudData {
   afterburner: boolean;
   vne: number;        // m/s
   gun: null | { ammo: number; firing: boolean; hits: number; targets: number };
+  nav: null | {
+    name: string;
+    distance: number;  // m to active waypoint
+    bearing: number;   // rad, relative to nose
+    eteSec: number | null;
+  };
   race: null | {
     gate: number;
     total: number;
@@ -113,6 +119,41 @@ export class Hud {
     this.annunciators(d, cx, cy, s, false);
     if (d.gun) this.gunBlock(d, cx, cy, s);
     if (d.race) this.raceBlock(d, cx, s, compact);
+    else if (d.nav) this.navBlock(d, cx, s, compact);
+  }
+
+  /** Active flight-plan leg: waypoint, range, relative bearing arrow, ETE. */
+  private navBlock(d: HudData, cx: number, s: number, compact: boolean): void {
+    const nav = d.nav!;
+    const ctx = this.ctx;
+    const top = this.safeTop() + (compact ? 100 : 92) * s;
+
+    ctx.textAlign = 'center';
+    ctx.fillStyle = 'rgba(43, 217, 255, 0.92)';
+    ctx.font = `700 ${Math.round(13 * s)}px 'Chakra Petch', monospace`;
+    const km = nav.distance >= 1000 ? `${(nav.distance / 1000).toFixed(1)} km` : `${Math.round(nav.distance)} m`;
+    const ete = nav.eteSec !== null
+      ? ` · ${Math.floor(nav.eteSec / 60)}:${String(Math.floor(nav.eteSec % 60)).padStart(2, '0')}`
+      : '';
+    ctx.fillText(`NAV ▸ ${nav.name} · ${km}${ete}`, cx, top);
+
+    // relative-bearing arrow, same idiom as the race guidance
+    const ay = top + 24 * s;
+    const bearing = wrapAngle(nav.bearing);
+    ctx.save();
+    ctx.translate(cx, ay);
+    ctx.rotate(bearing);
+    const onTrack = Math.abs(bearing) < 0.06;
+    ctx.fillStyle = onTrack ? this.g(0.95) : 'rgba(43, 217, 255, 0.9)';
+    ctx.beginPath();
+    ctx.moveTo(0, -12 * s);
+    ctx.lineTo(7 * s, 6 * s);
+    ctx.lineTo(0, 1.5 * s);
+    ctx.lineTo(-7 * s, 6 * s);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+    ctx.font = `600 ${Math.round(13 * s)}px 'Chakra Petch', monospace`;
   }
 
   /** Cannon reticle + ammo/targets readout (gun-equipped aircraft only). */

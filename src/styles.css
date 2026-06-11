@@ -256,17 +256,66 @@ html, body {
 /* ---------- in-flight DOM bits ---------- */
 #hud { position: fixed; inset: 0; pointer-events: none; z-index: 20; }
 
-#minimap {
+#navwrap {
   position: fixed;
   top: calc(14px + var(--sat));
   right: calc(64px + var(--sar));
-  width: 168px; height: 168px;
   z-index: 22; pointer-events: none;
   display: none;
   filter: drop-shadow(0 4px 14px rgba(0, 0, 0, .45));
 }
+#navwrap #navpanel { display: none; }
+#navwrap.expanded {
+  inset: 0;
+  display: flex !important;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  background: rgba(4, 8, 16, .55);
+  backdrop-filter: blur(3px);
+  pointer-events: auto;
+  z-index: 40;
+}
+#navwrap.expanded #minimap { cursor: crosshair; }
+#navwrap.expanded #navpanel {
+  display: flex; flex-direction: column; gap: 10px;
+  width: min(280px, 34vw);
+  max-height: 76vh; overflow-y: auto;
+  background: rgba(10, 19, 34, .85);
+  border: 1px solid rgba(125, 255, 168, .4);
+  border-radius: 10px; padding: 14px;
+  font-family: 'Chakra Petch', monospace;
+  color: #cfe3d6;
+}
+#navpanel .nav-title { font-weight: 700; letter-spacing: .12em; color: #7dffa8; font-size: 13px; }
+#navpanel .nav-hint { font-size: 11px; opacity: .65; line-height: 1.5; }
+#navpanel .nav-legs { display: flex; flex-direction: column; gap: 3px; font-size: 11px; }
+#navpanel .nav-leg { display: grid; grid-template-columns: 1fr 40px 56px 44px; gap: 4px; }
+#navpanel .nav-leg span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#navpanel .nav-leg.total { border-top: 1px solid rgba(125,255,168,.3); margin-top: 4px; padding-top: 4px; color: #ffb340; }
+#navpanel .nav-gs { font-size: 11px; color: #7dffa8; opacity: .8; }
+#navpanel .nav-empty { font-size: 11px; opacity: .5; }
+#navpanel .nav-buttons { display: flex; gap: 6px; }
+#navpanel button {
+  flex: 1; padding: 6px 4px;
+  background: rgba(125, 255, 168, .12);
+  border: 1px solid rgba(125, 255, 168, .45);
+  border-radius: 6px; color: #aef5c4;
+  font-family: inherit; font-size: 11px; font-weight: 600;
+  cursor: pointer;
+}
+#navpanel button:hover { background: rgba(125, 255, 168, .25); }
+#navpanel .nav-engage {
+  padding: 9px; font-size: 12px; letter-spacing: .08em;
+  border-color: rgba(255, 179, 64, .6); color: #ffd9a0;
+  background: rgba(255, 179, 64, .12);
+}
+#navpanel .nav-engage.armed { background: rgba(255, 179, 64, .35); color: #fff; }
+#navpanel .nav-close-hint { font-size: 10px; opacity: .45; text-align: center; }
 @media (max-width: 880px), (max-height: 520px) {
-  #minimap { width: 118px; height: 118px; right: calc(58px + var(--sar)); }
+  #navwrap { right: calc(58px + var(--sar)); }
+  #navwrap.expanded { flex-direction: column; gap: 8px; }
+  #navwrap.expanded #navpanel { width: min(86vw, 420px); max-height: 30vh; }
 }
 
 /* ---------- autopilot target panel ---------- */

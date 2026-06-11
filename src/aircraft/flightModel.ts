@@ -352,17 +352,20 @@ function crash(st: FlightState, reason: string): void {
   st.angVel.set(0, 0, 0);
 }
 
-/** Park the aircraft at a runway 36 threshold, pointing north (-Z). */
+/** Park the aircraft at the runway threshold, pointing down the strip. */
 export function spawnOnRunway(
   spec: AircraftSpec,
   st: FlightState,
   heightAt: HeightFn,
   field: AirfieldDef = AIRPORTS[0],
 ): void {
-  const z = field.z + field.length / 2 - 150;
-  st.pos.set(field.x, 0, z);
-  st.pos.y = heightAt(field.x, z) + spec.gearHeight;
-  st.quat.setFromEuler(new THREE.Euler(spec.groundPitch, 0, 0, 'YXZ'));
+  // threshold = centre minus (half length − 150 m) along the runway heading
+  const d = field.length / 2 - 150;
+  const x = field.x - field.sinH * d;
+  const z = field.z + field.cosH * d;
+  st.pos.set(x, 0, z);
+  st.pos.y = heightAt(x, z) + spec.gearHeight;
+  st.quat.setFromEuler(new THREE.Euler(spec.groundPitch, -field.heading, 0, 'YXZ'));
   st.vel.set(0, 0, 0);
   st.angVel.set(0, 0, 0);
   st.onGround = true;
