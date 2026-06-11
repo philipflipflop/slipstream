@@ -58,6 +58,7 @@ class Game {
   private save = loadSave();
   private baseFogNear = 2500;
   private baseFogFar = 7000;
+  private fogFarCap = 26000;
 
   // state
   private state: GameState = 'boot';
@@ -309,6 +310,18 @@ class Game {
       this.terrain.buildBudget = 2;
     }
     this.terrain.altBonus = q === 'low' ? 2 : 4;
+    // far horizon shell density and how far the fog may open up at altitude
+    // (cap stays well inside the shell so its edge is never visible)
+    if (q === 'low') {
+      this.terrain.configureFar(80, 600); // 48 km shell
+      this.fogFarCap = 14000;
+    } else if (q === 'medium') {
+      this.terrain.configureFar(120, 450); // 54 km shell
+      this.fogFarCap = 20000;
+    } else {
+      this.terrain.configureFar(140, 450); // 63 km shell
+      this.fogFarCap = 26000;
+    }
     const view = this.terrain.radius * CHUNK_SIZE;
     this.baseFogNear = view * 0.38;
     this.baseFogFar = view * 0.96;
@@ -445,16 +458,21 @@ class Game {
     // stream the world around the player (also while in menu, for the view)
     const agl = st.pos.y - this.gen.heightAt(st.pos.x, st.pos.z);
     this.terrain.update(st.pos.x, st.pos.z, agl);
-    this.water.update(this.simTime, this.flightCam.camera.position);
-    this.sky.update(st.pos);
-    this.airport.update(this.simTime, st.pos.x, st.pos.z);
 
-    // fog breathes out as the streamed radius widens at altitude
+    // fog opens out with the streamed radius and, above that, with altitude:
+    // the far shell carries the horizon out to ~30 km, so the higher you fly
+    // the further the eye is allowed to reach before the haze closes in
     const fog = this.scene.fog as THREE.Fog;
     const scale = this.terrain.effRadius() / this.terrain.radius;
-    fog.near = clamp(damp(fog.near, this.baseFogNear * scale, 0.8, dt), 100, 40000);
-    fog.far = clamp(damp(fog.far, this.baseFogFar * scale, 0.8, dt), 200, 41000);
+    const farT = Math.min(this.baseFogFar * scale + Math.max(agl - 400, 0) * 6, this.fogFarCap);
+    const nearT = farT * (this.baseFogNear / this.baseFogFar);
+    fog.near = clamp(damp(fog.near, nearT, 0.8, dt), 100, 40000);
+    fog.far = clamp(damp(fog.far, farT, 0.8, dt), 200, 41000);
     this.water.setFogRange(fog.near, fog.far);
+
+    this.water.update(this.simTime, this.flightCam.camera.position);
+    this.sky.update(st.pos, fog.far, dt);
+    this.airport.update(this.simTime, st.pos.x, st.pos.z);
 
     switch (this.state) {
       case 'boot':

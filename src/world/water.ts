@@ -78,7 +78,8 @@ export class Water {
   private mat: THREE.ShaderMaterial;
 
   constructor(scene: THREE.Scene, fogColor: THREE.Color, sunDir: THREE.Vector3) {
-    const geo = new THREE.PlaneGeometry(24000, 24000, 1, 1);
+    // big enough to underlie the entire far terrain shell (~63 km)
+    const geo = new THREE.PlaneGeometry(66000, 66000, 1, 1);
     geo.rotateX(-Math.PI / 2);
     this.mat = new THREE.ShaderMaterial({
       vertexShader: VERT,

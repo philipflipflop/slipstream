@@ -8,7 +8,7 @@
  */
 import * as THREE from 'three';
 import { WorldGen } from './heightfield';
-import { buildChunkPayload, ChunkPayload, CHUNK_SIZE } from './terrainBuilder';
+import { buildChunkPayload, buildFarPayload, ChunkPayload, FarPayload, CHUNK_SIZE } from './terrainBuilder';
 
 export { CHUNK_SIZE };
 
@@ -112,6 +112,22 @@ export class TerrainManager {
   altBonus = 4;
   private highAlt = false;
 
+  // far shell: one coarse mega-mesh of the horizon underneath the chunk ring
+  private farMesh: THREE.Mesh | null = null;
+  private farGeo: THREE.BufferGeometry | null = null;
+  private farIndexArr: Uint32Array | null = null;
+  private farOx = Infinity;
+  private farOz = Infinity;
+  private farGeoOx = 0;
+  private farGeoOz = 0;
+  private farGeoCells = 0;
+  private farGeoCell = 0;
+  private farPending = false;
+  private farStale = false;
+  private farResult: FarPayload | null = null;
+  private farCells = 140;
+  private farCellSize = 450;
+
   constructor(private scene: THREE.Scene, gen: WorldGen) {
     this.gen = gen;
     this.terrainMat = new THREE.MeshLambertMaterial({ vertexColors: true });
@@ -123,13 +139,15 @@ export class TerrainManager {
     try {
       this.worker = new Worker(new URL('./terrain.worker.ts', import.meta.url), { type: 'module' });
       this.worker.postMessage({ type: 'init', seed: gen.seed });
-      this.worker.onmessage = (e: MessageEvent<ChunkPayload>) => {
-        this.results.push(e.data);
+      this.worker.onmessage = (e: MessageEvent<ChunkPayload | FarPayload>) => {
+        if ('far' in e.data) this.farResult = e.data;
+        else this.results.push(e.data);
       };
       this.worker.onerror = () => {
         // worker died — fall back to synchronous builds
         this.worker = null;
         this.pending.clear();
+        this.farPending = false;
       };
     } catch {
       this.worker = null;
@@ -176,6 +194,24 @@ export class TerrainManager {
     // upload finished payloads (budgeted — uploads are cheap but not free)
     for (let i = 0; i < this.buildBudget && this.results.length > 0; i++) {
       this.finalize(this.results.shift()!);
+    }
+
+    // far shell: swap in a freshly baked horizon, recentre when we drift
+    if (this.farResult) {
+      const p = this.farResult;
+      this.farResult = null;
+      this.finalizeFar(p);
+    }
+    if (!this.farPending && (Math.abs(px - this.farOx) > 4500 || Math.abs(pz - this.farOz) > 4500)) {
+      const snap = this.farSnap();
+      const ox = Math.round(px / snap) * snap;
+      const oz = Math.round(pz / snap) * snap;
+      this.farPending = true;
+      if (this.worker) {
+        this.worker.postMessage({ type: 'far', ox, oz, cells: this.farCells, cellSize: this.farCellSize });
+      } else {
+        this.farResult = buildFarPayload(this.gen, ox, oz, this.farCells, this.farCellSize);
+      }
     }
 
     // keep the worker fed, nearest jobs first
@@ -233,6 +269,108 @@ export class TerrainManager {
       }
     }
     this.queue.sort((a, b) => a.priority - b.priority);
+    this.rebuildFarIndex();
+  }
+
+  /** Quality preset hook: shell density. Forces a rebuild when it changes. */
+  configureFar(cells: number, cellSize: number): void {
+    if (cells === this.farCells && cellSize === this.farCellSize) return;
+    this.farCells = cells;
+    this.farCellSize = cellSize;
+    if (this.farPending) this.farStale = true;
+    else { this.farOx = Infinity; this.farOz = Infinity; }
+  }
+
+  /**
+   * Recentre snap: a multiple of both the chunk size and the shell cell, so
+   * shell vertices land on the same world lattice every rebuild — heights
+   * are identical between rebuilds and the horizon never "swims".
+   */
+  private farSnap(): number {
+    let s = CHUNK_SIZE;
+    while (s % this.farCellSize !== 0) s += CHUNK_SIZE;
+    return s;
+  }
+
+  private finalizeFar(p: FarPayload): void {
+    this.farPending = false;
+    if (this.farStale) {
+      // density changed while this one was baking — keep it, but rebuild soon
+      this.farStale = false;
+      this.farOx = Infinity;
+      this.farOz = Infinity;
+    } else {
+      this.farOx = p.ox;
+      this.farOz = p.oz;
+    }
+
+    if (this.farMesh) {
+      this.scene.remove(this.farMesh);
+      this.farGeo!.dispose();
+    }
+    this.farGeoOx = p.ox;
+    this.farGeoOz = p.oz;
+    this.farGeoCells = p.cells;
+    this.farGeoCell = p.cellSize;
+
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(p.positions, 3));
+    geo.setAttribute('normal', new THREE.BufferAttribute(p.normals, 3));
+    geo.setAttribute('color', new THREE.BufferAttribute(p.colors, 3));
+    this.farIndexArr = new Uint32Array(p.cells * p.cells * 6);
+    geo.setIndex(new THREE.BufferAttribute(this.farIndexArr, 1));
+    this.farGeo = geo;
+
+    const mesh = new THREE.Mesh(geo, this.terrainMat);
+    mesh.position.set(p.ox, 0, p.oz);
+    mesh.matrixAutoUpdate = false;
+    mesh.updateMatrix();
+    mesh.frustumCulled = false; // spans the whole horizon — always in view
+    this.farMesh = mesh;
+    this.rebuildFarIndex();
+    this.scene.add(mesh);
+  }
+
+  /**
+   * Re-index the shell, skipping quads fully inside the area the detailed
+   * chunk ring is guaranteed to cover (two rings of slack for streaming lag).
+   * Index-only: vertices stay put, so this is cheap enough to run on every
+   * chunk crossing.
+   */
+  private rebuildFarIndex(): void {
+    if (!this.farGeo || !this.farIndexArr) return;
+    const cells = this.farGeoCells;
+    const cs = this.farGeoCell;
+    const half = (cells * cs) / 2;
+    let hx0 = Infinity, hx1 = -Infinity, hz0 = Infinity, hz1 = -Infinity;
+    if (this.lastCx !== Infinity) {
+      const r = this.effRadius() - 2;
+      hx0 = (this.lastCx - r) * CHUNK_SIZE;
+      hx1 = (this.lastCx + r + 1) * CHUNK_SIZE;
+      hz0 = (this.lastCz - r) * CHUNK_SIZE;
+      hz1 = (this.lastCz + r + 1) * CHUNK_SIZE;
+    }
+    const idx = this.farIndexArr;
+    const n = cells + 1;
+    let q = 0;
+    for (let j = 0; j < cells; j++) {
+      const z0 = this.farGeoOz - half + j * cs;
+      const inZ = z0 >= hz0 && z0 + cs <= hz1;
+      for (let i = 0; i < cells; i++) {
+        if (inZ) {
+          const x0 = this.farGeoOx - half + i * cs;
+          if (x0 >= hx0 && x0 + cs <= hx1) continue; // chunks cover this quad
+        }
+        const a = j * n + i;
+        const b = a + 1;
+        const c = a + n;
+        const d = c + 1;
+        idx[q++] = a; idx[q++] = c; idx[q++] = b;
+        idx[q++] = b; idx[q++] = c; idx[q++] = d;
+      }
+    }
+    this.farGeo.setDrawRange(0, q);
+    (this.farGeo.index as THREE.BufferAttribute).needsUpdate = true;
   }
 
   /** Wrap a worker payload in GPU objects and swap it into the scene. */

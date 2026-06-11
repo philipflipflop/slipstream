@@ -73,7 +73,10 @@ thrust model) — the handling differences fall out of the numbers, not scripts.
   seeded simplex). The render mesh, tree/settlement scattering *and* collision all sample
   the same function, so what you see is exactly what you hit. Chunk generation runs in a
   **Web Worker** — payloads arrive as transferable typed arrays, so the main thread never
-  hitches while streaming nested-LOD chunks around the aircraft.
+  hitches while streaming nested-LOD chunks around the aircraft. Beneath the chunk ring a
+  single coarse **horizon shell** (~60 km of the same heightfield, built as a conservative
+  lower envelope) carries the terrain to the horizon; the fog opens up with altitude, so
+  from 10,000 ft you see fading coastlines instead of the edge of the streamed grid.
 - **Flight model**: real force integration — CL(α) curve with post-stall falloff, induced
   drag from aspect ratio, sideslip weathervaning, control authority scaling with dynamic
   pressure, air density falling with altitude, ground roll with brakes/steering and crash

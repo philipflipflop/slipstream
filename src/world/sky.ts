@@ -4,6 +4,7 @@
  * billboard cumulus clouds built from a generated canvas texture.
  */
 import * as THREE from 'three';
+import { clamp, damp } from '../core/math';
 
 const SKY_VERT = /* glsl */ `
   varying vec3 vDir;
@@ -68,6 +69,7 @@ export class Sky {
   readonly fogColor = new THREE.Color(0xc6d3e0);
   private dome: THREE.Mesh;
   private clouds: THREE.Sprite[] = [];
+  private cloudBaseOpacity: number[] = [];
   private cloudSpan = 9000;
 
   constructor(scene: THREE.Scene, cloudCount: number) {
@@ -120,6 +122,7 @@ export class Sky {
         fog: false,
       });
       const sp = new THREE.Sprite(mat2);
+      this.cloudBaseOpacity.push(mat2.opacity);
       const w = 700 + Math.random() * 1600;
       sp.scale.set(w, w * (0.3 + Math.random() * 0.18), 1);
       sp.position.set(
@@ -137,22 +140,37 @@ export class Sky {
     this.sun.castShadow = enabled;
   }
 
-  update(center: THREE.Vector3): void {
+  update(center: THREE.Vector3, fogFar = 7000, dt = 0.016): void {
     this.dome.position.copy(center);
 
     // shadow frustum chases the player
     this.sun.position.copy(center).addScaledVector(this.sunDir, 1800);
     this.sun.target.position.copy(center);
 
-    // wrap clouds around the player so the layer never ends
+    // the cloud layer breathes with the fog: at altitude you can see much
+    // further, so spread the layer out (scaling positions with the span keeps
+    // the motion smooth — it reads as drift, not teleporting)
+    const prevSpan = this.cloudSpan;
+    this.cloudSpan = clamp(damp(this.cloudSpan, fogFar * 0.92 + 800, 0.6, dt), 9000, 28000);
+    const k = this.cloudSpan / prevSpan;
     const span = this.cloudSpan;
-    for (const c of this.clouds) {
-      let dx = c.position.x - center.x;
-      let dz = c.position.z - center.z;
+    for (let i = 0; i < this.clouds.length; i++) {
+      const c = this.clouds[i];
+      if (k !== 1) {
+        c.position.x = center.x + (c.position.x - center.x) * k;
+        c.position.z = center.z + (c.position.z - center.z) * k;
+      }
+      // wrap around the player so the layer never ends
+      const dx = c.position.x - center.x;
+      const dz = c.position.z - center.z;
       if (dx > span) c.position.x -= span * 2;
       else if (dx < -span) c.position.x += span * 2;
       if (dz > span) c.position.z -= span * 2;
       else if (dz < -span) c.position.z += span * 2;
+      // fade out near the wrap boundary so a recycled puff never pops
+      const dist = Math.hypot(c.position.x - center.x, c.position.z - center.z);
+      const fade = 1 - clamp((dist / span - 0.78) / 0.2, 0, 1);
+      (c.material as THREE.SpriteMaterial).opacity = this.cloudBaseOpacity[i] * fade;
     }
   }
 }

@@ -178,3 +178,89 @@ export function payloadTransfers(p: ChunkPayload): ArrayBuffer[] {
     p.treeMats.buffer, p.houseMats.buffer, p.houseTints.buffer,
   ] as ArrayBuffer[]; // typed arrays here are always plain ArrayBuffer-backed
 }
+
+/* ---------------------------------------------------- far shell ---- */
+
+export interface FarPayload {
+  far: true;
+  ox: number;
+  oz: number;
+  cells: number;
+  cellSize: number;
+  positions: Float32Array; // relative to (ox, 0, oz)
+  normals: Float32Array;
+  colors: Float32Array;
+}
+
+/**
+ * One coarse mega-mesh of the whole horizon: a (cells+1)² lattice centred on
+ * (ox, oz) covering cells·cellSize metres a side. It sits underneath the
+ * detailed chunk ring and extends the visible world out to ~30 km, so at
+ * altitude the eye meets fogged terrain instead of the edge of the chunk grid.
+ *
+ * Heights take the MINIMUM of the centre and four half-step samples, then
+ * drop a few metres more: a conservative lower envelope, so wherever detailed
+ * chunks exist they always render strictly above the shell.
+ */
+export function buildFarPayload(
+  gen: WorldGen,
+  ox: number,
+  oz: number,
+  cells: number,
+  cellSize: number,
+): FarPayload {
+  const n = cells + 1;
+  const half = (cells * cellSize) / 2;
+  const lat = new Float32Array(n * n);
+  for (let j = 0; j < n; j++) {
+    const wz = oz - half + j * cellSize;
+    for (let i = 0; i < n; i++) {
+      lat[j * n + i] = gen.heightAt(ox - half + i * cellSize, wz);
+    }
+  }
+  const latH = (i: number, j: number) =>
+    lat[Math.min(Math.max(j, 0), cells) * n + Math.min(Math.max(i, 0), cells)];
+
+  const positions = new Float32Array(n * n * 3);
+  const normals = new Float32Array(n * n * 3);
+  const colors = new Float32Array(n * n * 3);
+  const hs = cellSize / 2;
+  const colorTmp: number[] = [0, 0, 0];
+
+  let v = 0;
+  for (let j = 0; j < n; j++) {
+    const wz = oz - half + j * cellSize;
+    for (let i = 0; i < n; i++) {
+      const wx = ox - half + i * cellSize;
+      const hc = lat[j * n + i];
+      const h = Math.min(
+        hc,
+        gen.heightAt(wx - hs, wz), gen.heightAt(wx + hs, wz),
+        gen.heightAt(wx, wz - hs), gen.heightAt(wx, wz + hs),
+      ) - 6;
+      positions[v * 3] = wx - ox;
+      positions[v * 3 + 1] = h;
+      positions[v * 3 + 2] = wz - oz;
+
+      const nx = latH(i - 1, j) - latH(i + 1, j);
+      const nz = latH(i, j - 1) - latH(i, j + 1);
+      const ny = 2 * cellSize;
+      const il = 1 / Math.hypot(nx, ny, nz);
+      normals[v * 3] = nx * il;
+      normals[v * 3 + 1] = ny * il;
+      normals[v * 3 + 2] = nz * il;
+
+      gen.colorAt(wx, wz, hc, 1 - ny * il, colorTmp);
+      colors[v * 3] = colorTmp[0];
+      colors[v * 3 + 1] = colorTmp[1];
+      colors[v * 3 + 2] = colorTmp[2];
+      v++;
+    }
+  }
+
+  return { far: true, ox, oz, cells, cellSize, positions, normals, colors };
+}
+
+export function farTransfers(p: FarPayload): ArrayBuffer[] {
+  return [p.positions.buffer, p.normals.buffer, p.colors.buffer] as ArrayBuffer[];
+}
