@@ -39,6 +39,39 @@ function buildTreeGeometry(): THREE.BufferGeometry {
   return mergeGeoms(parts);
 }
 
+function buildBroadleafGeometry(): THREE.BufferGeometry {
+  // deciduous tree: short trunk + lumpy ellipsoid canopy (3 offset spheres)
+  const parts: THREE.BufferGeometry[] = [];
+  const trunk = new THREE.CylinderGeometry(0.5, 0.75, 3.6, 5);
+  trunk.translate(0, 1.8, 0);
+  paintGeometry(trunk, 0.32, 0.22, 0.13);
+  parts.push(trunk);
+  const blobs: Array<[number, number, number, number]> = [
+    [0, 5.6, 0, 3.6], [1.7, 4.9, 0.6, 2.5], [-1.4, 5.1, -0.9, 2.3],
+  ];
+  for (const [bx, by, bz, br] of blobs) {
+    const s = new THREE.SphereGeometry(br, 6, 5);
+    s.scale(1, 0.82, 1);
+    s.translate(bx, by, bz);
+    paintGeometry(s, 0.16, 0.4, 0.1);
+    parts.push(s);
+  }
+  return mergeGeoms(parts);
+}
+
+function buildRockGeometry(): THREE.BufferGeometry {
+  // crushed icosahedron, flat-shaded for hard facets
+  const g = new THREE.IcosahedronGeometry(1, 0);
+  const pos = g.attributes.position;
+  for (let i = 0; i < pos.count; i++) {
+    const k = 0.75 + Math.sin(i * 12.9898) * 0.5 * 0.35;
+    pos.setXYZ(i, pos.getX(i) * k, pos.getY(i) * 0.78 * k, pos.getZ(i) * k);
+  }
+  g.computeVertexNormals();
+  paintGeometry(g, 0.46, 0.43, 0.4);
+  return g;
+}
+
 function buildHouseGeometry(): THREE.BufferGeometry {
   const parts: THREE.BufferGeometry[] = [];
   const walls = new THREE.BoxGeometry(1, 1, 1);
@@ -100,6 +133,8 @@ export class TerrainManager {
   private treeMat: THREE.MeshLambertMaterial;
   private houseMat: THREE.MeshLambertMaterial;
   private treeGeo: THREE.BufferGeometry;
+  private leafGeo: THREE.BufferGeometry;
+  private rockGeo: THREE.BufferGeometry;
   private houseGeo: THREE.BufferGeometry;
   private lastCx = Infinity;
   private lastCz = Infinity;
@@ -137,6 +172,8 @@ export class TerrainManager {
     this.treeMat = new THREE.MeshLambertMaterial({ vertexColors: true });
     this.houseMat = new THREE.MeshLambertMaterial({ vertexColors: true });
     this.treeGeo = buildTreeGeometry();
+    this.leafGeo = buildBroadleafGeometry();
+    this.rockGeo = buildRockGeometry();
     this.houseGeo = buildHouseGeometry();
 
     try {
@@ -158,17 +195,20 @@ export class TerrainManager {
   }
 
   // how far out each resolution reaches, in rings; set by quality preset
+  ultraRing = -1; // res 112 (8 m steps) — close-up detail; -1 disables
   fineRing = 3;
   midRing = 5;
   fineRingHigh = 5;
   midRingHigh = 8;
 
-  // resolutions nest (56 = 2×28 = 4×14): a coarse chunk's vertices are an
-  // exact subset of the fine grid, so shorelines and ridges don't crawl when
-  // a chunk upgrades LOD — and geomorph starts can reproduce the coarse
-  // surface exactly. At altitude the whole area below is in plain view, so
-  // the fine rings reach further out.
+  // resolutions nest (112 = 2×56 = 4×28 = 8×14): a coarse chunk's vertices
+  // are an exact subset of the fine grid, so shorelines and ridges don't
+  // crawl when a chunk upgrades LOD — and geomorph starts can reproduce the
+  // coarse surface exactly. At altitude the whole area below is in plain
+  // view, so the fine rings reach further out (but ultra is skipped: 8 m
+  // facets are indistinguishable from 16 m ones a kilometre below you).
   private resForRing(ring: number): number {
+    if (!this.highAlt && ring <= this.ultraRing) return 112;
     if (ring <= (this.highAlt ? this.fineRingHigh : this.fineRing)) return 56;
     if (ring <= (this.highAlt ? this.midRingHigh : this.midRing)) return 28;
     return 14;
@@ -231,9 +271,12 @@ export class TerrainManager {
       const ring = Math.max(Math.abs(job.cx - cx), Math.abs(job.cz - cz));
       if (ring > this.effRadius()) continue; // stale
       const key = `${job.cx},${job.cz}`;
-      const res = this.resForRing(ring);
+      let res = this.resForRing(ring);
       const existing = this.chunks.get(key);
       if (existing && existing.res >= res) continue;
+      // a missing chunk appears fast at 56 first; the ultra res arrives a
+      // beat later as a seamless geomorph upgrade (matters at boot/teleport)
+      if (!existing && res > 56) res = 56;
       if ((this.pending.get(key) ?? 0) >= res) continue;
       this.pending.set(key, res);
       const prev = existing?.res ?? 0;
@@ -415,11 +458,48 @@ export class TerrainManager {
     mat.onBeforeCompile = (sh) => {
       sh.uniforms.uMorph = u;
       sh.vertexShader =
-        'attribute float baseY;\nuniform float uMorph;\n' +
+        'attribute float baseY;\nuniform float uMorph;\nvarying vec3 vTWorld;\n' +
         sh.vertexShader.replace(
           '#include <begin_vertex>',
-          '#include <begin_vertex>\n\ttransformed.y = mix(baseY, position.y, uMorph);',
+          '#include <begin_vertex>\n\ttransformed.y = mix(baseY, position.y, uMorph);' +
+          '\n\tvTWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;',
         );
+      // close-range albedo detail: two octaves of value noise break up the
+      // smooth vertex-colour interpolation that reads as "low poly" up close;
+      // fades out by ~2.5 km so the far field renders exactly as before
+      sh.fragmentShader =
+        'varying vec3 vTWorld;\n' +
+        sh.fragmentShader
+          .replace(
+            '#include <common>',
+            `#include <common>
+            float tHash(vec2 p) {
+              return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+            }
+            float tNoise(vec2 p) {
+              vec2 i = floor(p);
+              vec2 f = fract(p);
+              vec2 s = f * f * (3.0 - 2.0 * f);
+              return mix(
+                mix(tHash(i), tHash(i + vec2(1.0, 0.0)), s.x),
+                mix(tHash(i + vec2(0.0, 1.0)), tHash(i + vec2(1.0, 1.0)), s.x),
+                s.y);
+            }`,
+          )
+          .replace(
+            '#include <color_fragment>',
+            `#include <color_fragment>
+            {
+              float dDist = distance(vTWorld, cameraPosition);
+              float dAmt = smoothstep(2500.0, 120.0, dDist);
+              if (dAmt > 0.003) {
+                float n1 = tNoise(vTWorld.xz * 1.45);
+                float n2 = tNoise(vTWorld.xz * 0.21 + 37.0);
+                float n3 = tNoise(vTWorld.xz * 7.3) * smoothstep(380.0, 40.0, dDist);
+                diffuseColor.rgb *= 1.0 + ((n1 - 0.5) * 0.14 + (n2 - 0.5) * 0.2 + (n3 - 0.5) * 0.1) * dAmt;
+              }
+            }`,
+          );
     };
     mat.customProgramCacheKey = () => 'terrain-geomorph';
     return mat;
@@ -462,25 +542,26 @@ export class TerrainManager {
     group.add(mesh);
     const disposables: Array<{ dispose(): void }> = [geo, mat];
 
-    const treeCount = p.treeMats.length / 16;
-    if (treeCount > 0) {
-      const im = new THREE.InstancedMesh(this.treeGeo, this.treeMat, treeCount);
-      (im.instanceMatrix.array as Float32Array).set(p.treeMats);
+    const addInstances = (geo: THREE.BufferGeometry, mat: THREE.Material, mats: Float32Array, tints: Float32Array): void => {
+      const count = mats.length / 16;
+      if (count === 0) return;
+      const im = new THREE.InstancedMesh(geo, mat, count);
+      (im.instanceMatrix.array as Float32Array).set(mats);
       im.instanceMatrix.needsUpdate = true;
+      if (tints.length > 0) im.instanceColor = new THREE.InstancedBufferAttribute(tints, 3);
       group.add(im);
       disposables.push({ dispose: () => im.dispose() });
-    }
-    const houseCount = p.houseMats.length / 16;
-    if (houseCount > 0) {
-      const im = new THREE.InstancedMesh(this.houseGeo, this.houseMat, houseCount);
-      (im.instanceMatrix.array as Float32Array).set(p.houseMats);
-      im.instanceMatrix.needsUpdate = true;
-      im.instanceColor = new THREE.InstancedBufferAttribute(p.houseTints, 3);
-      group.add(im);
-      disposables.push({ dispose: () => im.dispose() });
-    }
+    };
+    addInstances(this.treeGeo, this.treeMat, p.treeMats, p.treeTints);
+    addInstances(this.leafGeo, this.treeMat, p.leafMats, p.leafTints);
+    addInstances(this.rockGeo, this.treeMat, p.rockMats, p.rockTints);
+    addInstances(this.houseGeo, this.houseMat, p.houseMats, p.houseTints);
 
     this.scene.add(group);
     this.chunks.set(key, { key, cx: p.cx, cz: p.cz, res: p.res, group, disposables });
+
+    // if this was a capped first build, queue the full-resolution upgrade
+    const want = this.resForRing(ring);
+    if (p.res < want) this.queue.push({ cx: p.cx, cz: p.cz, res: want, priority: ring * ring });
   }
 }

@@ -316,15 +316,15 @@ class Game {
     const t = this.terrain;
     if (q === 'low') {
       t.configureFar(80, 600); // 48 km shell
-      [t.fineRing, t.midRing, t.fineRingHigh, t.midRingHigh] = [2, 4, 3, 5];
+      [t.ultraRing, t.fineRing, t.midRing, t.fineRingHigh, t.midRingHigh] = [-1, 2, 4, 3, 5];
       this.fogFarCap = 14000;
     } else if (q === 'medium') {
       t.configureFar(150, 360); // 54 km shell
-      [t.fineRing, t.midRing, t.fineRingHigh, t.midRingHigh] = [3, 5, 4, 6];
+      [t.ultraRing, t.fineRing, t.midRing, t.fineRingHigh, t.midRingHigh] = [0, 3, 5, 4, 6];
       this.fogFarCap = 20000;
     } else {
       t.configureFar(210, 300); // 63 km shell
-      [t.fineRing, t.midRing, t.fineRingHigh, t.midRingHigh] = [3, 5, 5, 8];
+      [t.ultraRing, t.fineRing, t.midRing, t.fineRingHigh, t.midRingHigh] = [1, 3, 5, 5, 8];
       this.fogFarCap = 26000;
     }
     const view = this.terrain.radius * CHUNK_SIZE;

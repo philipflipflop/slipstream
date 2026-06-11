@@ -19,7 +19,12 @@ export interface ChunkPayload {
   /** per-vertex geomorph start height: the exact surface this chunk replaces */
   baseY: Float32Array;
   index: Uint32Array;
-  treeMats: Float32Array;   // 16 floats per instance (column-major)
+  treeMats: Float32Array;   // conifers; 16 floats per instance (column-major)
+  treeTints: Float32Array;  // 3 floats per conifer
+  leafMats: Float32Array;   // broadleaf trees
+  leafTints: Float32Array;
+  rockMats: Float32Array;   // boulders
+  rockTints: Float32Array;
   houseMats: Float32Array;
   houseTints: Float32Array; // 3 floats per instance
 }
@@ -181,13 +186,18 @@ export function buildChunkPayload(
 
   // ---- scatter ----
   const treeList: number[] = [];
+  const treeTintList: number[] = [];
+  const leafList: number[] = [];
+  const leafTintList: number[] = [];
+  const rockList: number[] = [];
+  const rockTintList: number[] = [];
   const houseList: number[] = [];
   const tintList: number[] = [];
 
   if (scatterLevel > 0) {
     const rng = makeRng(Math.floor(hash2(cx, cz) * 0xffffffff));
 
-    const treeTries = scatterLevel === 2 ? 170 : 70;
+    const treeTries = scatterLevel === 2 ? 240 : 90;
     for (let t = 0; t < treeTries; t++) {
       const wx = x0 + rng() * CHUNK_SIZE;
       const wz = z0 + rng() * CHUNK_SIZE;
@@ -201,9 +211,41 @@ export function buildChunkPayload(
       const s = 0.8 + rng() * 1.1;
       const sy = s * (0.85 + rng() * 0.4);
       const theta = rng() * Math.PI * 2;
-      const o = treeList.length;
-      treeList.length = o + 16;
-      composeYRot(treeList, o, wx, h - 0.4, wz, theta, s, sy, s);
+      // broadleaf in moist lowland, conifers everywhere else
+      const broadleaf = h < 210 && gen.drynessAt(wx, wz) < 0.52 && rng() < 0.65;
+      const k = 0.82 + rng() * 0.36; // per-tree brightness variation
+      if (broadleaf) {
+        const o = leafList.length;
+        leafList.length = o + 16;
+        composeYRot(leafList, o, wx, h - 0.4, wz, theta, s * 1.15, sy, s * 1.15);
+        leafTintList.push(k * (0.9 + rng() * 0.2), k, k * 0.88);
+      } else {
+        const o = treeList.length;
+        treeList.length = o + 16;
+        composeYRot(treeList, o, wx, h - 0.4, wz, theta, s, sy, s);
+        treeTintList.push(k * 0.95, k, k * 0.92);
+      }
+    }
+
+    // boulders on steep faces and high ground, half-buried
+    const rockTries = scatterLevel === 2 ? 70 : 26;
+    for (let t = 0; t < rockTries; t++) {
+      const wx = x0 + rng() * CHUNK_SIZE;
+      const wz = z0 + rng() * CHUNK_SIZE;
+      if (gen.isOnApron(wx, wz)) continue;
+      const h = gen.heightAt(wx, wz);
+      if (h < WATER_LEVEL + 2) continue;
+      const n = gen.normalAt(wx, wz, 5);
+      const steep = 1 - n.y;
+      // mostly where it's rocky: steep slopes or alpine elevations
+      if (rng() > steep * 2.6 + smoothstepN(h, 260, 520) * 0.7) continue;
+      const s = 0.6 + rng() * rng() * 3.4;
+      const theta = rng() * Math.PI * 2;
+      const o = rockList.length;
+      rockList.length = o + 16;
+      composeYRot(rockList, o, wx, h - s * 0.35, wz, theta, s, s * (0.7 + rng() * 0.5), s);
+      const k = 0.75 + rng() * 0.45;
+      rockTintList.push(k, k * 0.97, k * 0.93);
     }
 
     const houseTries = scatterLevel === 2 ? 50 : 16;
@@ -233,16 +275,30 @@ export function buildChunkPayload(
     cx, cz, res,
     positions, normals, colors, baseY, index,
     treeMats: Float32Array.from(treeList),
+    treeTints: Float32Array.from(treeTintList),
+    leafMats: Float32Array.from(leafList),
+    leafTints: Float32Array.from(leafTintList),
+    rockMats: Float32Array.from(rockList),
+    rockTints: Float32Array.from(rockTintList),
     houseMats: Float32Array.from(houseList),
     houseTints: Float32Array.from(tintList),
   };
+}
+
+function smoothstepN(v: number, lo: number, hi: number): number {
+  const t = clampN((v - lo) / (hi - lo), 0, 1);
+  return t * t * (3 - 2 * t);
+}
+function clampN(v: number, lo: number, hi: number): number {
+  return v < lo ? lo : v > hi ? hi : v;
 }
 
 /** The transferable buffers of a payload (for zero-copy postMessage). */
 export function payloadTransfers(p: ChunkPayload): ArrayBuffer[] {
   return [
     p.positions.buffer, p.normals.buffer, p.colors.buffer, p.baseY.buffer, p.index.buffer,
-    p.treeMats.buffer, p.houseMats.buffer, p.houseTints.buffer,
+    p.treeMats.buffer, p.treeTints.buffer, p.leafMats.buffer, p.leafTints.buffer,
+    p.rockMats.buffer, p.rockTints.buffer, p.houseMats.buffer, p.houseTints.buffer,
   ] as ArrayBuffer[]; // typed arrays here are always plain ArrayBuffer-backed
 }
 
