@@ -1,0 +1,12 @@
+#!/bin/sh
+# Cloudflare Pages builds with npm 10, which requires the top-level
+# @emnapi/core + @emnapi/runtime entries in package-lock.json. Local npm 11
+# tooling intermittently prunes them, which breaks the deploy. Refuse any
+# commit that stages that prune.
+if git diff --cached -- package-lock.json | grep -q '^-.*"node_modules/@emnapi/core"'; then
+  echo "BLOCKED: this commit removes @emnapi entries from package-lock.json"
+  echo "(npm 11 prune — it breaks Cloudflare's npm 10 'npm ci')."
+  echo "Restore the lockfile first:  git checkout HEAD -- package-lock.json"
+  exit 1
+fi
+exit 0
