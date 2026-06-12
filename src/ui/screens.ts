@@ -348,7 +348,7 @@ export class Screens {
       <div class="krow"><span>Pitch & roll</span><kbd>left stick</kbd></div>
       <div class="krow"><span>Throttle</span><kbd>right lever</kbd></div>
       <div class="krow"><span>Rudder</span><kbd>RUD pedals</kbd></div>
-      <div class="krow"><span>Brakes</span><kbd>BRAKE (hold)</kbd></div>
+      <div class="krow"><span>Brakes / fire cannon (airborne)</span><kbd>BRAKE (hold)</kbd></div>
       <div class="krow"><span>Gear / flaps / camera</span><kbd>top buttons</kbd></div>`;
     const keyRows = `
       <div class="krow"><span>Pitch</span><kbd>W / S</kbd></div>
@@ -358,13 +358,19 @@ export class Screens {
       <div class="krow"><span>Throttle presets</span><kbd>1 – 9, 0</kbd></div>
       <div class="krow"><span>Flaps</span><kbd>F / V</kbd></div>
       <div class="krow"><span>Landing gear</span><kbd>G</kbd></div>
-      <div class="krow"><span>Wheel brakes</span><kbd>Space</kbd></div>
+      <div class="krow"><span>Wheel brakes / fire cannon (airborne)</span><kbd>Space</kbd></div>
       <div class="krow"><span>Speed brake</span><kbd>B</kbd></div>
       <div class="krow"><span>Autopilot hold</span><kbd>T</kbd></div>
+      <div class="krow"><span>AP heading bug</span><kbd>[ / ]</kbd></div>
+      <div class="krow"><span>AP altitude bug</span><kbd>PgUp / PgDn</kbd></div>
+      <div class="krow"><span>AP speed bug</span><kbd>Home / End</kbd></div>
+      <div class="krow"><span>Nav chart / flight computer</span><kbd>N</kbd></div>
+      <div class="krow"><span>Chart zoom</span><kbd>, / .</kbd></div>
       <div class="krow"><span>Camera</span><kbd>C</kbd></div>
       <div class="krow"><span>Look around / zoom</span><kbd>Mouse drag / wheel</kbd></div>
       <div class="krow"><span>HUD full / min / off</span><kbd>H</kbd></div>
       <div class="krow"><span>Minimap</span><kbd>M</kbd></div>
+      <div class="krow"><span>Restart flight</span><kbd>R</kbd></div>
       <div class="krow"><span>Pause</span><kbd>Esc / P</kbd></div>`;
     const h = this.el(`
       <div class="screen" style="z-index:70">
@@ -377,6 +383,10 @@ export class Screens {
             Flying 101: full throttle, let speed build past the white arc, then ease back.
             Keep the nose where the speed stays healthy — if <b style="color:var(--danger)">STALL</b> flashes,
             push forward and add power. Land into the runway slow, flaps down, gentle sink.
+            Press <kbd>N</kbd> for the flight computer: click the chart to plan a route
+            (clicks near a runway snap to it), then ENGAGE NAV and the autopilot flies it.
+            In the Vector, hold <kbd>Space</kbd> airborne to fire — ten target balloons
+            float east of Meridian Field.
           </p>
           <div class="row"><button class="btn primary close">Got It</button></div>
         </div>
