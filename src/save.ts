@@ -1,10 +1,12 @@
 /** localStorage persistence for settings + best times. */
+import type { WorldTheme } from './world/heightfield';
 
 export type Quality = 'low' | 'medium' | 'high';
 
 export interface SaveData {
   aircraft: string;
   mode: 'free' | 'race';
+  world: WorldTheme;
   quality: Quality;
   invertY: boolean;
   sensitivity: number;
@@ -18,6 +20,7 @@ export function loadSave(): SaveData {
   const def: SaveData = {
     aircraft: 'skylark',
     mode: 'free',
+    world: 'archipelago',
     quality: defaultQuality(),
     invertY: false,
     sensitivity: 1,

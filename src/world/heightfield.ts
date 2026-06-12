@@ -14,6 +14,23 @@ import { clamp, lerp, smoothstep, hash2 } from '../core/math';
 export const WATER_LEVEL = 0;
 export const AIRPORT_ELEV = 8;
 
+/** Selectable world themes ("maps"). All share the home airfield cluster. */
+export type WorldTheme = 'archipelago' | 'mesa' | 'metro';
+
+export const WORLDS: Array<{ id: WorldTheme; name: string; desc: string }> = [
+  { id: 'archipelago', name: 'EMERALD ARCHIPELAGO', desc: 'Endless islands, forests and snow-capped ranges' },
+  { id: 'mesa', name: 'REDSTONE MESA', desc: 'Layered desert plateaus carved by winding canyons' },
+  { id: 'metro', name: 'MERIDIAN BAY', desc: 'A coastal metropolis — downtown towers and suburb grids' },
+];
+
+/** Downtown cores for the metro theme (deterministic, near the home field). */
+const CITY_CENTERS = [
+  { x: -5200, z: -2600, r: 3600, tall: 1 },    // downtown, west across the river
+  { x: -9800, z: -7600, r: 2400, tall: 0.45 }, // midtown ridge
+  { x: -3400, z: -10200, r: 2100, tall: 0.3 }, // north suburbs
+  { x: 2600, z: -13800, r: 1900, tall: 0.35 }, // airport-north business park
+];
+
 export interface AirfieldDef {
   name: string;
   code: string;   // single-letter minimap designator
@@ -57,7 +74,7 @@ export class WorldGen {
   private fieldCache = new Map<number, AirfieldDef | null>();
   private scratch: AirfieldDef[] = [];
 
-  constructor(public readonly seed = 20260610) {
+  constructor(public readonly seed = 20260610, public readonly theme: WorldTheme = 'archipelago') {
     this.terra = new Simplex2(seed);
     this.moist = new Simplex2(seed ^ 0x51f15e);
     this.town = new Simplex2(seed ^ 0x70a57);
@@ -71,19 +88,28 @@ export class WorldGen {
     const wx = x + t.noise(x * 0.00022 + 53.1, z * 0.00022) * 1300;
     const wz = z + t.noise(x * 0.00022, z * 0.00022 + 97.7) * 1300;
 
+    let e: number;
+    if (this.theme === 'mesa') e = this.mesaHeight(x, z, wx, wz);
+    else if (this.theme === 'metro') e = this.metroHeight(x, z, wx, wz);
+    else e = this.islandHeight(x, z, wx, wz);
+
+    // drain the marginal band around sea level: terrain that barely skims
+    // the waterline either deepens into a proper lake or stays clearly dry.
+    // Steep, decisive shorelines render cleanly at every LOD instead of
+    // shimmering as coplanar slivers against the water sheet.
+    const sea = e - 0.6;
+    e -= 2.4 * Math.exp(-(sea * sea) / 5.76);
+
+    return e;
+  }
+
+  /** Original theme: island chains, forests, big alpine ranges. */
+  private islandHeight(x: number, z: number, wx: number, wz: number): number {
+    const t = this.terra;
+
     // continental mask — guarantee solid ground around the spawn airfield
     let c = t.fbm(wx * 0.000095, wz * 0.000095, 3);
-    const r0 = Math.hypot(x, z);
-    c += smoothstep(9000, 2000, r0) * 0.55; // spawn island boost
-    // …and under the hand-placed outlying fields
-    for (let i = 1; i < AIRPORTS.length; i++) {
-      const ap = AIRPORTS[i];
-      const dax = x - ap.x;
-      const daz = z - ap.z;
-      if (Math.abs(dax) < 5200 && Math.abs(daz) < 5200) {
-        c += smoothstep(5200, 1400, Math.hypot(dax, daz)) * 0.5;
-      }
-    }
+    c += this.spawnBoost(x, z);
     const land = smoothstep(-0.32, 0.22, c);
 
     // continental shelf: deep ocean → coastal plains
@@ -100,15 +126,111 @@ export class WorldGen {
 
     // fine surface detail
     e += t.noise(wx * 0.0065, wz * 0.0065) * 2.2 * land;
-
-    // drain the marginal band around sea level: terrain that barely skims
-    // the waterline either deepens into a proper lake or stays clearly dry.
-    // Steep, decisive shorelines render cleanly at every LOD instead of
-    // shimmering as coplanar slivers against the water sheet.
-    const sea = e - 0.6;
-    e -= 2.4 * Math.exp(-(sea * sea) / 5.76);
-
     return e;
+  }
+
+  /** Desert theme: stacked plateau terraces cut by winding canyon systems. */
+  private mesaHeight(x: number, z: number, wx: number, wz: number): number {
+    const t = this.terra;
+
+    // almost all land; distant inland seas only
+    let c = t.fbm(wx * 0.00006, wz * 0.00006, 3) + 0.5;
+    c += this.spawnBoost(x, z);
+    const land = smoothstep(-0.45, 0.05, c);
+    let e = lerp(-45, 24, land);
+
+    // terraced uplift: quantize a broad noise field into benches with sharp
+    // risers — the classic stepped-mesa profile
+    const h01 = clamp(t.fbm(wx * 0.00032, wz * 0.00032, 4) * 0.5 + 0.5, 0, 1);
+    const bands = h01 * 4.3;
+    const bench = Math.floor(bands);
+    const riser = smoothstep(0.6, 0.96, bands - bench);
+    e += (bench + riser) * 92 * land;
+
+    // canyon cut: |noise| ridge inverted into deep winding channels
+    const can = Math.abs(t.noise(wx * 0.00017 + 99.3, wz * 0.00017));
+    e -= smoothstep(0.16, 0.015, can) * 105 * land;
+
+    // sculpt: rocky shoulders + fine grit
+    e += t.ridged(wx * 0.0014, wz * 0.0014, 3) * 9 * land;
+    e += t.noise(wx * 0.006, wz * 0.006) * 2.4 * land;
+    return e;
+  }
+
+  /** Metro theme: a sheltered bay, flat coastal plain, city districts, hills inland. */
+  private metroHeight(x: number, z: number, wx: number, wz: number): number {
+    const t = this.terra;
+
+    let c = t.fbm(wx * 0.00009, wz * 0.00009, 3) + 0.18;
+    c += this.spawnBoost(x, z);
+    // carve the bay east of the home peninsula
+    c -= smoothstep(10500, 4200, Math.hypot(x - 10500, z + 4500)) * 1.25;
+    const land = smoothstep(-0.32, 0.22, c);
+
+    let e = lerp(-48, 11, land);
+    e += t.fbm(wx * 0.0009, wz * 0.0009, 4) * 13 * land; // gentle plain
+
+    // green hills well inland
+    const mm = smoothstep(0.34, 0.72, t.fbm(wx * 0.00013 + 777.7, wz * 0.00013, 3)) * land;
+    if (mm > 0.001) e += t.ridged(wx * 0.0004, wz * 0.0004, 4) * 420 * mm;
+
+    e += t.noise(wx * 0.0065, wz * 0.0065) * 1.6 * land;
+
+    // city districts sit on graded, almost-flat ground
+    const cm = this.cityMaskAt(x, z);
+    if (cm > 0.001) {
+      e = lerp(e, 6.5 + t.noise(x * 0.0007, z * 0.0007) * 1.4, cm * 0.94);
+    }
+    return e;
+  }
+
+  /** Continental boost guaranteeing dry ground around every fixed field. */
+  private spawnBoost(x: number, z: number): number {
+    let c = smoothstep(9000, 2000, Math.hypot(x, z)) * 0.55;
+    for (let i = 1; i < AIRPORTS.length; i++) {
+      const ap = AIRPORTS[i];
+      const dax = x - ap.x;
+      const daz = z - ap.z;
+      if (Math.abs(dax) < 5200 && Math.abs(daz) < 5200) {
+        c += smoothstep(5200, 1400, Math.hypot(dax, daz)) * 0.5;
+      }
+    }
+    return c;
+  }
+
+  /** 0..1 urban density (metro theme only): how "city" a point is. */
+  cityMaskAt(x: number, z: number): number {
+    if (this.theme !== 'metro') return 0;
+    let m = 0;
+    for (const cc of CITY_CENTERS) {
+      const d = Math.hypot(x - cc.x, z - cc.z);
+      if (d < cc.r) {
+        const v = smoothstep(cc.r, cc.r * 0.3, d);
+        if (v > m) m = v;
+      }
+    }
+    // ragged district edges so the grid doesn't end in a circle
+    if (m > 0.001 && m < 0.999) {
+      m = clamp(m + this.town.noise(x * 0.0006 + 7.7, z * 0.0006) * 0.22, 0, 1);
+    }
+    return m;
+  }
+
+  /** True when a 104 m city block is a park square (kept green, no tower). */
+  parkBlockAt(bx: number, bz: number): boolean {
+    return this.town.noise(bx * 0.7 + 3.1, bz * 0.7) > 0.62;
+  }
+
+  /** 0..1 how strongly downtown (tall towers) a point is. */
+  downtownAt(x: number, z: number): number {
+    if (this.theme !== 'metro') return 0;
+    let m = 0;
+    for (const cc of CITY_CENTERS) {
+      const d = Math.hypot(x - cc.x, z - cc.z);
+      const v = smoothstep(cc.r * 0.55, cc.r * 0.12, d) * cc.tall;
+      if (v > m) m = v;
+    }
+    return m;
   }
 
   /** Terrain elevation in metres at world (x, z), runways flattened in. */
@@ -242,13 +364,23 @@ export class WorldGen {
   /** 0..1 forest density. */
   forestAt(x: number, z: number): number {
     const f = this.moist.fbm(x * 0.0008, z * 0.0008, 3);
-    return smoothstep(0.05, 0.42, f);
+    let d = smoothstep(0.05, 0.42, f);
+    if (this.theme === 'mesa') d *= 0.12; // scattered desert scrub
+    else if (this.theme === 'metro') d *= 1 - this.cityMaskAt(x, z) * 0.92;
+    return d;
   }
 
-  /** 0..1 settlement (buildings) density. */
+  /** 0..1 settlement (small houses) density. */
   settlementAt(x: number, z: number): number {
     const s = this.town.fbm(x * 0.00035 + 31.4, z * 0.00035, 2);
-    return smoothstep(0.34, 0.6, s);
+    let d = smoothstep(0.34, 0.6, s);
+    if (this.theme === 'mesa') d *= 0.35;
+    else if (this.theme === 'metro') {
+      // houses ring the city as suburbs but give way to the tower grid
+      const cm = this.cityMaskAt(x, z);
+      d = Math.max(d, smoothstep(0.05, 0.3, cm)) * (1 - smoothstep(0.35, 0.6, cm));
+    }
+    return d;
   }
 
   /** 0..1 dryness used to tint grass. */
@@ -305,6 +437,26 @@ export class WorldGen {
       b = lerp(0.52, 0.2, d);
     } else if (h < WATER_LEVEL + 3.2) {
       r = 0.82; g = 0.74; b = 0.54;                       // beach sand
+    } else if (this.theme === 'mesa') {
+      // banded strata: rust / terracotta / cream layers riding the benches
+      const band = (h + this.terra.noise(x * 0.0019, z * 0.0019) * 9) / 92;
+      const f = band - Math.floor(band);
+      const palette: Array<[number, number, number]> = [
+        [0.62, 0.32, 0.2], [0.72, 0.44, 0.26], [0.78, 0.58, 0.38], [0.6, 0.38, 0.3],
+      ];
+      const idx = Math.floor(band) & 3;
+      const [r1, g1, b1] = palette[idx];
+      const [r2, g2, b2] = palette[(idx + 1) & 3];
+      const k = smoothstep(0.82, 1, f);
+      r = lerp(r1, r2, k); g = lerp(g1, g2, k); b = lerp(b1, b2, k);
+      // canyon floors green up where water collects
+      if (h < 16) {
+        const v = smoothstep(16, 5, h) * 0.55;
+        r = lerp(r, 0.32, v); g = lerp(g, 0.46, v); b = lerp(b, 0.24, v);
+      }
+      // scrub flecks
+      const fr2 = forest * 0.5;
+      r = lerp(r, 0.25, fr2); g = lerp(g, 0.38, fr2); b = lerp(b, 0.2, fr2);
     } else if (h > 520 + dry * 160) {
       const sn = smoothstep(520, 700, h);
       r = lerp(0.45, 0.93, sn); g = lerp(0.42, 0.95, sn); b = lerp(0.4, 0.99, sn); // rock → snow
@@ -317,10 +469,32 @@ export class WorldGen {
       r = lerp(r, 0.12, fr2); g = lerp(g, 0.3, fr2); b = lerp(b, 0.12, fr2);
     }
 
+    // metro: paint the urban fabric — asphalt street grid between concrete
+    // blocks, with park squares left green
+    const cm = this.cityMaskAt(x, z);
+    if (cm > 0.18 && h > WATER_LEVEL + 1) {
+      const gx = ((x % 104) + 104) % 104;
+      const gz = ((z % 104) + 104) % 104;
+      const street = gx < 13 || gz < 13;
+      const park = this.parkBlockAt(Math.floor(x / 104), Math.floor(z / 104));
+      const a = smoothstep(0.18, 0.45, cm);
+      if (street) {
+        r = lerp(r, 0.2, a); g = lerp(g, 0.21, a); b = lerp(b, 0.23, a);
+      } else if (!park) {
+        const v = 0.5 + hash2(Math.floor(x / 104), Math.floor(z / 104)) * 0.16;
+        r = lerp(r, v, a * 0.85); g = lerp(g, v, a * 0.85); b = lerp(b, v * 0.98, a * 0.85);
+      }
+    }
+
     // steep faces turn to bare rock
     const rock = smoothstep(0.42, 0.75, slope);
     if (rock > 0 && h > WATER_LEVEL + 1) {
-      r = lerp(r, 0.42, rock); g = lerp(g, 0.38, rock); b = lerp(b, 0.36, rock);
+      if (this.theme === 'mesa') {
+        // exposed cliff strata stay warm-toned
+        r = lerp(r, 0.56, rock * 0.6); g = lerp(g, 0.34, rock * 0.6); b = lerp(b, 0.24, rock * 0.6);
+      } else {
+        r = lerp(r, 0.42, rock); g = lerp(g, 0.38, rock); b = lerp(b, 0.36, rock);
+      }
     }
 
     // paved runway + apron tint (one gather covers both checks)

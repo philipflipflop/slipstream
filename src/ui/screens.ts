@@ -4,6 +4,7 @@
  * toasts. Pure DOM — the canvas underneath stays in charge of pixels.
  */
 import { CATALOG } from '../aircraft/catalog';
+import { WORLDS, WorldTheme } from '../world/heightfield';
 import type { SaveData, Quality } from '../save';
 import { formatTime } from '../core/math';
 
@@ -24,6 +25,7 @@ export class Screens {
   onHangar: () => void = () => {};
   onAircraft: (id: string) => void = () => {};
   onMode: (mode: 'free' | 'race') => void = () => {};
+  onWorld: (world: WorldTheme) => void = () => {};
   onSettings: () => void = () => {};
   onAnyClick: () => void = () => {};
   /** kind: 'hdg' | 'alt' | 'spd'; dir: -1 | 1 */
@@ -122,13 +124,14 @@ export class Screens {
               <div class="mode-row">
                 <button class="mode-chip" data-mode="free">
                   <div class="mc-name">Free Flight</div>
-                  <div class="mc-desc">Explore the endless archipelago</div>
+                  <div class="mc-desc">Explore an endless world</div>
                 </button>
                 <button class="mode-chip" data-mode="race">
                   <div class="mc-name">Ring Rush</div>
                   <div class="mc-desc">14 gates against the clock</div>
                 </button>
               </div>
+              <div class="world-row"></div>
               <div class="best-time"></div>
             </div>
           </div>
@@ -159,6 +162,22 @@ export class Screens {
         this.save.mode = chip.dataset.mode as 'free' | 'race';
         this.onMode(this.save.mode);
         this.refreshMenu();
+      });
+    });
+
+    // world (map) selector
+    const wRow = m.querySelector('.world-row')!;
+    wRow.innerHTML = WORLDS.map(
+      (w) => `
+      <button class="world-chip" data-world="${w.id}">
+        <div class="wc-name">${w.name}</div>
+        <div class="wc-desc">${w.desc}</div>
+      </button>`,
+    ).join('');
+    wRow.querySelectorAll<HTMLButtonElement>('.world-chip').forEach((chip) => {
+      chip.addEventListener('click', () => {
+        const id = chip.dataset.world as WorldTheme;
+        if (id !== this.save.world) this.onWorld(id);
       });
     });
 
@@ -208,6 +227,9 @@ export class Screens {
 
     m.querySelectorAll<HTMLButtonElement>('.mode-chip').forEach((chip) => {
       chip.classList.toggle('on', chip.dataset.mode === this.save.mode);
+    });
+    m.querySelectorAll<HTMLButtonElement>('.world-chip').forEach((chip) => {
+      chip.classList.toggle('on', chip.dataset.world === this.save.world);
     });
 
     const best = this.save.bestTimes[spec.id];

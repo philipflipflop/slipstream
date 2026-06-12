@@ -72,6 +72,48 @@ function buildRockGeometry(): THREE.BufferGeometry {
   return g;
 }
 
+/** Unit-box tower: window-grid texture on the sides, plain roof. */
+function buildTowerGeometry(): THREE.BufferGeometry {
+  const g = new THREE.BoxGeometry(1, 1, 1);
+  g.translate(0, 0.5, 0);
+  // remap the top + bottom faces' UVs into the texture's solid roof strip
+  // (canvas y=248..256 → UV v≈0.0..0.03)
+  const uv = g.attributes.uv as THREE.BufferAttribute;
+  for (let face = 2; face <= 3; face++) {
+    for (let v = 0; v < 4; v++) {
+      uv.setXY(face * 4 + v, 0.02, 0.015);
+    }
+  }
+  return g;
+}
+
+function towerTexture(): THREE.CanvasTexture {
+  const c = document.createElement('canvas');
+  c.width = 128;
+  c.height = 256;
+  const ctx = c.getContext('2d')!;
+  // facade base
+  ctx.fillStyle = '#3a4350';
+  ctx.fillRect(0, 0, 128, 256);
+  // window grid: 10 columns × 24 floors, varied lit/unlit panes
+  for (let fy = 0; fy < 24; fy++) {
+    for (let fx = 0; fx < 10; fx++) {
+      const lit = Math.random();
+      ctx.fillStyle = lit > 0.93
+        ? 'rgba(255, 226, 150, 0.9)'
+        : `rgba(${120 + Math.random() * 60}, ${150 + Math.random() * 60}, ${175 + Math.random() * 55}, ${0.55 + Math.random() * 0.3})`;
+      ctx.fillRect(4 + fx * 12.4, 8 + fy * 10.2, 8.4, 6.6);
+    }
+  }
+  // solid roof strip in the top-left corner (top/bottom faces sample here)
+  ctx.fillStyle = '#2c3138';
+  ctx.fillRect(0, 248, 16, 8);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = 4;
+  return tex;
+}
+
 function buildHouseGeometry(): THREE.BufferGeometry {
   const parts: THREE.BufferGeometry[] = [];
   const walls = new THREE.BoxGeometry(1, 1, 1);
@@ -132,10 +174,12 @@ export class TerrainManager {
   private terrainMat: THREE.MeshLambertMaterial;
   private treeMat: THREE.MeshLambertMaterial;
   private houseMat: THREE.MeshLambertMaterial;
+  private towerMat: THREE.MeshLambertMaterial;
   private treeGeo: THREE.BufferGeometry;
   private leafGeo: THREE.BufferGeometry;
   private rockGeo: THREE.BufferGeometry;
   private houseGeo: THREE.BufferGeometry;
+  private towerGeo: THREE.BufferGeometry;
   private lastCx = Infinity;
   private lastCz = Infinity;
 
@@ -175,10 +219,12 @@ export class TerrainManager {
     this.leafGeo = buildBroadleafGeometry();
     this.rockGeo = buildRockGeometry();
     this.houseGeo = buildHouseGeometry();
+    this.towerGeo = buildTowerGeometry();
+    this.towerMat = new THREE.MeshLambertMaterial({ map: towerTexture() });
 
     try {
       this.worker = new Worker(new URL('./terrain.worker.ts', import.meta.url), { type: 'module' });
-      this.worker.postMessage({ type: 'init', seed: gen.seed });
+      this.worker.postMessage({ type: 'init', seed: gen.seed, theme: gen.theme });
       this.worker.onmessage = (e: MessageEvent<ChunkPayload | FarPayload>) => {
         if ('far' in e.data) this.farResult = e.data;
         else this.results.push(e.data);
@@ -556,6 +602,7 @@ export class TerrainManager {
     addInstances(this.leafGeo, this.treeMat, p.leafMats, p.leafTints);
     addInstances(this.rockGeo, this.treeMat, p.rockMats, p.rockTints);
     addInstances(this.houseGeo, this.houseMat, p.houseMats, p.houseTints);
+    addInstances(this.towerGeo, this.towerMat, p.towerMats, p.towerTints);
 
     this.scene.add(group);
     this.chunks.set(key, { key, cx: p.cx, cz: p.cz, res: p.res, group, disposables });

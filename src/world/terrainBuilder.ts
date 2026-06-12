@@ -27,6 +27,8 @@ export interface ChunkPayload {
   rockTints: Float32Array;
   houseMats: Float32Array;
   houseTints: Float32Array; // 3 floats per instance
+  towerMats: Float32Array;  // city buildings (metro theme)
+  towerTints: Float32Array;
 }
 
 /**
@@ -193,6 +195,65 @@ export function buildChunkPayload(
   const rockTintList: number[] = [];
   const houseList: number[] = [];
   const tintList: number[] = [];
+  const towerList: number[] = [];
+  const towerTintList: number[] = [];
+
+  // ---- city towers (metro theme) ----
+  // Towers are skyline landmarks: they're placed at EVERY scatter level —
+  // distant rings keep only the tall ones so downtown reads from 10 km out.
+  if (gen.cityMaskAt(x0 + CHUNK_SIZE / 2, z0 + CHUNK_SIZE / 2) > 0.02 ||
+      gen.cityMaskAt(x0, z0) > 0.02 || gen.cityMaskAt(x0 + CHUNK_SIZE, z0 + CHUNK_SIZE) > 0.02) {
+    const BLOCK = 104;
+    const bx0 = Math.floor(x0 / BLOCK);
+    const bx1 = Math.floor((x0 + CHUNK_SIZE) / BLOCK);
+    const bz0 = Math.floor(z0 / BLOCK);
+    const bz1 = Math.floor((z0 + CHUNK_SIZE) / BLOCK);
+    for (let bz = bz0; bz <= bz1; bz++) {
+      for (let bx = bx0; bx <= bx1; bx++) {
+        // one candidate per street block, owned by the chunk holding its centre
+        const wx = bx * BLOCK + 58.5;
+        const wz = bz * BLOCK + 58.5;
+        if (wx < x0 || wx >= x0 + CHUNK_SIZE || wz < z0 || wz >= z0 + CHUNK_SIZE) continue;
+        const cm = gen.cityMaskAt(wx, wz);
+        if (cm < 0.35) continue;
+        if (gen.parkBlockAt(bx, bz)) continue;
+        if (gen.isOnApron(wx, wz)) continue;
+        const h = gen.heightAt(wx, wz);
+        if (h < WATER_LEVEL + 2) continue;
+
+        const hsh = hash2(bx * 3 + 7, bz * 5 - 3);
+        const dt = gen.downtownAt(wx, wz);
+        const ht = 10 + hsh * hsh * 28 + dt * (36 + hash2(bx + 11, bz - 17) * 200);
+        if (scatterLevel === 0 && ht < 55) continue; // far rings: skyline only
+        const w = 26 + hash2(bx - 5, bz + 9) * 22;
+        const d = 26 + hash2(bx + 19, bz + 23) * 22;
+        const o = towerList.length;
+        towerList.length = o + 16;
+        composeYRot(towerList, o, wx, h - 0.5, wz, 0, w, ht, d);
+        // tall = cool glass, low = warm concrete
+        const glass = clampN((ht - 30) / 120, 0, 1);
+        const k = 0.8 + hash2(bx, bz * 7) * 0.3;
+        towerTintList.push(
+          k * (0.85 - glass * 0.35),
+          k * (0.85 - glass * 0.22),
+          k * (0.88 + glass * 0.04),
+        );
+        // a low annex beside the main tower fills out the block
+        if (hsh > 0.45 && scatterLevel > 0) {
+          const aw = 14 + hash2(bx * 13, bz) * 14;
+          const ah = 6 + hash2(bx, bz * 17) * 10;
+          const o2 = towerList.length;
+          towerList.length = o2 + 16;
+          composeYRot(
+            towerList, o2,
+            wx + (hsh > 0.7 ? 1 : -1) * (w / 2 + aw / 2 + 3), h - 0.5, wz + (aw - 14),
+            0, aw, ah, aw,
+          );
+          towerTintList.push(k * 0.78, k * 0.76, k * 0.74);
+        }
+      }
+    }
+  }
 
   if (scatterLevel > 0) {
     const rng = makeRng(Math.floor(hash2(cx, cz) * 0xffffffff));
@@ -282,6 +343,8 @@ export function buildChunkPayload(
     rockTints: Float32Array.from(rockTintList),
     houseMats: Float32Array.from(houseList),
     houseTints: Float32Array.from(tintList),
+    towerMats: Float32Array.from(towerList),
+    towerTints: Float32Array.from(towerTintList),
   };
 }
 
@@ -299,6 +362,7 @@ export function payloadTransfers(p: ChunkPayload): ArrayBuffer[] {
     p.positions.buffer, p.normals.buffer, p.colors.buffer, p.baseY.buffer, p.index.buffer,
     p.treeMats.buffer, p.treeTints.buffer, p.leafMats.buffer, p.leafTints.buffer,
     p.rockMats.buffer, p.rockTints.buffer, p.houseMats.buffer, p.houseTints.buffer,
+    p.towerMats.buffer, p.towerTints.buffer,
   ] as ArrayBuffer[]; // typed arrays here are always plain ArrayBuffer-backed
 }
 

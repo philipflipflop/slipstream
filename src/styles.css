@@ -199,6 +199,18 @@ html, body {
 .mode-chip.on { border-color: var(--phos); background: rgba(20, 50, 40, .45); }
 .mode-chip.on .mc-name { color: var(--phos); }
 
+.world-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+.world-chip {
+  flex: 1; min-width: 118px; text-align: left; cursor: pointer;
+  border: 1px solid var(--line); background: rgba(10, 19, 34, .55);
+  padding: 7px 10px; color: var(--paper); font-family: var(--font-ui);
+  transition: border-color .2s, background .2s;
+}
+.world-chip .wc-name { font-weight: 700; letter-spacing: .1em; font-size: 10.5px; }
+.world-chip .wc-desc { color: var(--fog); font-size: 10px; margin-top: 2px; }
+.world-chip.on { border-color: var(--amber); background: rgba(58, 42, 16, .4); }
+.world-chip.on .wc-name { color: var(--amber); }
+
 .menu-foot {
   display: flex; gap: 12px; align-items: center; justify-content: space-between;
   padding-top: 14px; flex-wrap: wrap;

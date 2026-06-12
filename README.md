@@ -20,6 +20,17 @@ npm test          # headless physics/world test suite (no browser needed)
 
 Dependencies are exactly three, pinned: `three`, `vite`, `typescript` (+ `@types/three`).
 
+## Worlds
+
+Three procedurally generated maps, selectable from the hangar (each one endless and
+deterministic, all sharing the home airfield cluster):
+
+| World | Character |
+| --- | --- |
+| **Emerald Archipelago** | Island chains, forests, snow-capped alpine ranges. |
+| **Redstone Mesa** | Layered desert plateaus carved by winding canyon systems. |
+| **Meridian Bay** | A coastal metropolis: downtown skyscrapers, street grids, parks and suburbs west of the bay. |
+
 ## Flying
 
 | Control | Keys |
@@ -107,6 +118,9 @@ thrust model) — the handling differences fall out of the numbers, not scripts.
 - `&touch=1` — force the touch UI on desktop
 - `&apt=1` — spawn at another fixed airfield (1 = Northgate, 2 = Highmoor)
 - `&ap=1` — engage the autopilot after the fast-forward
+- `&world=mesa` — select the map (`archipelago`, `mesa`, `metro`)
+- `&hdg=302` — point the takeoff at a given true heading
+- `&nav=1` — open the planning chart after the fast-forward
 
 ## Deploying
 

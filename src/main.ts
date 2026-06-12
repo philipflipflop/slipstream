@@ -7,7 +7,7 @@
 import * as THREE from 'three';
 import './styles.css';
 
-import { WorldGen, AIRPORTS } from './world/heightfield';
+import { WorldGen, AIRPORTS, WORLDS, WorldTheme } from './world/heightfield';
 import { TerrainManager, CHUNK_SIZE } from './world/terrain';
 import { Water } from './world/water';
 import { Sky } from './world/sky';
@@ -40,8 +40,8 @@ class Game {
   private renderer: THREE.WebGLRenderer;
   private scene = new THREE.Scene();
 
-  // world
-  private gen = new WorldGen();
+  // world (constructed in the ctor: the theme comes from the save / URL)
+  private gen!: WorldGen;
   private terrain: TerrainManager;
   private water: Water;
   private sky: Sky;
@@ -87,6 +87,11 @@ class Game {
 
   constructor() {
     const touch = isTouchDevice();
+
+    // world theme: ?world= overrides the saved choice (smoke tests)
+    const worldParam = new URLSearchParams(location.search).get('world') as WorldTheme | null;
+    const theme = worldParam && WORLDS.some((w) => w.id === worldParam) ? worldParam : this.save.world;
+    this.gen = new WorldGen(undefined, theme);
 
     this.renderer = new THREE.WebGLRenderer({
       antialias: true,
@@ -200,6 +205,13 @@ class Game {
     s.onFly = () => this.startFlight();
     s.onAircraft = (id) => this.swapAircraft(id);
     s.onMode = () => { persist(this.save); };
+    s.onWorld = (w) => {
+      // a world swap regenerates literally everything — a clean reload is
+      // simpler and leak-proof compared to disposing the whole scene graph
+      this.save.world = w;
+      persist(this.save);
+      location.reload();
+    };
     s.onSettings = () => { this.applyQuality(this.save.quality); this.applySettings(); persist(this.save); };
     s.onResume = () => {
       if (this.state === 'paused') this.resume();
@@ -573,6 +585,13 @@ class Game {
       this.screens.show('menu');
       if (this.autoFly) {
         this.startFlight();
+        // &hdg=deg — point the takeoff somewhere specific (smoke tests)
+        const hdgP = Number(new URLSearchParams(location.search).get('hdg') ?? NaN);
+        if (Number.isFinite(hdgP)) {
+          this.aircraft.state.quat.setFromEuler(
+            new THREE.Euler(this.aircraft.spec.groundPitch, (-hdgP * Math.PI) / 180, 0, 'YXZ'),
+          );
+        }
         // ?ff=N — deterministic fast-forward for smoke tests
         const ff = Number(new URLSearchParams(location.search).get('ff') ?? '0');
         if (ff > 0) {
