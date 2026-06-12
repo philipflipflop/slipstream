@@ -22,6 +22,9 @@ Cloudflare builds with **npm 10.9.2**; local npm is 11. Two rules:
   dependencies, restore it: `git checkout HEAD -- package-lock.json`. Never run
   bare `npx <tool>` in scripts — call local binaries directly (see
   `tests/run.mjs`).
+- A pre-commit hook (`.githooks/pre-commit`, enabled via
+  `git config core.hooksPath .githooks`) hard-blocks any commit that strips the
+  @emnapi entries. If a fresh clone loses the hook, re-run that git config line.
 
 ## Architecture pointers
 
