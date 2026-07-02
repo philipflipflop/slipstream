@@ -383,10 +383,31 @@ function stepHeli(
   const dens = 0.62 + 0.38 * (rho / 1.225);            // density altitude
   const inflow = 1 - 0.42 * clamp(st.vel.y / 10, -0.25, 1); // climb costs power
   const fast = clamp((V / spec.vne - 0.85) / 0.3, 0, 1);    // retreating-blade droop
-  const lift = spec.maxThrust * coll * dens * etl * inflow *
-    (1 + 0.10 * ge * ge) * (1 - 0.18 * fast);
+
+  // autorotation: air rising up through the disc keeps the rotor driven —
+  // free thrust with the collective full down. With forward speed this
+  // settles into the textbook ~8 m/s / 3–4:1 glide; straight down the bite
+  // caps out and the sink rate stays brutal, exactly like the real manoeuvre
+  const descend = Math.max(0, -_vLocal.y);
+  const autoBite = clamp(descend / 16, 0, 0.5);
+  const effColl = Math.max(coll, autoBite);
+
+  // vortex ring state ("power settling"): descending into your own downwash
+  // — sink near the hover induced velocity (~7.5 m/s here) at low airspeed
+  // WITH power on eats the lift and shakes the airframe. Recover the real
+  // way: lower the collective or fly forward out of the ring.
+  const vrs = coll > 0.35
+    ? clamp((descend - 6.5) / 4, 0, 1) * clamp(1 - vh / 11, 0, 1)
+    : 0;
+
+  const lift = spec.maxThrust * effColl * dens * etl * inflow *
+    (1 + 0.10 * ge * ge) * (1 - 0.18 * fast) * (1 - 0.4 * vrs);
   _force.set(0, lift, 0);
   st.thrustFrac = coll;
+
+  // translating tendency: the tail rotor's anti-torque thrust also shoves
+  // the whole ship sideways in the hover — hold a whisper of left cyclic
+  _force.x += coll * 150 * clamp(1 - vh / 40, 0, 1);
 
   // --- fuselage drag (anisotropic flat plate: the disc resists vertical
   // airflow far more than the streamlined nose does forward flight) ---
@@ -411,6 +432,18 @@ function stepHeli(
   const targetRoll = -inp.roll * 0.6;    // euler.z, − = bank right
   let aaX = (targetPitch - _euler.x) * 4.5 * spec.pitchRate - av.x * 3.8;
   let aaZ = (targetRoll - _euler.z) * 4.0 * spec.rollRate - av.z * 4.2;
+
+  // flapback: the advancing blade lifts harder as speed builds, tilting the
+  // disc aft — the nose wants up with speed and holding cruise takes a
+  // standing push of forward cyclic (speed stability, the real heli feel)
+  aaX += vh * 0.008;
+
+  // vortex ring buffet: the ring is turbulent — the ship bucks and rolls
+  if (vrs > 0) {
+    st.gustT += dt * 4;
+    aaX += Math.sin(st.gustT * 7.3) * 0.55 * vrs;
+    aaZ += Math.sin(st.gustT * 9.1 + 1.7) * 0.7 * vrs;
+  }
 
   let slip = 0;
   if (vh > 2) slip = Math.atan2(_vLocal.x, -_vLocal.z);

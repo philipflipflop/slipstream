@@ -56,9 +56,14 @@ Cloudflare builds with **npm 10.9.2**; local npm is 11. Two rules:
   `spec.engine === 'heli'` (Bell 505): throttle = collective, cyclic is
   attitude-command (`inp.pitch·0.45` / `−inp.roll·0.6` are the target Euler
   angles — the autopilot's heli branch writes attitude targets straight
-  through the stick), pedals are yaw rate. Skid-gear crash rules differ from
-  wheels (sink > 5 m/s, roll, slope, run-on > 16 m/s). Test 12-newaircraft
-  pins both new types near their book numbers.
+  through the stick), pedals are yaw rate. Realism terms (all in stepHeli,
+  each pinned by test 12): autorotation via `autoBite` (upflow drives the
+  rotor — collective-down glides at ~1,700 fpm / 3:1, vertical drop stays
+  deadly), vortex ring state (powered sink > ~6.5 m/s at vh < 11 loses lift
+  + buffets; recover forward or collective down), flapback (nose-up moment
+  ∝ vh — cruise needs standing forward stick), tail-rotor translating
+  tendency (rightward hover drift). Skid-gear crash rules differ from
+  wheels (sink > 5 m/s, roll, slope, run-on > 16 m/s).
 - `src/combat/range.ts` — round↔balloon collision is SWEPT (segment vs
   sphere): at muzzle velocity a round outruns a balloon diameter per frame,
   so an end-of-step point test tunnels. Keep any new projectile/target

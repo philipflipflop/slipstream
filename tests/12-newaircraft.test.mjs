@@ -211,6 +211,113 @@ assert.equal(jr.engine, 'heli');
   console.log(`  ✓ 30 m/s run-on → "${st.crashReason}"`);
 }
 
+// autorotation: collective full down at altitude with forward speed — the
+// upflow keeps the rotor driven and it settles into the textbook glide
+// (FAA HFH ch.11: ~1,500–2,000 fpm at 50–65 kt, 3–4:1 over the ground)
+{
+  const st = createState();
+  spawnOnRunway(jr, st, flat);
+  st.pos.y = 600;
+  st.vel.set(0, 0, -32);
+  st.onGround = false;
+  const inp = mkInp({ throttle: 0 });
+  let sinkSum = 0, sinkN = 0, yMark = 0, zMark = 0;
+  for (let t = 0; t < 25; t += dt) {
+    inp.pitch = Math.max(-0.5, Math.min(0.3, (st.airspeed - 32) * 0.05)); // hold ~62 kt
+    stepFlight(jr, st, inp, dt, flat);
+    if (t >= 8) {
+      if (yMark === 0) { yMark = st.pos.y; zMark = st.pos.z; }
+      sinkSum += -st.vel.y; sinkN++;
+    }
+  }
+  const sink = sinkSum / sinkN;
+  const glide = Math.abs(st.pos.z - zMark) / (yMark - st.pos.y);
+  assert.ok(!st.crashed, 'autorotation diverged');
+  assert.ok(sink > 5.5 && sink < 11,
+    `autorotative sink off (${sink.toFixed(1)} m/s ≈ ${(sink * 196.85).toFixed(0)} fpm, book ~1500-2000)`);
+  assert.ok(glide > 2.8 && glide < 5.5, `autorotative glide ratio off (${glide.toFixed(1)}:1, book 3-4)`);
+  console.log(`  ✓ 505 autorotates at ${(sink * 196.85).toFixed(0)} fpm, ${glide.toFixed(1)}:1 glide`);
+}
+
+// ...and the full engine-out drill is survivable: glide down, flare to kill
+// the speed, cushion the last metres with the collective
+{
+  const st = createState();
+  spawnOnRunway(jr, st, flat);
+  st.pos.y = 8 + jr.gearHeight + 250;
+  st.vel.set(0, 0, -32);
+  st.onGround = false;
+  const inp = mkInp({ throttle: 0 });
+  for (let t = 0; t < 90 && !st.onGround && !st.crashed; t += dt) {
+    const agl = st.pos.y - 8 - jr.gearHeight;
+    if (agl > 25) {
+      inp.throttle = 0;
+      inp.pitch = Math.max(-0.5, Math.min(0.3, (st.airspeed - 32) * 0.05));
+    } else {
+      inp.pitch = Math.min(0.55, Math.max(-0.2, (st.airspeed - 8) * 0.06)); // flare
+      inp.throttle = agl < 10
+        ? Math.min(1, Math.max(0, 0.65 + (-1.0 - st.vel.y) * 0.3))          // cushion
+        : 0.25;
+    }
+    stepFlight(jr, st, inp, dt, flat);
+  }
+  assert.ok(st.onGround && !st.crashed,
+    `autorotation flare landing failed (${st.crashReason || 'never touched down'})`);
+  console.log('  ✓ 505 survives a full autorotation to touchdown');
+}
+
+// vortex ring state: powered descent onto the downwash at low airspeed
+// deepens the sink instead of arresting it; forward cyclic flies out of it
+{
+  const st = createState();
+  spawnOnRunway(jr, st, flat);
+  st.pos.y = 400;
+  st.vel.set(0, -8, 0);
+  st.onGround = false;
+  const inp = mkInp({ throttle: 0.62 });
+  let worst = 0;
+  for (let t = 0; t < 5; t += dt) {
+    stepFlight(jr, st, inp, dt, flat);
+    worst = Math.min(worst, st.vel.y);
+  }
+  assert.ok(worst < -9, `VRS did not deepen the sink (worst ${worst.toFixed(1)} m/s)`);
+  inp.pitch = -0.5; // recover: fly forward out of the ring
+  for (let t = 0; t < 18; t += dt) stepFlight(jr, st, inp, dt, flat);
+  assert.ok(!st.crashed && st.vel.y > -3.5 && st.pos.y > 60,
+    `VRS forward-cyclic recovery failed (vs ${st.vel.y.toFixed(1)}, alt ${st.pos.y.toFixed(0)})`);
+  console.log(`  ✓ vortex ring state bites (sink to ${(worst * 196.85).toFixed(0)} fpm) and forward cyclic recovers`);
+}
+
+// hover realism: tail-rotor translating tendency drifts the ship right…
+{
+  const st = createState();
+  spawnOnRunway(jr, st, flat);
+  st.pos.y = 150;
+  st.onGround = false;
+  const inp = mkInp();
+  for (let t = 0; t < 15; t += dt) {
+    inp.throttle = Math.min(1, Math.max(0, 0.62 + (150 - st.pos.y) * 0.02 - st.vel.y * 0.12));
+    stepFlight(jr, st, inp, dt, flat);
+  }
+  assert.ok(st.vel.x > 0.7, `no translating tendency (vx ${st.vel.x.toFixed(2)})`);
+  console.log(`  ✓ hover drifts right off the tail rotor (${st.vel.x.toFixed(1)} m/s after 15 s)`);
+}
+
+// …and flapback: at speed with the stick free the disc tilts aft, the nose
+// rises and the ship bleeds speed — cruise takes standing forward cyclic
+{
+  const st = createState();
+  spawnOnRunway(jr, st, flat);
+  st.pos.y = 400;
+  st.vel.set(0, 0, -50);
+  st.onGround = false;
+  const inp = mkInp({ throttle: 0.65 });
+  for (let t = 0; t < 6; t += dt) stepFlight(jr, st, inp, dt, flat);
+  assert.ok(st.pitchAngle > 0.03, `no flapback (pitch ${st.pitchAngle.toFixed(3)})`);
+  assert.ok(st.airspeed < 49, 'flapback did not bleed speed');
+  console.log(`  ✓ flapback trims the nose up at speed (+${(st.pitchAngle * 57.3).toFixed(1)}°, decelerating)`);
+}
+
 // autopilot (swapped loops): holds altitude on collective, speed on attitude
 {
   const st = createState();

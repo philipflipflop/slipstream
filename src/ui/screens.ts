@@ -392,6 +392,9 @@ export class Screens {
             <b>Helicopter (Bell 505):</b> throttle is the collective — raise it past
             ~60% to lift off straight up, nose down gently to fly forward, and land
             anywhere flat by easing it back down. Rudder pedal-turns the hover.
+            Never sink fast straight down under power (vortex ring — fly forward to
+            recover), and if you cut the collective keep speed on: she autorotates,
+            flare at the bottom.
           </p>
           <div class="row"><button class="btn primary close">Got It</button></div>
         </div>
