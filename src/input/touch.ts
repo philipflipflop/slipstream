@@ -23,6 +23,7 @@ export class TouchControls {
   private flapBtn!: HTMLButtonElement;
   private apBtn!: HTMLButtonElement;
   private sbBtn!: HTMLButtonElement;
+  private engBtn!: HTMLButtonElement;
   private stickPointer: number | null = null;
   private throttlePointer: number | null = null;
   private throttleValue = 0;
@@ -32,6 +33,7 @@ export class TouchControls {
   onAutopilot: () => void = () => {};
   onAirbrake: () => void = () => {};
   onNav: () => void = () => {};
+  onEngineCut: () => void = () => {};
 
   constructor(input: InputManager) {
     this.input = input;
@@ -56,12 +58,17 @@ export class TouchControls {
     airbrakeOn = false,
     hasAirbrake = false,
     hasFlaps = true,
+    hasEngineCut = false,
+    engineOut = false,
   ): void {
     this.gearBtn.style.display = retractable ? 'grid' : 'none';
     this.gearBtn.classList.toggle('lit', gearDown);
     this.flapBtn.style.display = hasFlaps ? 'grid' : 'none';
     this.flapBtn.textContent = flaps > 0 ? `FLAP ${Math.round(flaps * 3)}` : 'FLAP';
     this.flapBtn.classList.toggle('lit', flaps > 0);
+    this.engBtn.style.display = hasEngineCut ? 'grid' : 'none';
+    this.engBtn.classList.toggle('lit', engineOut);
+    this.engBtn.textContent = engineOut ? 'ENG ✕' : 'ENG';
     this.apBtn.classList.toggle('lit', apOn);
     this.sbBtn.style.display = hasAirbrake ? 'grid' : 'none';
     this.sbBtn.classList.toggle('lit', airbrakeOn);
@@ -183,6 +190,10 @@ export class TouchControls {
 
     const nav = mk('NAV', { top: safeT, left: 'calc(362px + env(safe-area-inset-left, 0px))' });
     nav.addEventListener('pointerdown', (e) => { e.preventDefault(); this.onNav(); });
+
+    // engine cut/relight — helicopter only (shown via syncState)
+    this.engBtn = mk('ENG', { top: safeT, left: 'calc(432px + env(safe-area-inset-left, 0px))' });
+    this.engBtn.addEventListener('pointerdown', (e) => { e.preventDefault(); this.onEngineCut(); });
 
     // brake — hold, sits above the throttle
     const brk = mk('BRAKE', {

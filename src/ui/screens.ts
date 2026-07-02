@@ -362,7 +362,8 @@ export class Screens {
       <div class="krow"><span>Landing gear</span><kbd>G</kbd></div>
       <div class="krow"><span>Wheel brakes / fire cannon (airborne)</span><kbd>Space</kbd></div>
       <div class="krow"><span>Speed brake</span><kbd>B</kbd></div>
-      <div class="krow"><span>Autopilot hold</span><kbd>T</kbd></div>
+      <div class="krow"><span>Engine cut / relight (helicopter)</span><kbd>X</kbd></div>
+      <div class="krow"><span>Autopilot / hover hold</span><kbd>T</kbd></div>
       <div class="krow"><span>AP heading bug</span><kbd>[ / ]</kbd></div>
       <div class="krow"><span>AP altitude bug</span><kbd>PgUp / PgDn</kbd></div>
       <div class="krow"><span>AP speed bug</span><kbd>Home / End</kbd></div>
@@ -393,8 +394,11 @@ export class Screens {
             ~60% to lift off straight up, nose down gently to fly forward, and land
             anywhere flat by easing it back down. Rudder pedal-turns the hover.
             Never sink fast straight down under power (vortex ring — fly forward to
-            recover), and if you cut the collective keep speed on: she autorotates,
-            flare at the bottom.
+            recover). Press <kbd>X</kbd> to practice an engine failure: collective
+            DOWN immediately to keep rotor RPM (watch NR on the HUD — the low-RPM
+            horn means the rotor is dying), glide at ~60 kt, flare at the bottom
+            and cushion with the last of the rotor's energy. <kbd>T</kbd> in a
+            hover gives a hover hold.
           </p>
           <div class="row"><button class="btn primary close">Got It</button></div>
         </div>

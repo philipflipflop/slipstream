@@ -149,8 +149,12 @@ export class SoundEngine {
     this.kind = kind;
   }
 
-  /** Per-frame state drive. */
-  update(throttle: number, thrustFrac: number, airspeed: number, stalled: boolean, time: number): void {
+  /** Per-frame state drive. `nr` = rotor RPM and `horn` = low-rotor-RPM
+   *  warning (helicopter only; planes leave the defaults). */
+  update(
+    throttle: number, thrustFrac: number, airspeed: number, stalled: boolean,
+    time: number, nr = 1, horn = false,
+  ): void {
     if (!this.ctx) return;
     const t = this.ctx.currentTime;
 
@@ -165,18 +169,19 @@ export class SoundEngine {
       this.jetFilter.frequency.setTargetAtTime(500, t, 0.1);
       this.whineGain.gain.setTargetAtTime(0, t, 0.1);
     } else if (this.kind === 'heli') {
-      // governed rotor: constant deep blade chop that bites harder with
-      // collective, over a steady turbine hiss and a thin gearbox whine
-      const bite = 0.3 + throttle * 0.7;
-      const f = 24 + bite * 5;
+      // blade chop rides the rotor (pitch AND volume sag as NR droops);
+      // turbine hiss + gearbox whine ride engine torque and die on a cut
+      const rotor = Math.max(nr, 0);
+      const bite = (0.3 + throttle * 0.7) * Math.min(rotor * 1.1, 1);
+      const f = (24 + bite * 5) * Math.max(rotor, 0.3);
       this.oscA.frequency.setTargetAtTime(f + Math.sin(time * 8.5) * 0.8, t, 0.05);
       this.oscB.frequency.setTargetAtTime(f * 1.5, t, 0.05);
       this.engineFilter.frequency.setTargetAtTime(240 + bite * 460, t, 0.1);
-      this.engineGain.gain.setTargetAtTime(0.1 + bite * 0.15, t, 0.1);
+      this.engineGain.gain.setTargetAtTime((0.1 + bite * 0.15) * Math.min(rotor * 1.3, 1), t, 0.1);
       this.jetFilter.frequency.setTargetAtTime(950, t, 0.2);
-      this.jetNoiseGain.gain.setTargetAtTime(0.035 + bite * 0.05, t, 0.15);
-      this.whine.frequency.setTargetAtTime(2800 + bite * 500, t, 0.2);
-      this.whineGain.gain.setTargetAtTime(0.006, t, 0.2);
+      this.jetNoiseGain.gain.setTargetAtTime(0.02 + thrustFrac * 0.065, t, 0.15);
+      this.whine.frequency.setTargetAtTime(2800 + thrustFrac * 500, t, 0.2);
+      this.whineGain.gain.setTargetAtTime(0.002 + thrustFrac * 0.005, t, 0.2);
     } else {
       const spool = 0.12 + thrustFrac * 0.88;
       this.engineGain.gain.setTargetAtTime(0.0, t, 0.1);
@@ -190,8 +195,15 @@ export class SoundEngine {
     this.windGain.gain.setTargetAtTime(w * w * 0.34, t, 0.12);
     this.windFilter.frequency.setTargetAtTime(250 + w * 2400, t, 0.15);
 
-    const beep = stalled ? (Math.sin(time * 22) > 0 ? 0.06 : 0) : 0;
-    this.stallGain.gain.setTargetAtTime(beep, t, 0.015);
+    if (horn) {
+      // low-rotor-RPM horn: steady low blare, unmistakably not the stall beeper
+      this.stallOsc.frequency.setTargetAtTime(410, t, 0.02);
+      this.stallGain.gain.setTargetAtTime(0.07, t, 0.03);
+    } else {
+      this.stallOsc.frequency.setTargetAtTime(880, t, 0.02);
+      const beep = stalled ? (Math.sin(time * 22) > 0 ? 0.06 : 0) : 0;
+      this.stallGain.gain.setTargetAtTime(beep, t, 0.015);
+    }
   }
 
   private blip(freq: number, dur: number, vol: number, type: OscillatorType = 'sine', sweep = 0): void {

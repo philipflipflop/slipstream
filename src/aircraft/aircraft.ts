@@ -84,7 +84,8 @@ export class Aircraft {
       const heli = this.spec.engine === 'heli';
       let rpmFrac: number;
       if (heli) {
-        this.rotorSpin = damp(this.rotorSpin, st.crashed ? 0 : 1, 0.55, dt);
+        // visual rotor follows NR — droops with the physics, stops when parked
+        this.rotorSpin = damp(this.rotorSpin, st.crashed ? 0 : st.rotorRpm, 0.9, dt);
         rpmFrac = this.rotorSpin;
       } else {
         rpmFrac = 0.12 + inp.throttle * 0.88;

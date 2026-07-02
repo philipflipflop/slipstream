@@ -318,6 +318,78 @@ assert.equal(jr.engine, 'heli');
   console.log(`  ✓ flapback trims the nose up at speed (+${(st.pitchAngle * 57.3).toFixed(1)}°, decelerating)`);
 }
 
+// ENGINE OUT, rotor energy: freezing on the controls (collective still up)
+// bleeds rotor RPM — the classic fatal mistake — while collective-down
+// autorotation keeps NR alive all the way to a survivable flare
+{
+  const st = createState();
+  spawnOnRunway(jr, st, flat);
+  st.pos.y = 500;
+  st.vel.set(0, 0, -40);
+  st.onGround = false;
+  const inp = mkInp({ throttle: 0.62, engineCut: true }); // engine fails, pilot freezes
+  let minNr = 1;
+  for (let t = 0; t < 5; t += dt) {
+    stepFlight(jr, st, inp, dt, flat);
+    minNr = Math.min(minNr, st.rotorRpm);
+  }
+  assert.ok(minNr < 0.8, `NR should droop with collective up (NR ${minNr.toFixed(2)})`);
+  assert.ok(st.vel.y < -6, `drooped rotor should be falling (vs ${st.vel.y.toFixed(1)})`);
+  console.log(`  ✓ engine cut + frozen collective → rotor droops to ${(minNr * 100).toFixed(0)}% NR, falling`);
+}
+{
+  const st = createState();
+  spawnOnRunway(jr, st, flat);
+  st.pos.y = 8 + jr.gearHeight + 350;
+  st.vel.set(0, 0, -32);
+  st.onGround = false;
+  const inp = mkInp({ throttle: 0, engineCut: true }); // textbook: collective down NOW
+  let nrGlide = 0;
+  for (let t = 0; t < 120 && !st.onGround && !st.crashed; t += dt) {
+    const agl = st.pos.y - 8 - jr.gearHeight;
+    if (agl > 25) {
+      inp.throttle = 0;
+      inp.pitch = Math.max(-0.5, Math.min(0.3, (st.airspeed - 32) * 0.05));
+      nrGlide = st.rotorRpm;
+    } else {
+      inp.pitch = Math.min(0.55, Math.max(-0.2, (st.airspeed - 8) * 0.06)); // flare
+      inp.throttle = agl < 10
+        ? Math.min(1, Math.max(0, 0.65 + (-1.0 - st.vel.y) * 0.3))          // spend the rotor
+        : 0.2;
+    }
+    stepFlight(jr, st, inp, dt, flat);
+  }
+  assert.ok(nrGlide > 0.85 && nrGlide < 1.15,
+    `NR should hold near 100% in the established auto (${(nrGlide * 100).toFixed(0)}%)`);
+  assert.ok(st.onGround && !st.crashed,
+    `true engine-out autorotation landing failed (${st.crashReason || 'never landed'})`);
+  console.log(`  ✓ true engine-out auto: NR ${(nrGlide * 100).toFixed(0)}% in the glide, flare landing survivable`);
+}
+
+// hover-hold autopilot: engage in a hover (minSpd 0) and it stays put
+{
+  const st = createState();
+  spawnOnRunway(jr, st, flat);
+  st.pos.y = 120;
+  st.vel.set(0.5, 0, -1);
+  st.onGround = false;
+  const inp = mkInp();
+  const ap = new Autopilot();
+  ap.engage(st, 0.62, 0); // helicopter: no fixed-wing speed floor
+  const x0 = st.pos.x, z0 = st.pos.z;
+  for (let t = 0; t < 60; t += dt) {
+    ap.update(jr, st, inp, dt);
+    stepFlight(jr, st, inp, dt, flat);
+  }
+  const wander = Math.hypot(st.pos.x - x0, st.pos.z - z0);
+  const gs = Math.hypot(st.vel.x, st.vel.z);
+  assert.ok(!st.crashed, 'hover hold crashed');
+  assert.ok(Math.abs(st.pos.y - 120) < 8, `hover hold altitude drifted (${st.pos.y.toFixed(1)} m)`);
+  assert.ok(gs < 2.5, `hover hold still translating (${gs.toFixed(1)} m/s)`);
+  assert.ok(wander < 120, `hover hold wandered ${wander.toFixed(0)} m off station`);
+  console.log(`  ✓ AP hover hold: ${st.pos.y.toFixed(0)} m, ${gs.toFixed(1)} m/s residual drift, ${wander.toFixed(0)} m wander`);
+}
+
 // autopilot (swapped loops): holds altitude on collective, speed on attitude
 {
   const st = createState();

@@ -62,7 +62,13 @@ Cloudflare builds with **npm 10.9.2**; local npm is 11. Two rules:
   deadly), vortex ring state (powered sink > ~6.5 m/s at vh < 11 loses lift
   + buffets; recover forward or collective down), flapback (nose-up moment
   ∝ vh — cruise needs standing forward stick), tail-rotor translating
-  tendency (rightward hover drift). Skid-gear crash rules differ from
+  tendency (rightward hover drift). Rotor RPM is a real state
+  (st.rotorRpm; lift ∝ NR², control authority fades with it): governed to 1
+  while the engine runs, on `inp.engineCut` (X key) it lives off upflow vs
+  collective load — collective-down keeps NR ≈ 1, frozen collective droops
+  it fatally. HUD shows TRQ/NR + LOW ROTOR RPM / VORTEX RING cautions; the
+  AP has a hover-hold (engage minSpd 0, pedals hold hover heading — bank
+  would orbit the spot against torque). Skid-gear crash rules differ from
   wheels (sink > 5 m/s, roll, slope, run-on > 16 m/s).
 - `src/combat/range.ts` — round↔balloon collision is SWEPT (segment vs
   sphere): at muzzle velocity a round outruns a balloon diameter per frame,

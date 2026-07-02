@@ -278,6 +278,7 @@ class Game {
     });
     this.input.on('autopilot', () => this.toggleAutopilot());
     this.input.on('airbrake', () => this.toggleAirbrake());
+    this.input.on('enginecut', () => this.toggleEngineCut());
     this.input.on('hud', () => {
       if (this.state !== 'flying') return;
       const mode = this.hud.cycleMode();
@@ -298,6 +299,7 @@ class Game {
       this.touch.onAirbrake = () => this.toggleAirbrake();
       this.touch.onNav = () => this.toggleNav();
       this.touch.onPause = pauseAction;
+      this.touch.onEngineCut = () => this.toggleEngineCut();
     }
     this.minimap.onCloseNav = () => {
       if (this.minimap.expanded) this.toggleNav();
@@ -341,9 +343,12 @@ class Game {
       this.screens.setApPanel(false);
       this.screens.toast('AUTOPILOT OFF');
     } else if (!st.onGround) {
-      this.autopilot.engage(st, this.input.controls.throttle);
+      const heli = this.aircraft.spec.engine === 'heli';
+      this.autopilot.engage(st, this.input.controls.throttle, heli ? 0 : 30);
       const ft = Math.round(st.pos.y * M_TO_FT / 100) * 100;
-      this.screens.toast(`AP HOLDING ${ft} FT`, 2200);
+      this.screens.toast(
+        heli && st.airspeed < 4 ? `AP HOVER HOLD ${ft} FT` : `AP HOLDING ${ft} FT`, 2200,
+      );
     } else {
       this.screens.toast('AP UNAVAILABLE ON THE GROUND');
     }
@@ -355,6 +360,20 @@ class Game {
     if (kind === 'hdg') this.autopilot.adjustHeading(dir * 5 * Math.PI / 180);
     else if (kind === 'alt') this.autopilot.adjustAltitude(dir * 152.4);
     else this.autopilot.adjustSpeed(dir * 5.144, this.aircraft.spec.vne * 0.92);
+  }
+
+  /** Practice engine failure (helicopter only): X cuts and relights. */
+  private toggleEngineCut(): void {
+    if (this.state !== 'flying' || this.aircraft.spec.engine !== 'heli') return;
+    const c = this.input.controls;
+    c.engineCut = !c.engineCut;
+    this.sound.gearThunk();
+    this.screens.toast(
+      c.engineCut
+        ? 'ENGINE FAILURE — COLLECTIVE DOWN, AUTOROTATE'
+        : 'ENGINE RELIGHT — GOVERNOR SPOOLING NR',
+      2600,
+    );
   }
 
   private toggleAirbrake(): void {
@@ -779,8 +798,12 @@ class Game {
     // camera, audio, HUD
     this.flightCam.update(this.aircraft, dt, this.heightFn);
     if (st.stalled) this.flightCam.addShake(0.005); // light pre-stall buffet, not an earthquake
+    const heli = this.aircraft.spec.engine === 'heli';
+    if (heli && st.vrs > 0.25) this.flightCam.addShake(0.004 * st.vrs); // ring buffet
     this.sound.update(
       this.input.controls.throttle, st.thrustFrac, st.airspeed, st.stalled, this.simTime,
+      heli ? st.rotorRpm : 1,
+      heli && !st.onGround && st.rotorRpm < 0.9, // low-rotor-RPM horn
     );
     this.hud.draw(this.hudData(), dt);
     this.minimap.update(
@@ -796,6 +819,8 @@ class Game {
       this.input.controls.airbrake,
       this.aircraft.spec.airbrakeCd > 0,
       this.aircraft.spec.flapsCl > 0,
+      this.aircraft.spec.engine === 'heli',
+      this.input.controls.engineCut === true,
     );
     this.screens.setPortraitWarning(true);
   }
@@ -875,6 +900,15 @@ class Game {
       stalled: st.stalled,
       afterburner: !!spec.afterburner && c.throttle >= 0.995,
       vne: spec.vne,
+      heli: spec.engine === 'heli'
+        ? {
+            trq: st.thrustFrac,
+            nr: st.rotorRpm,
+            vrs: st.vrs > 0.25,
+            lowRpm: st.rotorRpm < 0.9 && !st.onGround,
+            engineOut: c.engineCut === true,
+          }
+        : null,
       gun: spec.gun
         ? {
             ammo: this.range.ammo,

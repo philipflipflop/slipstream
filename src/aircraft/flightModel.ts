@@ -19,6 +19,7 @@ export interface ControlInputs {
   gearDown: boolean;
   brakes: boolean;   // wheel brakes
   airbrake: boolean; // speed brake / spoilers (aircraft with airbrakeCd > 0)
+  engineCut?: boolean; // helicopter practice engine failure (X) — absent/false = running
 }
 
 export interface FlightState {
@@ -40,6 +41,8 @@ export interface FlightState {
   thrustFrac: number;        // realized thrust 0..~1.5 (AB)
   spool: number;             // realized engine fraction (jets lag the lever)
   gustT: number;             // turbulence phase accumulator
+  rotorRpm: number;          // helicopter NR, 1 = 100% governed (planes: stays 1)
+  vrs: number;               // helicopter vortex-ring severity 0..1 (planes: 0)
 }
 
 export function createState(): FlightState {
@@ -61,6 +64,8 @@ export function createState(): FlightState {
     thrustFrac: 0,
     spool: 0,
     gustT: 0,
+    rotorRpm: 1,
+    vrs: 0,
   };
 }
 
@@ -399,15 +404,31 @@ function stepHeli(
   const vrs = coll > 0.35
     ? clamp((descend - 6.5) / 4, 0, 1) * clamp(1 - vh / 11, 0, 1)
     : 0;
+  st.vrs = vrs;
 
-  const lift = spec.maxThrust * effColl * dens * etl * inflow *
+  // rotor RPM (NR, 1 = 100%): FADEC governs it while the engine runs. Cut
+  // the engine and NR lives on rotor energy alone — upflow through the disc
+  // feeds it (autorotation and the flare both raise `descend`), pulling
+  // collective spends it. Lift goes with NR², so a drooped rotor — not a
+  // script — is what limits the flare and punishes a slow collective-down.
+  const engineOut = inp.engineCut === true;
+  if (!engineOut) {
+    st.rotorRpm += (1 - st.rotorRpm) * 1.4 * dt; // relight: governor spools NR back
+  } else {
+    const nrEq = clamp(descend / 7.5, 0, 1.12) - coll * 0.55;
+    st.rotorRpm += (Math.max(nrEq, 0) - st.rotorRpm) * 0.5 * dt;
+  }
+  st.rotorRpm = clamp(st.rotorRpm, 0, 1.15);
+  const nr2 = st.rotorRpm * st.rotorRpm;
+
+  const lift = spec.maxThrust * effColl * nr2 * dens * etl * inflow *
     (1 + 0.10 * ge * ge) * (1 - 0.18 * fast) * (1 - 0.4 * vrs);
   _force.set(0, lift, 0);
-  st.thrustFrac = coll;
+  st.thrustFrac = engineOut ? 0 : coll; // engine torque (drives the TRQ gauge)
 
   // translating tendency: the tail rotor's anti-torque thrust also shoves
   // the whole ship sideways in the hover — hold a whisper of left cyclic
-  _force.x += coll * 150 * clamp(1 - vh / 40, 0, 1);
+  if (!engineOut) _force.x += coll * 150 * clamp(1 - vh / 40, 0, 1);
 
   // --- fuselage drag (anisotropic flat plate: the disc resists vertical
   // airflow far more than the streamlined nose does forward flight) ---
@@ -428,10 +449,13 @@ function stepHeli(
   _euler.setFromQuaternion(st.quat, 'YXZ');
   const lowV = clamp(1 - vh / 40, 0, 1);
 
+  // control authority rides on the rotor: a drooped disc barely answers
+  const auth = clamp(0.15 + 0.85 * nr2, 0.15, 1);
+
   const targetPitch = inp.pitch * 0.45;  // + = nose up, ~26° full deflection
   const targetRoll = -inp.roll * 0.6;    // euler.z, − = bank right
-  let aaX = (targetPitch - _euler.x) * 4.5 * spec.pitchRate - av.x * 3.8;
-  let aaZ = (targetRoll - _euler.z) * 4.0 * spec.rollRate - av.z * 4.2;
+  let aaX = ((targetPitch - _euler.x) * 4.5 * spec.pitchRate - av.x * 3.8) * auth;
+  let aaZ = ((targetRoll - _euler.z) * 4.0 * spec.rollRate - av.z * 4.2) * auth;
 
   // flapback: the advancing blade lifts harder as speed builds, tilting the
   // disc aft — the nose wants up with speed and holding cruise takes a
@@ -448,10 +472,10 @@ function stepHeli(
   let slip = 0;
   if (vh > 2) slip = Math.atan2(_vLocal.x, -_vLocal.z);
   let aaY =
-    -inp.yaw * spec.yawRate * 2.6 -
-    av.y * 3.0 -
-    slip * 2.4 * clamp(vh / 25, 0, 1) -
-    coll * 0.22 * lowV; // torque: nose walks right at high power in the hover
+    (-inp.yaw * spec.yawRate * 2.6 -
+      av.y * 3.0 -
+      slip * 2.4 * clamp(vh / 25, 0, 1)) * auth -
+    (engineOut ? 0 : coll * 0.22 * lowV); // torque: nose walks right at power in the hover
 
   // light turbulence, strongest down low (same shaping as fixed-wing)
   if (turbulence > 0 && !st.onGround) {
@@ -563,4 +587,6 @@ export function spawnOnRunway(
   st.gForce = 1;
   st.spool = 0;
   st.gustT = 0;
+  st.rotorRpm = 1;
+  st.vrs = 0;
 }

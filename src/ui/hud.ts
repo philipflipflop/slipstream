@@ -25,6 +25,13 @@ export interface HudData {
   stalled: boolean;
   afterburner: boolean;
   vne: number;        // m/s
+  heli: null | {
+    trq: number;      // engine torque 0..1 (0 with the engine cut)
+    nr: number;       // rotor RPM, 1 = 100%
+    vrs: boolean;     // vortex ring state caution
+    lowRpm: boolean;  // rotor droop warning
+    engineOut: boolean;
+  };
   gun: null | { ammo: number; firing: boolean; hits: number; targets: number };
   nav: null | {
     name: string;
@@ -336,11 +343,28 @@ export class Hud {
 
     if (!full) return;
 
-    // throttle bar under the tape
+    // throttle bar under the tape — helicopters get the torque gauge and a
+    // rotor-RPM readout instead (pilots fly TRQ and NR, not a throttle bar)
     const ty = cy + H / 2 + 18 * s;
     const tw = 70 * s;
     ctx.strokeStyle = this.g(0.6);
     ctx.strokeRect(x, ty, tw, 8 * s);
+    if (d.heli) {
+      const hi = d.heli.trq > 0.85;
+      ctx.fillStyle = hi ? `rgba(${AMBER},0.95)` : this.g(0.75);
+      ctx.fillRect(x + 1, ty + 1, (tw - 2) * Math.min(d.heli.trq, 1), 8 * s - 2);
+      ctx.fillStyle = d.heli.engineOut ? `rgba(${RED},0.9)` : this.g(0.6);
+      ctx.fillText(d.heli.engineOut ? 'TRQ — ENG OUT' : `TRQ ${Math.round(d.heli.trq * 100)}%`, x, ty + 17 * s);
+      const nrPct = Math.round(d.heli.nr * 100);
+      ctx.fillStyle = d.heli.nr < 0.9 ? `rgba(${RED},0.95)`
+        : d.heli.nr > 1.05 ? `rgba(${AMBER},0.95)` : this.g(0.85);
+      ctx.fillText(`NR ${nrPct}%`, x, ty + 33 * s);
+      if (!compact) {
+        ctx.fillStyle = this.g(0.85);
+        ctx.fillText(`G ${d.gForce.toFixed(1)}`, x, ty + 49 * s);
+      }
+      return;
+    }
     ctx.fillStyle = d.afterburner ? `rgba(${AMBER},0.95)` : this.g(0.75);
     ctx.fillRect(x + 1, ty + 1, (tw - 2) * d.throttle, 8 * s - 2);
     ctx.fillStyle = this.g(0.6);
@@ -451,6 +475,7 @@ export class Hud {
     const y0 = cy + 190 * s;
     if (!safetyOnly) {
       const items: Array<[string, string]> = [];
+      if (d.heli?.engineOut) items.push(['ENG OUT', `rgba(${RED},0.95)`]);
       if (d.autopilot) items.push(['AP', `rgba(${AMBER},0.95)`]);
       if (d.retractable) items.push(d.gearDown ? ['GEAR ▼', this.g(0.9)] : ['GEAR ▲', this.g(0.45)]);
       if (d.flaps > 0.01) items.push([`FLAPS ${Math.round(d.flaps * 3)}`, this.g(0.9)]);
@@ -468,6 +493,21 @@ export class Hud {
       ctx.font = `700 ${Math.round(24 * s)}px 'Chakra Petch', monospace`;
       ctx.fillText('STALL', cx, cy - 110 * s);
       ctx.font = `600 ${Math.round(13 * s)}px 'Chakra Petch', monospace`;
+    }
+
+    // helicopter master cautions — safety-critical, shown in every HUD mode
+    if (d.heli) {
+      if (d.heli.lowRpm && Math.sin(this.time * 14) > -0.2) {
+        ctx.fillStyle = `rgba(${RED},0.95)`;
+        ctx.font = `700 ${Math.round(22 * s)}px 'Chakra Petch', monospace`;
+        ctx.fillText('LOW ROTOR RPM', cx, cy - 110 * s);
+        ctx.font = `600 ${Math.round(13 * s)}px 'Chakra Petch', monospace`;
+      } else if (d.heli.vrs && Math.sin(this.time * 10) > -0.3) {
+        ctx.fillStyle = `rgba(${AMBER},0.95)`;
+        ctx.font = `700 ${Math.round(20 * s)}px 'Chakra Petch', monospace`;
+        ctx.fillText('VORTEX RING — FLY FORWARD', cx, cy - 110 * s);
+        ctx.font = `600 ${Math.round(13 * s)}px 'Chakra Petch', monospace`;
+      }
     }
   }
 

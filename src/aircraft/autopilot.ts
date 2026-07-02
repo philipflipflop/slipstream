@@ -13,14 +13,17 @@ export class Autopilot {
   targetAlt = 0;
   targetHdg = 0;
   targetSpd = 0;
+  private minSpd = 30;
   private thrInt = 0;
   private pitchTrim = 0;
 
-  engage(st: FlightState, throttle: number): void {
+  /** minSpd 0 (helicopter) allows a hover hold; fixed-wing keeps the 30 m/s floor. */
+  engage(st: FlightState, throttle: number, minSpd = 30): void {
     this.engaged = true;
+    this.minSpd = minSpd;
     this.targetAlt = st.pos.y;
     this.targetHdg = st.heading;
-    this.targetSpd = Math.max(st.airspeed, 30);
+    this.targetSpd = Math.max(st.airspeed, minSpd);
     this.thrInt = throttle;
     this.pitchTrim = 0;
   }
@@ -40,7 +43,7 @@ export class Autopilot {
   }
 
   adjustSpeed(deltaMs: number, maxMs: number): void {
-    this.targetSpd = clamp(this.targetSpd + deltaMs, 30, maxMs);
+    this.targetSpd = clamp(this.targetSpd + deltaMs, this.minSpd, maxMs);
   }
 
   /** Overwrites pitch/roll/yaw/throttle in `c`. Call once per frame. */
@@ -58,18 +61,32 @@ export class Autopilot {
       c.throttle = clamp(this.thrInt + vsErr * 0.10, 0, 1);
 
       // nose down to chase speed; the trim integrator removes the P-only
-      // droop (holding speed needs a standing nose-down attitude)
-      const spdErr = this.targetSpd - st.airspeed;
+      // droop (holding speed needs a standing nose-down attitude). SIGNED
+      // forward speed, not |airspeed| — in a hover hold a backward drift
+      // must read as negative or the AP would pitch the wrong way
+      const vFwd = st.vel.x * Math.sin(st.heading) - st.vel.z * Math.cos(st.heading);
+      const spdErr = this.targetSpd - vFwd;
       const rawTarget = -spdErr * 0.014 + this.pitchTrim;
       if (rawTarget > -0.32 && rawTarget < 0.22) {
         this.pitchTrim = clamp(this.pitchTrim - spdErr * 0.008 * dt, -0.3, 0.3);
       }
       c.pitch = clamp(clamp(rawTarget, -0.32, 0.22) / 0.45, -1, 1);
 
+      // heading: banked turns in cruise, pedals in the hover — holding a
+      // hover heading with bank against the torque would orbit the spot
       const hErr = wrapAngle(this.targetHdg - st.heading);
-      const bankTargetRight = clamp(hErr * 1.4, -0.35, 0.35);
+      const hover = this.targetSpd < 8;
+      let bankTargetRight = clamp(hErr * 1.4, -0.35, 0.35) * (hover ? 0.1 : 1);
+      if (hover) {
+        c.yaw = clamp(hErr * 2.0, -0.8, 0.8);
+        // null sideways drift (tail-rotor translating tendency would
+        // otherwise walk the ship off its spot)
+        const vRight = st.vel.x * Math.cos(st.heading) + st.vel.z * Math.sin(st.heading);
+        bankTargetRight = clamp(bankTargetRight - vRight * 0.06, -0.35, 0.35);
+      } else {
+        c.yaw = 0;
+      }
       c.roll = clamp(bankTargetRight / 0.6, -1, 1);
-      c.yaw = 0;
       return;
     }
 

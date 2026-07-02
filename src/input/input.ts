@@ -8,13 +8,13 @@ import { clamp } from '../core/math';
 
 type SimEvent =
   | 'camera' | 'pause' | 'gear' | 'flaps' | 'map' | 'reset'
-  | 'autopilot' | 'airbrake' | 'hud'
+  | 'autopilot' | 'airbrake' | 'hud' | 'enginecut'
   | 'nav' | 'navzoomin' | 'navzoomout';
 
 export class InputManager {
   readonly controls: ControlInputs = {
     pitch: 0, roll: 0, yaw: 0, throttle: 0, flaps: 0,
-    gearDown: true, brakes: false, airbrake: false,
+    gearDown: true, brakes: false, airbrake: false, engineCut: false,
   };
 
   invertY = false;
@@ -42,6 +42,7 @@ export class InputManager {
         case 'KeyR': this.emit('reset'); break;
         case 'KeyT': this.emit('autopilot'); break;
         case 'KeyB': this.emit('airbrake'); break;
+        case 'KeyX': this.emit('enginecut'); break;
         case 'KeyH': this.emit('hud'); break;
         case 'KeyM': this.emit('map'); break;
         case 'KeyN': this.emit('nav'); break;
@@ -166,6 +167,7 @@ export class InputManager {
     this.controls.gearDown = true;
     this.controls.brakes = false;
     this.controls.airbrake = false;
+    this.controls.engineCut = false;
     this.flapsStep = 0;
     this.flapsDir = 1;
     this.touchYaw = 0;
