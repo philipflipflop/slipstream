@@ -17,18 +17,24 @@ assert.equal(p.colors.length, n * n * 3);
 console.log(`  ✓ ${n}×${n} lattice (${((cells * cellSize) / 1000).toFixed(1)} km square)`);
 
 // every shell vertex sits strictly below the true surface at its location
+// (near the waterline the envelope is clamped to +1.3 so dry coasts and the
+// metro city don't render drowned on the shell — clearance shrinks there)
 const half = (cells * cellSize) / 2;
 let worstGap = Infinity;
+let clamped = 0;
 for (let v = 0; v < n * n; v++) {
   const wx = p.positions[v * 3];
   const wy = p.positions[v * 3 + 1];
   const wz = p.positions[v * 3 + 2];
   assert.ok(Math.abs(wx) <= half + 1 && Math.abs(wz) <= half + 1, 'vertex outside shell');
   const h = gen.heightAt(wx, wz);
-  assert.ok(wy <= h - 5.9, `shell pokes up: ${wy.toFixed(1)} vs terrain ${h.toFixed(1)} at ${wx},${wz}`);
+  const isClamped = Math.abs(wy - 1.3) < 1e-6 && wy < h - 1.2;
+  if (isClamped) clamped++;
+  assert.ok(wy <= h - 5.9 || isClamped,
+    `shell pokes up: ${wy.toFixed(1)} vs terrain ${h.toFixed(1)} at ${wx},${wz}`);
   worstGap = Math.min(worstGap, h - wy);
 }
-console.log(`  ✓ shell is a lower envelope (min clearance ${worstGap.toFixed(1)} m)`);
+console.log(`  ✓ shell is a lower envelope (min clearance ${worstGap.toFixed(1)} m, ${clamped} waterline-clamped)`);
 
 // colors are valid and normals are unit-ish and upward-facing
 for (let v = 0; v < n * n; v++) {
@@ -86,10 +92,11 @@ const fresh = buildChunkPayload(gen, 3, 2, 14, 0, 0, cellSize);
       const wx = 3 * 900 + fresh.positions[v * 3];
       const wz = 2 * 900 + fresh.positions[v * 3 + 2];
       if (wx % cellSize === 0 && wz % cellSize === 0) {
-        // dry land never morphs up through the water sheet: those verts are
-        // clamped to just above the waterline instead of the shell envelope
-        const clamped = y > 0.5 && Math.abs(fresh.baseY[v] - Math.min(0.7, y)) < 1e-6;
-        assert.ok(fresh.baseY[v] <= y - 5.4 || clamped,
+        // dry land never morphs up through the water sheet: near the
+        // waterline the start is clamped just above it (0.7 from the chunk
+        // clamp, or shell clamp 1.3 + the 0.5 non-coplanar lift = 1.8)
+        const nearWater = fresh.baseY[v] <= 1.81 && fresh.baseY[v] > 0;
+        assert.ok(fresh.baseY[v] <= y - 5.4 || nearWater,
           `lattice vertex ${i},${j}: baseY ${fresh.baseY[v]} vs y ${y}`);
         onLattice++;
       }

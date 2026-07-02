@@ -39,16 +39,27 @@ export interface ChunkPayload {
  * conservative lower envelope — min of the centre and four half-step samples,
  * dropped 6 m. buildFarPayload and chunk geomorph starts share this one rule,
  * so a brand-new chunk at morph 0 sits exactly on the rendered shell surface.
+ *
+ * Terrain that is clearly above the waterline never drops below it: the raw
+ * −6 m envelope drowned every low coast (and the whole metro city, elev
+ * ~6.5 m) on the shell, so distant water bodies read too big — and every
+ * chunk arriving at the streaming boundary flipped its tile between the
+ * drowned-shell shape and the true coastline, twinkling water bodies
+ * grow/shrink across the whole horizon during flight.
  */
 export function shellVertexHeight(gen: WorldGen, gx: number, gz: number, cell: number): number {
   const hs = cell / 2;
   const wx = gx * cell;
   const wz = gz * cell;
-  return Math.min(
+  const m = Math.min(
     gen.heightAt(wx, wz),
     gen.heightAt(wx - hs, wz), gen.heightAt(wx + hs, wz),
     gen.heightAt(wx, wz - hs), gen.heightAt(wx, wz + hs),
-  ) - 6;
+  );
+  // keep ≥1.3 m of clearance below the lowest nearby terrain so detailed
+  // chunks still render strictly above the shell where they overlap it
+  if (m > WATER_LEVEL + 2.6) return Math.max(m - 6, WATER_LEVEL + 1.3);
+  return m - 6;
 }
 
 /**

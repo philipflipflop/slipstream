@@ -374,7 +374,9 @@ class Game {
       this.terrain.radius = 4;
       this.terrain.buildBudget = 1;
     } else if (q === 'medium') {
-      this.renderer.setPixelRatio(Math.min(dpr, 1.5));
+      // phones run dpr 3 — capping lower upscales shorelines into sub-pixel
+      // scintillation (edge twinkle), so medium renders at up to 2
+      this.renderer.setPixelRatio(Math.min(dpr, 2));
       this.renderer.shadowMap.enabled = true;
       this.sky.setShadows(true);
       this.terrain.radius = 6;
