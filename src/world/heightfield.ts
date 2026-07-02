@@ -29,6 +29,7 @@ const CITY_CENTERS = [
   { x: -9800, z: -7600, r: 2400, tall: 0.45 }, // midtown ridge
   { x: -3400, z: -10200, r: 2100, tall: 0.3 }, // north suburbs
   { x: 2600, z: -13800, r: 1900, tall: 0.35 }, // airport-north business park
+  { x: -13600, z: 3400, r: 2700, tall: 0.7 },  // southport — second core down the coast
 ];
 
 export interface AirfieldDef {
@@ -118,10 +119,12 @@ export class WorldGen {
     // rolling hills on land
     e += t.fbm(wx * 0.0011, wz * 0.0011, 4) * 26 * land;
 
-    // mountain ranges where the mountain mask bites
+    // mountain ranges where the mountain mask bites; range height itself
+    // varies regionally so some massifs tower over their neighbours
     const mm = smoothstep(0.22, 0.62, t.fbm(wx * 0.00016 + 777.7, wz * 0.00016, 3)) * land;
     if (mm > 0.001) {
-      e += t.ridged(wx * 0.00042, wz * 0.00042, 5) * 820 * mm;
+      const amp = 680 + (t.noise(wx * 0.00007 + 31.7, wz * 0.00007) * 0.5 + 0.5) * 420;
+      e += t.ridged(wx * 0.00042, wz * 0.00042, 5) * amp * mm;
     }
 
     // fine surface detail
@@ -147,9 +150,11 @@ export class WorldGen {
     const riser = smoothstep(0.6, 0.96, bands - bench);
     e += (bench + riser) * 92 * land;
 
-    // canyon cut: |noise| ridge inverted into deep winding channels
+    // canyon cut: |noise| ridge inverted into deep winding channels whose
+    // depth swells and shrinks along the run — gorges, not uniform trenches
     const can = Math.abs(t.noise(wx * 0.00017 + 99.3, wz * 0.00017));
-    e -= smoothstep(0.16, 0.015, can) * 105 * land;
+    const canDepth = 70 + (t.noise(wx * 0.00011 + 5.1, wz * 0.00011) * 0.5 + 0.5) * 90;
+    e -= smoothstep(0.16, 0.015, can) * canDepth * land;
 
     // sculpt: rocky shoulders + fine grit
     e += t.ridged(wx * 0.0014, wz * 0.0014, 3) * 9 * land;

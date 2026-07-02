@@ -27,6 +27,7 @@ export class InputManager {
   private touchBrakes = false;
   private touchThrottle: number | null = null;
   private flapsStep = 0; // 0..3
+  private flapsDir = 1;  // single-button (touch) cycle direction
 
   constructor() {
     window.addEventListener('keydown', (e) => {
@@ -77,6 +78,14 @@ export class InputManager {
     this.flapsStep = clamp(this.flapsStep + dir, 0, 3);
     this.controls.flaps = this.flapsStep / 3;
     this.emit('flaps');
+  }
+
+  /** One-button flap cycle: 0-1-2-3-2-1-0 so a single stop can be taken
+   *  back out without resetting and re-cycling through the whole range. */
+  pingPongFlaps(): void {
+    if (this.flapsStep >= 3) this.flapsDir = -1;
+    else if (this.flapsStep <= 0) this.flapsDir = 1;
+    this.cycleFlaps(this.flapsDir);
   }
 
   setTouchAxes(x: number, y: number): void { this.touchAxes = { x, y }; }
@@ -151,6 +160,7 @@ export class InputManager {
     this.controls.brakes = false;
     this.controls.airbrake = false;
     this.flapsStep = 0;
+    this.flapsDir = 1;
     this.touchYaw = 0;
     this.touchAxes = null;
     this.touchThrottle = null;

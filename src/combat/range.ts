@@ -38,6 +38,8 @@ export class GunneryRange {
   readonly total = 10;
   onHit: (hits: number, total: number) => void = () => {};
   onClear: () => void = () => {};
+  /** optional obstacle test — rounds also stop on buildings and trees */
+  solid: ((x: number, y: number, z: number) => boolean) | null = null;
 
   private rounds: Round[] = [];
   private balloons: Balloon[] = [];
@@ -130,7 +132,8 @@ export class GunneryRange {
       r.pos.addScaledVector(r.vel, dt);
       r.ttl -= dt;
 
-      let dead = r.ttl <= 0 || r.pos.y < this.gen.heightAt(r.pos.x, r.pos.z) || r.pos.y < 0;
+      let dead = r.ttl <= 0 || r.pos.y < this.gen.heightAt(r.pos.x, r.pos.z) || r.pos.y < 0 ||
+        (this.solid !== null && this.solid(r.pos.x, r.pos.y, r.pos.z));
       if (!dead) {
         for (const b of this.balloons) {
           if (!b.alive) continue;

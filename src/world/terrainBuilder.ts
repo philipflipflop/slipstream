@@ -27,8 +27,10 @@ export interface ChunkPayload {
   rockTints: Float32Array;
   houseMats: Float32Array;
   houseTints: Float32Array; // 3 floats per instance
-  towerMats: Float32Array;  // city buildings (metro theme)
+  towerMats: Float32Array;  // city buildings, punched-window concrete
   towerTints: Float32Array;
+  glassMats: Float32Array;  // city buildings, glass curtain-wall
+  glassTints: Float32Array;
 }
 
 /**
@@ -186,17 +188,56 @@ export function buildChunkPayload(
     }
   }
 
-  // ---- scatter ----
-  const treeList: number[] = [];
-  const treeTintList: number[] = [];
-  const leafList: number[] = [];
-  const leafTintList: number[] = [];
-  const rockList: number[] = [];
-  const rockTintList: number[] = [];
-  const houseList: number[] = [];
-  const tintList: number[] = [];
-  const towerList: number[] = [];
-  const towerTintList: number[] = [];
+  const sc = buildScatter(gen, cx, cz, scatterLevel);
+
+  return {
+    cx, cz, res,
+    positions, normals, colors, baseY, index,
+    treeMats: Float32Array.from(sc.treeMats),
+    treeTints: Float32Array.from(sc.treeTints),
+    leafMats: Float32Array.from(sc.leafMats),
+    leafTints: Float32Array.from(sc.leafTints),
+    rockMats: Float32Array.from(sc.rockMats),
+    rockTints: Float32Array.from(sc.rockTints),
+    houseMats: Float32Array.from(sc.houseMats),
+    houseTints: Float32Array.from(sc.houseTints),
+    towerMats: Float32Array.from(sc.towerMats),
+    towerTints: Float32Array.from(sc.towerTints),
+    glassMats: Float32Array.from(sc.glassMats),
+    glassTints: Float32Array.from(sc.glassTints),
+  };
+}
+
+/** Instance matrices + tints for everything scattered on one chunk. */
+export interface ScatterLists {
+  treeMats: number[]; treeTints: number[];
+  leafMats: number[]; leafTints: number[];
+  rockMats: number[]; rockTints: number[];
+  houseMats: number[]; houseTints: number[];
+  towerMats: number[]; towerTints: number[];
+  glassMats: number[]; glassTints: number[];
+}
+
+/**
+ * Deterministic object scatter for a chunk: city towers, trees, boulders,
+ * houses. This is the single source of truth for WHERE solid objects stand —
+ * the renderer instances these matrices directly and the collision field
+ * (src/world/obstacles.ts) derives hit volumes from the same lists, so what
+ * you see is exactly what you hit.
+ */
+export function buildScatter(
+  gen: WorldGen,
+  cx: number,
+  cz: number,
+  scatterLevel: 0 | 1 | 2,
+): ScatterLists {
+  const x0 = cx * CHUNK_SIZE;
+  const z0 = cz * CHUNK_SIZE;
+  const s: ScatterLists = {
+    treeMats: [], treeTints: [], leafMats: [], leafTints: [],
+    rockMats: [], rockTints: [], houseMats: [], houseTints: [],
+    towerMats: [], towerTints: [], glassMats: [], glassTints: [],
+  };
 
   // ---- city towers (metro theme) ----
   // Towers are skyline landmarks: they're placed at EVERY scatter level —
@@ -211,45 +252,86 @@ export function buildChunkPayload(
     for (let bz = bz0; bz <= bz1; bz++) {
       for (let bx = bx0; bx <= bx1; bx++) {
         // one candidate per street block, owned by the chunk holding its centre
-        const wx = bx * BLOCK + 58.5;
-        const wz = bz * BLOCK + 58.5;
-        if (wx < x0 || wx >= x0 + CHUNK_SIZE || wz < z0 || wz >= z0 + CHUNK_SIZE) continue;
-        const cm = gen.cityMaskAt(wx, wz);
+        const wcx = bx * BLOCK + 58.5;
+        const wcz = bz * BLOCK + 58.5;
+        if (wcx < x0 || wcx >= x0 + CHUNK_SIZE || wcz < z0 || wcz >= z0 + CHUNK_SIZE) continue;
+        const cm = gen.cityMaskAt(wcx, wcz);
         if (cm < 0.35) continue;
         if (gen.parkBlockAt(bx, bz)) continue;
-        if (gen.isOnApron(wx, wz)) continue;
-        const h = gen.heightAt(wx, wz);
+        if (gen.isOnApron(wcx, wcz)) continue;
+        const h = gen.heightAt(wcx, wcz);
         if (h < WATER_LEVEL + 2) continue;
 
         const hsh = hash2(bx * 3 + 7, bz * 5 - 3);
-        const dt = gen.downtownAt(wx, wz);
-        const ht = 10 + hsh * hsh * 28 + dt * (36 + hash2(bx + 11, bz - 17) * 200);
+        const dt = gen.downtownAt(wcx, wcz);
+        // vacant blocks keep the suburbs from reading as a perfect lattice
+        if (dt < 0.3 && hash2(bx * 41 + 3, bz * 43 + 1) < 0.3) continue;
+
+        const h2 = hash2(bx + 11, bz - 17);
+        let ht = 10 + hsh * hsh * 28 + dt * (36 + h2 * 200);
+        // a few genuine supertalls anchor the downtown cores
+        const supertall = dt > 0.5 && hash2(bx * 53, bz * 59 + 13) > 0.94;
+        if (supertall) ht = 260 + h2 * 190;
         if (scatterLevel === 0 && ht < 55) continue; // far rings: skyline only
-        const w = 26 + hash2(bx - 5, bz + 9) * 22;
-        const d = 26 + hash2(bx + 19, bz + 23) * 22;
-        const o = towerList.length;
-        towerList.length = o + 16;
-        composeYRot(towerList, o, wx, h - 0.5, wz, 0, w, ht, d);
-        // tall = cool glass, low = warm concrete
-        const glass = clampN((ht - 30) / 120, 0, 1);
+
+        const w = 22 + hash2(bx - 5, bz + 9) * 26;
+        const d = 22 + hash2(bx + 19, bz + 23) * 26;
+        // jitter within the block so towers don't stand on a perfect grid
+        const wx = wcx + (hash2(bx * 29 + 1, bz * 31 + 7) - 0.5) * 30;
+        const wz = wcz + (hash2(bx * 37 + 5, bz * 41 + 3) - 0.5) * 30;
+
+        // facade: tall towers mostly glass curtain-wall, low ones concrete
+        const isGlass = hash2(bx * 7 + 2, bz * 9 + 4) < (ht > 90 ? 0.72 : 0.22);
+        const mats = isGlass ? s.glassMats : s.towerMats;
+        const tints = isGlass ? s.glassTints : s.towerTints;
+        const gl = clampN((ht - 30) / 160, 0, 1);
         const k = 0.8 + hash2(bx, bz * 7) * 0.3;
-        towerTintList.push(
-          k * (0.85 - glass * 0.35),
-          k * (0.85 - glass * 0.22),
-          k * (0.88 + glass * 0.04),
-        );
+        const tr = k * (0.85 - gl * 0.3);
+        const tg = k * (0.85 - gl * 0.18);
+        const tb = k * (0.88 + gl * 0.05);
+        const tier = (tw: number, td: number, th: number): void => {
+          const o = mats.length;
+          mats.length = o + 16;
+          composeYRot(mats, o, wx, h - 0.5, wz, 0, tw, th, td);
+          tints.push(tr, tg, tb);
+        };
+        if (supertall) {
+          // classic setback profile: three tiers and a spire
+          tier(w, d, ht * 0.55);
+          tier(w * 0.74, d * 0.74, ht * 0.82);
+          tier(w * 0.5, d * 0.5, ht);
+          const o = s.towerMats.length;
+          s.towerMats.length = o + 16;
+          composeYRot(s.towerMats, o, wx, h - 0.5, wz, 0, 2.4, ht + 22 + h2 * 42, 2.4);
+          s.towerTints.push(0.3, 0.32, 0.35);
+        } else if (ht > 110 && hash2(bx * 61, bz * 67 + 9) > 0.5) {
+          tier(w, d, ht * 0.68);
+          tier(w * 0.68, d * 0.68, ht);
+        } else {
+          tier(w, d, ht);
+          // twin mid-rises share some blocks (mirrored across the centre)
+          if (ht < 110 && hash2(bx * 71 + 5, bz * 73 + 11) > 0.8) {
+            const o = mats.length;
+            mats.length = o + 16;
+            composeYRot(
+              mats, o, 2 * wcx - wx, h - 0.5, 2 * wcz - wz, 0,
+              w * 0.8, ht * (0.55 + hsh * 0.5), d * 0.8,
+            );
+            tints.push(tr * 0.94, tg * 0.94, tb);
+          }
+        }
         // a low annex beside the main tower fills out the block
         if (hsh > 0.45 && scatterLevel > 0) {
           const aw = 14 + hash2(bx * 13, bz) * 14;
           const ah = 6 + hash2(bx, bz * 17) * 10;
-          const o2 = towerList.length;
-          towerList.length = o2 + 16;
+          const o2 = s.towerMats.length;
+          s.towerMats.length = o2 + 16;
           composeYRot(
-            towerList, o2,
+            s.towerMats, o2,
             wx + (hsh > 0.7 ? 1 : -1) * (w / 2 + aw / 2 + 3), h - 0.5, wz + (aw - 14),
             0, aw, ah, aw,
           );
-          towerTintList.push(k * 0.78, k * 0.76, k * 0.74);
+          s.towerTints.push(k * 0.78, k * 0.76, k * 0.74);
         }
       }
     }
@@ -269,27 +351,35 @@ export function buildChunkPayload(
       if (h < WATER_LEVEL + 3 || h > 460) continue;
       const n = gen.normalAt(wx, wz, 6);
       if (n.y < 0.82) continue;
-      const s = 0.8 + rng() * 1.1;
-      const sy = s * (0.85 + rng() * 0.4);
+      // squared term gives occasional old-growth giants among the stand
+      const sc = 0.75 + rng() * 1.05 + rng() * rng() * 1.5;
+      const sy = sc * (0.85 + rng() * 0.4);
       const theta = rng() * Math.PI * 2;
       // broadleaf in moist lowland, conifers everywhere else
       const broadleaf = h < 210 && gen.drynessAt(wx, wz) < 0.52 && rng() < 0.65;
       const k = 0.82 + rng() * 0.36; // per-tree brightness variation
       if (broadleaf) {
-        const o = leafList.length;
-        leafList.length = o + 16;
-        composeYRot(leafList, o, wx, h - 0.4, wz, theta, s * 1.15, sy, s * 1.15);
-        leafTintList.push(k * (0.9 + rng() * 0.2), k, k * 0.88);
+        const o = s.leafMats.length;
+        s.leafMats.length = o + 16;
+        composeYRot(s.leafMats, o, wx, h - 0.4, wz, theta, sc * 1.15, sy, sc * 1.15);
+        s.leafTints.push(k * (0.9 + rng() * 0.2), k, k * 0.88);
+      } else if (sc < 1.8 && rng() < 0.16) {
+        // cypress/poplar: tall, narrow, darker — breaks up the cone monotony
+        const o = s.treeMats.length;
+        s.treeMats.length = o + 16;
+        composeYRot(s.treeMats, o, wx, h - 0.4, wz, theta, sc * 0.52, sy * 1.8, sc * 0.52);
+        s.treeTints.push(k * 0.8, k * 0.95, k * 0.78);
       } else {
-        const o = treeList.length;
-        treeList.length = o + 16;
-        composeYRot(treeList, o, wx, h - 0.4, wz, theta, s, sy, s);
-        treeTintList.push(k * 0.95, k, k * 0.92);
+        const o = s.treeMats.length;
+        s.treeMats.length = o + 16;
+        composeYRot(s.treeMats, o, wx, h - 0.4, wz, theta, sc, sy, sc);
+        s.treeTints.push(k * 0.95, k, k * 0.92);
       }
     }
 
     // boulders on steep faces and high ground, half-buried
-    const rockTries = scatterLevel === 2 ? 70 : 26;
+    const rockBase = scatterLevel === 2 ? 70 : 26;
+    const rockTries = gen.theme === 'mesa' ? Math.round(rockBase * 1.8) : rockBase;
     for (let t = 0; t < rockTries; t++) {
       const wx = x0 + rng() * CHUNK_SIZE;
       const wz = z0 + rng() * CHUNK_SIZE;
@@ -299,14 +389,21 @@ export function buildChunkPayload(
       const n = gen.normalAt(wx, wz, 5);
       const steep = 1 - n.y;
       // mostly where it's rocky: steep slopes or alpine elevations
-      if (rng() > steep * 2.6 + smoothstepN(h, 260, 520) * 0.7) continue;
-      const s = 0.6 + rng() * rng() * 3.4;
+      const rocky = steep * 2.6 + smoothstepN(h, 260, 520) * 0.7 +
+        (gen.theme === 'mesa' ? 0.25 : 0);
+      if (rng() > rocky) continue;
+      const sc = 0.6 + rng() * rng() * 3.4;
       const theta = rng() * Math.PI * 2;
-      const o = rockList.length;
-      rockList.length = o + 16;
-      composeYRot(rockList, o, wx, h - s * 0.35, wz, theta, s, s * (0.7 + rng() * 0.5), s);
+      // mesa: some boulders stretch into hoodoo pinnacles on the benches
+      const hoodoo = gen.theme === 'mesa' && steep < 0.22 && rng() < 0.3;
+      const sy = hoodoo ? sc * (2.8 + rng() * 2.6) : sc * (0.7 + rng() * 0.5);
+      const sxz = hoodoo ? sc * 0.75 : sc;
+      const o = s.rockMats.length;
+      s.rockMats.length = o + 16;
+      composeYRot(s.rockMats, o, wx, h - sc * 0.35, wz, theta, sxz, sy, sxz);
       const k = 0.75 + rng() * 0.45;
-      rockTintList.push(k, k * 0.97, k * 0.93);
+      if (hoodoo) s.rockTints.push(k * 0.72, k * 0.46, k * 0.32);
+      else s.rockTints.push(k, k * 0.97, k * 0.93);
     }
 
     const houseTries = scatterLevel === 2 ? 50 : 16;
@@ -320,32 +417,19 @@ export function buildChunkPayload(
       if (h < WATER_LEVEL + 2.5 || h > 160) continue;
       const n = gen.normalAt(wx, wz, 8);
       if (n.y < 0.97) continue;
-      const w = 7 + rng() * 9;
-      const d = 7 + rng() * 9;
-      const ht = 4 + rng() * 7;
+      const w = 7 + rng() * 10;
+      const d = 7 + rng() * 10;
+      const ht = 4 + rng() * (6 + rng() * 7); // cottages through low blocks
       const theta = Math.floor(rng() * 4) * (Math.PI / 2) + (rng() - 0.5) * 0.3;
-      const o = houseList.length;
-      houseList.length = o + 16;
-      composeYRot(houseList, o, wx, h - 0.3, wz, theta, w, ht, d);
+      const o = s.houseMats.length;
+      s.houseMats.length = o + 16;
+      composeYRot(s.houseMats, o, wx, h - 0.3, wz, theta, w, ht, d);
       const k = 0.7 + rng() * 0.3;
-      tintList.push(0.85 * k, 0.8 * k, 0.72 * k);
+      s.houseTints.push(0.85 * k, 0.8 * k, 0.72 * k);
     }
   }
 
-  return {
-    cx, cz, res,
-    positions, normals, colors, baseY, index,
-    treeMats: Float32Array.from(treeList),
-    treeTints: Float32Array.from(treeTintList),
-    leafMats: Float32Array.from(leafList),
-    leafTints: Float32Array.from(leafTintList),
-    rockMats: Float32Array.from(rockList),
-    rockTints: Float32Array.from(rockTintList),
-    houseMats: Float32Array.from(houseList),
-    houseTints: Float32Array.from(tintList),
-    towerMats: Float32Array.from(towerList),
-    towerTints: Float32Array.from(towerTintList),
-  };
+  return s;
 }
 
 function smoothstepN(v: number, lo: number, hi: number): number {
@@ -362,7 +446,7 @@ export function payloadTransfers(p: ChunkPayload): ArrayBuffer[] {
     p.positions.buffer, p.normals.buffer, p.colors.buffer, p.baseY.buffer, p.index.buffer,
     p.treeMats.buffer, p.treeTints.buffer, p.leafMats.buffer, p.leafTints.buffer,
     p.rockMats.buffer, p.rockTints.buffer, p.houseMats.buffer, p.houseTints.buffer,
-    p.towerMats.buffer, p.towerTints.buffer,
+    p.towerMats.buffer, p.towerTints.buffer, p.glassMats.buffer, p.glassTints.buffer,
   ] as ArrayBuffer[]; // typed arrays here are always plain ArrayBuffer-backed
 }
 

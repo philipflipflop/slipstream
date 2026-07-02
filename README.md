@@ -29,7 +29,7 @@ deterministic, all sharing the home airfield cluster):
 | --- | --- |
 | **Emerald Archipelago** | Island chains, forests, snow-capped alpine ranges. |
 | **Redstone Mesa** | Layered desert plateaus carved by winding canyon systems. |
-| **Meridian Bay** | A coastal metropolis: downtown skyscrapers, street grids, parks and suburbs west of the bay. |
+| **Meridian Bay** | A coastal metropolis: two downtown cores with 400 m+ setback supertalls, glass and concrete towers, street grids, parks and suburbs. |
 
 ## Flying
 
@@ -52,7 +52,11 @@ deterministic, all sharing the home airfield cluster):
 | Restart flight | `R` |
 
 On touch devices: left virtual stick (pitch/roll), right throttle lever (stays where you
-set it), rudder pedals bottom-centre, hold-to-brake, and gear/flap/camera buttons.
+set it), rudder pedals bottom-centre, hold-to-brake, and a top row of buttons — gear,
+flaps (cycles 0-1-2-3-2-1-0, so one tap takes a stop back out), camera, autopilot,
+speed brake and **NAV**, which opens the flight computer chart. Pause is the ⏸ button
+top-right. Sound plays through the media channel, so the iPhone mute switch doesn't
+silence it.
 
 **Takeoff:** full throttle, one notch of flaps, rotate gently past the middle of the
 speed tape. If `STALL` flashes — nose down, power up.
@@ -87,7 +91,10 @@ thrust model) — the handling differences fall out of the numbers, not scripts.
 
 - **Terrain** is an analytic heightfield (domain-warped FBM + ridged multifractal,
   seeded simplex). The render mesh, tree/settlement scattering *and* collision all sample
-  the same function, so what you see is exactly what you hit. Chunk generation runs in a
+  the same function, so what you see is exactly what you hit — including the scattered
+  solids: towers, houses, trees and mesa hoodoos derive collision volumes from the same
+  deterministic placement lists the renderer instances, so you can't fly through a
+  skyscraper (cannon rounds stop on them too). Chunk generation runs in a
   **Web Worker** — payloads arrive as transferable typed arrays, so the main thread never
   hitches while streaming nested-LOD chunks around the aircraft. Every LOD swap
   **geomorphs**: a chunk's vertices start on the exact surface they replace (the coarser

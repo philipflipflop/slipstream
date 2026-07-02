@@ -345,7 +345,8 @@ function surfaceSlope(heightAt: HeightFn, x: number, z: number): number {
   return Math.hypot(dx, dz) / (2 * e);
 }
 
-function crash(st: FlightState, reason: string): void {
+/** End the flight against something solid (terrain or an obstacle). */
+export function crash(st: FlightState, reason: string): void {
   st.crashed = true;
   st.crashReason = reason;
   st.vel.multiplyScalar(0.1);

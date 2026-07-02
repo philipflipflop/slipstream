@@ -56,28 +56,45 @@ for (const theme of themes) {
   assert.ok(max - min < 9, `downtown ground varies ${(max - min).toFixed(1)} m`);
   console.log(`  ✓ metro: downtown masked + graded (Δ${(max - min).toFixed(1)} m)`);
 
-  // towers spawn deterministically on downtown chunks
+  // towers spawn deterministically on downtown chunks (both facade lists)
   const cx = Math.floor(-5200 / 900);
   const cz = Math.floor(-2600 / 900);
   const p1 = buildChunkPayload(gen, cx, cz, 28, 2, 0, 450);
   const p2 = buildChunkPayload(new WorldGen(undefined, 'metro'), cx, cz, 28, 2, 0, 450);
-  const towers = p1.towerMats.length / 16;
+  const towers = (p1.towerMats.length + p1.glassMats.length) / 16;
   assert.ok(towers >= 12, `only ${towers} towers on a downtown chunk`);
   assert.deepEqual(Array.from(p1.towerMats), Array.from(p2.towerMats));
+  assert.deepEqual(Array.from(p1.glassMats), Array.from(p2.glassMats));
+  assert.ok(p1.glassMats.length > 0, 'no glass curtain-wall towers downtown');
   // some are proper skyscrapers (instance matrix [5] = y scale = height)
   let tallest = 0;
-  for (let i = 0; i < towers; i++) tallest = Math.max(tallest, p1.towerMats[i * 16 + 5]);
+  for (const arr of [p1.towerMats, p1.glassMats]) {
+    for (let i = 0; i < arr.length / 16; i++) tallest = Math.max(tallest, arr[i * 16 + 5]);
+  }
   assert.ok(tallest > 80, `tallest downtown tower only ${tallest.toFixed(0)} m`);
   console.log(`  ✓ metro: ${towers} towers on the downtown chunk, tallest ${tallest.toFixed(0)} m`);
 
+  // the downtown core grows genuine supertalls (> 250 m) somewhere
+  let supertall = 0;
+  for (let dz = -2; dz <= 2; dz++) {
+    for (let dx = -2; dx <= 2; dx++) {
+      const p = buildChunkPayload(gen, cx + dx, cz + dz, 14, 1, 0, 450);
+      for (const arr of [p.towerMats, p.glassMats]) {
+        for (let i = 0; i < arr.length / 16; i++) supertall = Math.max(supertall, arr[i * 16 + 5]);
+      }
+    }
+  }
+  assert.ok(supertall > 250, `no supertall in the core (max ${supertall.toFixed(0)} m)`);
+  console.log(`  ✓ metro: tallest supertall in the core ${supertall.toFixed(0)} m`);
+
   // far-ring chunks keep the skyline (tall towers survive scatter level 0)
   const far = buildChunkPayload(gen, cx, cz, 14, 0, 0, 450);
-  assert.ok(far.towerMats.length > 0, 'skyline missing at far LOD');
-  console.log(`  ✓ metro: ${far.towerMats.length / 16} skyline towers at far LOD`);
+  assert.ok(far.towerMats.length + far.glassMats.length > 0, 'skyline missing at far LOD');
+  console.log(`  ✓ metro: ${(far.towerMats.length + far.glassMats.length) / 16} skyline towers at far LOD`);
 
   // other themes have no towers
   const arch = buildChunkPayload(new WorldGen(), cx, cz, 28, 2, 0, 450);
-  assert.equal(arch.towerMats.length, 0);
+  assert.equal(arch.towerMats.length + arch.glassMats.length, 0);
   console.log('  ✓ archipelago: no towers');
 }
 

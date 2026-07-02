@@ -323,6 +323,7 @@ html, body {
   background: rgba(255, 179, 64, .12);
 }
 #navpanel .nav-engage.armed { background: rgba(255, 179, 64, .35); color: #fff; }
+#navpanel .nav-close { padding: 7px; letter-spacing: .08em; }
 #navpanel .nav-close-hint { font-size: 10px; opacity: .45; text-align: center; }
 @media (max-width: 880px), (max-height: 520px) {
   #navwrap { right: calc(58px + var(--sar)); }

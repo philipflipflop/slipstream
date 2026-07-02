@@ -349,7 +349,9 @@ export class Screens {
       <div class="krow"><span>Throttle</span><kbd>right lever</kbd></div>
       <div class="krow"><span>Rudder</span><kbd>RUD pedals</kbd></div>
       <div class="krow"><span>Brakes / fire cannon (airborne)</span><kbd>BRAKE (hold)</kbd></div>
-      <div class="krow"><span>Gear / flaps / camera</span><kbd>top buttons</kbd></div>`;
+      <div class="krow"><span>Gear / flaps / camera / AP</span><kbd>top buttons</kbd></div>
+      <div class="krow"><span>Flight computer (chart)</span><kbd>NAV</kbd></div>
+      <div class="krow"><span>Pause</span><kbd>⏸ top right</kbd></div>`;
     const keyRows = `
       <div class="krow"><span>Pitch</span><kbd>W / S</kbd></div>
       <div class="krow"><span>Roll</span><kbd>A / D</kbd></div>

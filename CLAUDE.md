@@ -38,6 +38,13 @@ Cloudflare builds with **npm 10.9.2**; local npm is 11. Two rules:
 - `src/world/terrain.ts` — streaming, LOD rings (quality-set `fineRing`/`midRing`
   + high-altitude variants), geomorph animation, horizon shell management (shell
   builds only when the chunk queue is idle — keep it that way).
+- `src/world/obstacles.ts` — solid-object collision (towers/houses/trees/hoodoos),
+  pure. Hit volumes derive from `buildScatter` in terrainBuilder — the SAME lists
+  the renderer instances. Never place scatter outside `buildScatter`, or rendering
+  and collision will disagree.
+- Mobile rendering: touch devices skip the logarithmic depth buffer, so they rely
+  on the AGL-scaled near plane (main.ts frame()) + the water sheet's polygon
+  offset/raise (`Water` `coarseDepth` flag) to avoid shoreline z-fighting.
 - Conventions: -Z = north = heading 0; runway along Z at origin; heading =
   `atan2(fwd.x, -fwd.z)`.
 

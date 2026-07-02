@@ -77,7 +77,7 @@ export class Water {
   mesh: THREE.Mesh;
   private mat: THREE.ShaderMaterial;
 
-  constructor(scene: THREE.Scene, fogColor: THREE.Color, sunDir: THREE.Vector3) {
+  constructor(scene: THREE.Scene, fogColor: THREE.Color, sunDir: THREE.Vector3, coarseDepth = false) {
     // big enough to underlie the entire far terrain shell (~63 km)
     const geo = new THREE.PlaneGeometry(66000, 66000, 1, 1);
     geo.rotateX(-Math.PI / 2);
@@ -86,6 +86,12 @@ export class Water {
       fragmentShader: FRAG,
       transparent: true,
       depthWrite: false,
+      // without the logarithmic depth buffer (mobile) far shorelines land
+      // within depth-buffer noise of the sheet and flicker; bias the depth
+      // test a few units toward the water so it wins those contests cleanly
+      polygonOffset: coarseDepth,
+      polygonOffsetFactor: -1,
+      polygonOffsetUnits: -3,
       uniforms: {
         uTime: { value: 0 },
         uSunDir: { value: sunDir.clone() },
@@ -98,7 +104,8 @@ export class Water {
       },
     });
     this.mesh = new THREE.Mesh(geo, this.mat);
-    this.mesh.position.y = WATER_LEVEL + 0.18; // sit just proud of the z-fight band
+    // sit just proud of the z-fight band (higher where depth is coarse)
+    this.mesh.position.y = WATER_LEVEL + (coarseDepth ? 0.55 : 0.18);
     this.mesh.renderOrder = 1;
     this.mesh.frustumCulled = false;
     scene.add(this.mesh);

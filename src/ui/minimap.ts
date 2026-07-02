@@ -66,6 +66,7 @@ export class Minimap {
         <button data-act="clear">CLEAR</button>
       </div>
       <button class="nav-engage" data-act="engage">ENGAGE NAV</button>
+      <button class="nav-close" data-act="close">CLOSE</button>
       <div class="nav-close-hint">N or ESC to close</div>
     `;
     this.legList = this.panel.querySelector('.nav-legs')!;
@@ -85,6 +86,12 @@ export class Minimap {
       else if (act === 'undo') this.onUndo();
       else if (act === 'clear') this.onClear();
       else if (act === 'engage') this.onEngage();
+      else if (act === 'close') this.onCloseNav();
+    });
+
+    // tapping the dimmed backdrop closes the chart (touch has no ESC)
+    this.wrap.addEventListener('pointerdown', (e) => {
+      if (this.expanded && e.target === this.wrap) this.onCloseNav();
     });
 
     this.canvas.addEventListener('pointerdown', (e) => {

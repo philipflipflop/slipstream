@@ -29,11 +29,34 @@ export class SoundEngine {
 
   private noiseBuf!: AudioBuffer;
   private kind: EngineKind = 'prop';
+  private mediaKick: HTMLAudioElement | null = null;
 
   muted = false;
 
+  /**
+   * iOS routes WebAudio through the *ringer* channel by default, so the
+   * mute switch silences the sim even with the media volume up. Declaring
+   * the session as 'playback' (Safari 16.4+) — and, as a fallback for older
+   * WebKit, keeping a silent looping <audio> element alive — moves the page
+   * onto the media channel, like a video player.
+   */
+  private claimMediaRoute(): void {
+    const nav = navigator as Navigator & { audioSession?: { type: string } };
+    try {
+      if (nav.audioSession) nav.audioSession.type = 'playback';
+    } catch { /* older Safari: fall through to the <audio> kick */ }
+    if (!this.mediaKick) {
+      const a = document.createElement('audio');
+      a.loop = true;
+      a.src = silentWavUrl();
+      this.mediaKick = a;
+    }
+    void this.mediaKick.play().catch(() => {});
+  }
+
   /** Must be called from a user gesture. */
   init(): void {
+    this.claimMediaRoute();
     if (this.ctx) {
       if (this.ctx.state === 'suspended') void this.ctx.resume();
       return;
@@ -203,4 +226,21 @@ export class SoundEngine {
     this.thumpNoise(1.6, 0.8, 130);
     this.blip(60, 1.2, 0.4, 'sawtooth', -30);
   }
+}
+
+/** One second of 8 kHz mono silence as a blob URL (media-route keepalive). */
+function silentWavUrl(): string {
+  const n = 8000;
+  const buf = new ArrayBuffer(44 + n * 2);
+  const v = new DataView(buf);
+  const str = (o: number, s: string): void => {
+    for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i));
+  };
+  str(0, 'RIFF'); v.setUint32(4, 36 + n * 2, true); str(8, 'WAVE');
+  str(12, 'fmt '); v.setUint32(16, 16, true);
+  v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, 8000, true); v.setUint32(28, 16000, true);
+  v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  str(36, 'data'); v.setUint32(40, n * 2, true);
+  return URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }));
 }

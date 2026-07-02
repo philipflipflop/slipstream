@@ -31,6 +31,7 @@ export class TouchControls {
   onPause: () => void = () => {};
   onAutopilot: () => void = () => {};
   onAirbrake: () => void = () => {};
+  onNav: () => void = () => {};
 
   constructor(input: InputManager) {
     this.input = input;
@@ -166,7 +167,7 @@ export class TouchControls {
     this.flapBtn = mk('FLAP', { top: safeT, left: 'calc(82px + env(safe-area-inset-left, 0px))' });
     this.flapBtn.addEventListener('pointerdown', (e) => {
       e.preventDefault();
-      this.input.cycleFlaps(this.input.controls.flaps >= 0.99 ? -3 : 1);
+      this.input.pingPongFlaps(); // 0-1-2-3-2-1-0, no reset jump
     });
 
     const cam = mk('CAM', { top: safeT, left: 'calc(152px + env(safe-area-inset-left, 0px))' });
@@ -177,6 +178,9 @@ export class TouchControls {
 
     this.sbBtn = mk('SPBRK', { top: safeT, left: 'calc(292px + env(safe-area-inset-left, 0px))' });
     this.sbBtn.addEventListener('pointerdown', (e) => { e.preventDefault(); this.onAirbrake(); });
+
+    const nav = mk('NAV', { top: safeT, left: 'calc(362px + env(safe-area-inset-left, 0px))' });
+    nav.addEventListener('pointerdown', (e) => { e.preventDefault(); this.onNav(); });
 
     // brake — hold, sits above the throttle
     const brk = mk('BRAKE', {

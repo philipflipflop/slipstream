@@ -87,23 +87,38 @@ function buildTowerGeometry(): THREE.BufferGeometry {
   return g;
 }
 
-function towerTexture(): THREE.CanvasTexture {
+function towerTexture(style: 'punched' | 'curtain'): THREE.CanvasTexture {
   const c = document.createElement('canvas');
   c.width = 128;
   c.height = 256;
   const ctx = c.getContext('2d')!;
-  // facade base
-  ctx.fillStyle = '#3a4350';
-  ctx.fillRect(0, 0, 128, 256);
-  // window grid: 10 columns × 24 floors, varied lit/unlit panes
-  for (let fy = 0; fy < 24; fy++) {
-    for (let fx = 0; fx < 10; fx++) {
-      const lit = Math.random();
-      ctx.fillStyle = lit > 0.93
-        ? 'rgba(255, 226, 150, 0.9)'
-        : `rgba(${120 + Math.random() * 60}, ${150 + Math.random() * 60}, ${175 + Math.random() * 55}, ${0.55 + Math.random() * 0.3})`;
-      ctx.fillRect(4 + fx * 12.4, 8 + fy * 10.2, 8.4, 6.6);
+  if (style === 'punched') {
+    // concrete facade with a punched window grid: 10 columns × 24 floors
+    ctx.fillStyle = '#3a4350';
+    ctx.fillRect(0, 0, 128, 256);
+    for (let fy = 0; fy < 24; fy++) {
+      for (let fx = 0; fx < 10; fx++) {
+        const lit = Math.random();
+        ctx.fillStyle = lit > 0.93
+          ? 'rgba(255, 226, 150, 0.9)'
+          : `rgba(${120 + Math.random() * 60}, ${150 + Math.random() * 60}, ${175 + Math.random() * 55}, ${0.55 + Math.random() * 0.3})`;
+        ctx.fillRect(4 + fx * 12.4, 8 + fy * 10.2, 8.4, 6.6);
+      }
     }
+  } else {
+    // glass curtain-wall: continuous glazing bands split by slim mullions —
+    // reads as a different building type, not just a re-tint
+    ctx.fillStyle = '#232b36';
+    ctx.fillRect(0, 0, 128, 256);
+    for (let fy = 0; fy < 31; fy++) {
+      const sky = 130 + Math.random() * 70;
+      ctx.fillStyle = Math.random() > 0.94
+        ? 'rgba(255, 226, 150, 0.85)'
+        : `rgba(${sky * 0.5}, ${sky * 0.7}, ${sky}, ${0.62 + Math.random() * 0.25})`;
+      ctx.fillRect(0, fy * 8 + 1.5, 128, 5.5);
+    }
+    ctx.fillStyle = 'rgba(20, 26, 34, 0.8)';
+    for (let mx = 0; mx < 8; mx++) ctx.fillRect(mx * 16.5 + 2, 0, 1.6, 248);
   }
   // solid roof strip in the top-left corner (top/bottom faces sample here)
   ctx.fillStyle = '#2c3138';
@@ -175,6 +190,7 @@ export class TerrainManager {
   private treeMat: THREE.MeshLambertMaterial;
   private houseMat: THREE.MeshLambertMaterial;
   private towerMat: THREE.MeshLambertMaterial;
+  private glassMat: THREE.MeshLambertMaterial;
   private treeGeo: THREE.BufferGeometry;
   private leafGeo: THREE.BufferGeometry;
   private rockGeo: THREE.BufferGeometry;
@@ -220,7 +236,8 @@ export class TerrainManager {
     this.rockGeo = buildRockGeometry();
     this.houseGeo = buildHouseGeometry();
     this.towerGeo = buildTowerGeometry();
-    this.towerMat = new THREE.MeshLambertMaterial({ map: towerTexture() });
+    this.towerMat = new THREE.MeshLambertMaterial({ map: towerTexture('punched') });
+    this.glassMat = new THREE.MeshLambertMaterial({ map: towerTexture('curtain') });
 
     try {
       this.worker = new Worker(new URL('./terrain.worker.ts', import.meta.url), { type: 'module' });
@@ -603,6 +620,7 @@ export class TerrainManager {
     addInstances(this.rockGeo, this.treeMat, p.rockMats, p.rockTints);
     addInstances(this.houseGeo, this.houseMat, p.houseMats, p.houseTints);
     addInstances(this.towerGeo, this.towerMat, p.towerMats, p.towerTints);
+    addInstances(this.towerGeo, this.glassMat, p.glassMats, p.glassTints);
 
     this.scene.add(group);
     this.chunks.set(key, { key, cx: p.cx, cz: p.cz, res: p.res, group, disposables });

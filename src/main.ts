@@ -14,7 +14,8 @@ import { Sky } from './world/sky';
 import { Airport } from './world/airport';
 import { RingCourse, RING_COUNT } from './world/rings';
 import { GunneryRange } from './combat/range';
-import { setTurbulence } from './aircraft/flightModel';
+import { ObstacleField } from './world/obstacles';
+import { setTurbulence, crash } from './aircraft/flightModel';
 import { Route, bearingTo, distanceTo } from './nav/route';
 import { Aircraft } from './aircraft/aircraft';
 import { specById } from './aircraft/catalog';
@@ -48,6 +49,7 @@ class Game {
   private airport: Airport;
   private rings: RingCourse;
   private range: GunneryRange;
+  private obstacles!: ObstacleField;
   private route = new Route();
 
   // actors & systems
@@ -113,12 +115,15 @@ class Game {
     this.scene.background = null; // dome handles it
 
     this.terrain = new TerrainManager(this.scene, this.gen);
-    this.water = new Water(this.scene, this.sky.fogColor, this.sky.sunDir);
+    // touch skips the log depth buffer, so water needs the depth-bias path
+    this.water = new Water(this.scene, this.sky.fogColor, this.sky.sunDir, touch);
     this.airport = new Airport(this.scene, this.gen);
     this.rings = new RingCourse(this.scene, this.gen);
+    this.obstacles = new ObstacleField(this.gen);
     this.range = new GunneryRange(this.scene, this.gen);
     this.range.onHit = (hits, total) => this.screens.toast(`TARGET DOWN — ${hits}/${total}`);
     this.range.onClear = () => this.screens.toast('RANGE CLEAR — ALL TARGETS DESTROYED');
+    this.range.solid = (x, y, z) => this.obstacles.solidAt(x, y, z);
     setTurbulence(0.7); // light chop down low; tests run with 0
 
     this.aircraft = new Aircraft(specById(this.save.aircraft));
@@ -234,11 +239,12 @@ class Game {
       }
     });
 
-    this.input.on('pause', () => {
+    const pauseAction = (): void => {
       if (this.minimap.expanded) { this.toggleNav(); return; } // ESC closes the chart first
       if (this.state === 'flying') this.pause();
       else if (this.state === 'paused') this.resume();
-    });
+    };
+    this.input.on('pause', pauseAction);
     this.input.on('nav', () => this.toggleNav());
     this.input.on('navzoomin', () => this.minimap.zoom(-1));
     this.input.on('navzoomout', () => this.minimap.zoom(1));
@@ -280,7 +286,12 @@ class Game {
       };
       this.touch.onAutopilot = () => this.toggleAutopilot();
       this.touch.onAirbrake = () => this.toggleAirbrake();
+      this.touch.onNav = () => this.toggleNav();
+      this.touch.onPause = pauseAction;
     }
+    this.minimap.onCloseNav = () => {
+      if (this.minimap.expanded) this.toggleNav();
+    };
   }
 
   /** Open/close the expanded planning chart (the onboard computer). */
@@ -545,6 +556,19 @@ class Game {
     this.sky.update(st.pos, fog.far, dt);
     this.airport.update(this.simTime, st.pos.x, st.pos.z);
 
+    // depth precision: without the log depth buffer (mobile) far shorelines
+    // land inside depth-buffer noise and shimmer; sliding the near plane out
+    // with height above ground restores precision exactly when nothing can
+    // be close to the camera anyway (capped below the chase-cam distance)
+    const cam = this.flightCam.camera;
+    const nearWant = this.state === 'flying' || this.state === 'crashed'
+      ? clamp(1 + (agl - 250) * 0.012, 1, 10)
+      : 1;
+    if (Math.abs(cam.near - nearWant) > 0.05) {
+      cam.near = nearWant;
+      cam.updateProjectionMatrix();
+    }
+
     switch (this.state) {
       case 'boot':
         this.bootFrame();
@@ -680,6 +704,13 @@ class Game {
     }
 
     this.aircraft.update(this.input.controls, dt, this.heightFn);
+
+    // buildings, trees and rock pinnacles are as solid as the terrain
+    this.obstacles.warm(st.pos.x, st.pos.z);
+    if (!st.crashed && !st.onGround) {
+      const wall = this.obstacles.hit(st.pos.x, st.pos.y, st.pos.z, 2.5);
+      if (wall) crash(st, wall);
+    }
 
     // cannon: brake control doubles as the trigger once airborne
     const firing =
