@@ -17,6 +17,11 @@ interface Chunk {
   cx: number;
   cz: number;
   res: number;
+  scatter: 0 | 1 | 2;
+  /** instance count per scatter list at build time — deterministic RNG makes
+   *  a lower level's list an exact prefix of a higher one, so on upgrade only
+   *  instances beyond these counts are new (and grow in) */
+  counts: number[];
   group: THREE.Group;
   disposables: Array<{ dispose(): void }>;
 }
@@ -204,7 +209,7 @@ export class TerrainManager {
   readonly gen: WorldGen;
   private chunks = new Map<string, Chunk>();
   private queue: Array<{ cx: number; cz: number; res: number; priority: number }> = [];
-  private pending = new Map<string, number>(); // key → res being built
+  private pending = new Map<string, number>(); // key → res*4+scatter being built
   private results: ChunkPayload[] = [];
   private worker: Worker | null = null;
 
@@ -357,16 +362,21 @@ export class TerrainManager {
       if (ring > this.effRadius()) continue; // stale
       const key = `${job.cx},${job.cz}`;
       let res = this.resForRing(ring);
+      const scatter = this.scatterForRing(ring);
       const existing = this.chunks.get(key);
-      if (existing && existing.res >= res) continue;
+      // a chunk can need a rebuild for resolution OR for denser scatter —
+      // scatter-only rebuilds keep the finer mesh (geomorph start is then
+      // the identical surface, so only the new instances grow in)
+      if (existing && existing.res >= res && existing.scatter >= scatter) continue;
       // a missing chunk appears fast at 56 first; the ultra res arrives a
       // beat later as a seamless geomorph upgrade (matters at boot/teleport)
       if (!existing && res > 56) res = 56;
-      if ((this.pending.get(key) ?? 0) >= res) continue;
-      this.pending.set(key, res);
+      if (existing && existing.res > res) res = existing.res;
+      const combo = res * 4 + scatter;
+      if ((this.pending.get(key) ?? 0) >= combo) continue;
+      this.pending.set(key, combo);
       const prev = existing?.res ?? 0;
       const shellCell = this.farGeo ? this.farGeoCell : this.farCellSize;
-      const scatter = this.scatterForRing(ring);
       if (this.worker) {
         this.worker.postMessage({ type: 'build', cx: job.cx, cz: job.cz, res, scatter, prev, shellCell });
       } else {
@@ -422,8 +432,9 @@ export class TerrainManager {
         const tz = cz + dz;
         const ring = Math.max(Math.abs(dx), Math.abs(dz));
         const want = this.resForRing(ring);
+        const wantS = this.scatterForRing(ring);
         const existing = this.chunks.get(`${tx},${tz}`);
-        if (existing && existing.res >= want) continue;
+        if (existing && existing.res >= want && existing.scatter >= wantS) continue;
         this.queue.push({ cx: tx, cz: tz, res: want, priority: dx * dx + dz * dz });
       }
     }
@@ -549,9 +560,10 @@ export class TerrainManager {
           '#include <begin_vertex>\n\ttransformed.y = mix(baseY, position.y, uMorph);' +
           '\n\tvTWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;',
         );
-      // close-range albedo detail: two octaves of value noise break up the
-      // smooth vertex-colour interpolation that reads as "low poly" up close;
-      // fades out by ~2.5 km so the far field renders exactly as before
+      // close-range albedo detail: value-noise octaves break up the smooth
+      // vertex-colour interpolation that reads as "low poly" up close. Each
+      // octave fades out BEFORE its wavelength drops below a pixel — value
+      // noise has no mipmaps, so past that point it aliases into shimmer
       sh.fragmentShader =
         'varying vec3 vTWorld;\n' +
         sh.fragmentShader
@@ -576,12 +588,17 @@ export class TerrainManager {
             `#include <color_fragment>
             {
               float dDist = distance(vTWorld, cameraPosition);
-              float dAmt = smoothstep(2500.0, 120.0, dDist);
-              if (dAmt > 0.003) {
+              if (dDist < 1300.0) {
+                float f1 = smoothstep(420.0, 70.0, dDist);
+                float f2 = smoothstep(1300.0, 220.0, dDist);
+                float f3 = smoothstep(160.0, 32.0, dDist);
                 float n1 = tNoise(vTWorld.xz * 1.45);
                 float n2 = tNoise(vTWorld.xz * 0.21 + 37.0);
-                float n3 = tNoise(vTWorld.xz * 7.3) * smoothstep(380.0, 40.0, dDist);
-                diffuseColor.rgb *= 1.0 + ((n1 - 0.5) * 0.14 + (n2 - 0.5) * 0.2 + (n3 - 0.5) * 0.1) * dAmt;
+                float n3 = tNoise(vTWorld.xz * 7.3);
+                diffuseColor.rgb *= 1.0
+                  + (n1 - 0.5) * 0.14 * f1
+                  + (n2 - 0.5) * 0.2 * f2
+                  + (n3 - 0.5) * 0.1 * f3;
               }
             }`,
           );
@@ -593,14 +610,14 @@ export class TerrainManager {
   /** Wrap a worker payload in GPU objects and swap it into the scene. */
   private finalize(p: ChunkPayload): void {
     const key = `${p.cx},${p.cz}`;
-    if ((this.pending.get(key) ?? 0) === p.res) this.pending.delete(key);
+    if ((this.pending.get(key) ?? 0) === p.res * 4 + p.scatter) this.pending.delete(key);
 
     const ring = Math.max(Math.abs(p.cx - this.lastCx), Math.abs(p.cz - this.lastCz));
     if (ring > this.effRadius() + 1) return; // flew away while it was baking
 
     const old = this.chunks.get(key);
     if (old) {
-      if (old.res >= p.res) return;
+      if (old.res >= p.res && old.scatter >= p.scatter) return;
       this.scene.remove(old.group);
       for (const d of old.disposables) d.dispose();
       this.chunks.delete(key);
@@ -616,9 +633,6 @@ export class TerrainManager {
     const morph = { u: { value: 0 }, t: 0 };
     this.morphs.push(morph);
     const mat = this.makeChunkMat(morph.u);
-    // fresh chunks grow their scatter with the terrain swell; LOD upgrades
-    // re-instance the same objects, so those must appear at full size
-    const growU = old ? FULL_GROWN : morph.u;
 
     const mesh = new THREE.Mesh(geo, mat);
     mesh.position.set(p.cx * CHUNK_SIZE, 0, p.cz * CHUNK_SIZE);
@@ -630,16 +644,32 @@ export class TerrainManager {
     group.add(mesh);
     const disposables: Array<{ dispose(): void }> = [geo, mat];
 
+    // Scatter lists at a lower level are an exact prefix of the same lists
+    // at a higher level (same RNG stream, shorter loops), so on upgrade the
+    // carried-over instances render at full size and only the NEW suffix
+    // grows in with the terrain swell — nothing pops, nothing re-grows.
+    const counts: number[] = [];
+    let listIdx = 0;
     const addInstances = (geo: THREE.BufferGeometry, base: THREE.MeshLambertMaterial, mats: Float32Array, tints: Float32Array): void => {
+      const idx = listIdx++;
       const count = mats.length / 16;
+      counts[idx] = count;
       if (count === 0) return;
-      const mat = makeGrowMat(base, growU);
-      const im = new THREE.InstancedMesh(geo, mat, count);
-      (im.instanceMatrix.array as Float32Array).set(mats);
-      im.instanceMatrix.needsUpdate = true;
-      if (tints.length > 0) im.instanceColor = new THREE.InstancedBufferAttribute(tints, 3);
-      group.add(im);
-      disposables.push(mat, { dispose: () => im.dispose() });
+      const nFull = old ? Math.min(old.counts[idx] ?? count, count) : 0;
+      const emit = (i0: number, n: number, u: { value: number }): void => {
+        if (n <= 0) return;
+        const mat = makeGrowMat(base, u);
+        const im = new THREE.InstancedMesh(geo, mat, n);
+        (im.instanceMatrix.array as Float32Array).set(mats.subarray(i0 * 16, (i0 + n) * 16));
+        im.instanceMatrix.needsUpdate = true;
+        if (tints.length > 0) {
+          im.instanceColor = new THREE.InstancedBufferAttribute(tints.slice(i0 * 3, (i0 + n) * 3), 3);
+        }
+        group.add(im);
+        disposables.push(mat, { dispose: () => im.dispose() });
+      };
+      emit(0, nFull, FULL_GROWN);
+      emit(nFull, count - nFull, morph.u);
     };
     addInstances(this.treeGeo, this.treeMat, p.treeMats, p.treeTints);
     addInstances(this.leafGeo, this.treeMat, p.leafMats, p.leafTints);
@@ -649,10 +679,15 @@ export class TerrainManager {
     addInstances(this.towerGeo, this.glassMat, p.glassMats, p.glassTints);
 
     this.scene.add(group);
-    this.chunks.set(key, { key, cx: p.cx, cz: p.cz, res: p.res, group, disposables });
+    this.chunks.set(key, {
+      key, cx: p.cx, cz: p.cz, res: p.res, scatter: p.scatter, counts, group, disposables,
+    });
 
-    // if this was a capped first build, queue the full-resolution upgrade
+    // if this was a capped first build, queue the full-strength upgrade
     const want = this.resForRing(ring);
-    if (p.res < want) this.queue.push({ cx: p.cx, cz: p.cz, res: want, priority: ring * ring });
+    const wantS = this.scatterForRing(ring);
+    if (p.res < want || p.scatter < wantS) {
+      this.queue.push({ cx: p.cx, cz: p.cz, res: want, priority: ring * ring });
+    }
   }
 }

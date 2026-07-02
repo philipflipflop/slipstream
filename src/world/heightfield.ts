@@ -426,9 +426,12 @@ export class WorldGen {
 
   /**
    * Biome colour at a point, written into out[] as r,g,b (0..1).
-   * `h` is elevation, `slope` 0(flat)..1(cliff).
+   * `h` is elevation, `slope` 0(flat)..1(cliff). `texel` is the sampling
+   * step of the mesh being painted — patterns finer than the sampling
+   * (the 104 m city grid) fade to their average tone instead of aliasing
+   * into vertex-colour moiré on coarse LODs and the far shell.
    */
-  colorAt(x: number, z: number, h: number, slope: number, out: number[]): void {
+  colorAt(x: number, z: number, h: number, slope: number, out: number[], texel = 0): void {
     const dry = this.drynessAt(x, z);
     const forest = this.forestAt(x, z);
 
@@ -475,7 +478,10 @@ export class WorldGen {
     }
 
     // metro: paint the urban fabric — asphalt street grid between concrete
-    // blocks, with park squares left green
+    // blocks, with park squares left green. When the mesh can't resolve the
+    // grid (coarse chunks, far shell) the whole fabric collapses to its
+    // average tone — sampling a 13 m street pattern at 64–600 m otherwise
+    // produces shimmering vertex-colour moiré across the entire city.
     const cm = this.cityMaskAt(x, z);
     if (cm > 0.18 && h > WATER_LEVEL + 1) {
       const gx = ((x % 104) + 104) % 104;
@@ -483,12 +489,18 @@ export class WorldGen {
       const street = gx < 13 || gz < 13;
       const park = this.parkBlockAt(Math.floor(x / 104), Math.floor(z / 104));
       const a = smoothstep(0.18, 0.45, cm);
-      if (street) {
-        r = lerp(r, 0.2, a); g = lerp(g, 0.21, a); b = lerp(b, 0.23, a);
-      } else if (!park) {
+      const gk = texel > 0 ? 1 - smoothstep(9, 28, texel) : 1; // grid resolvable?
+      // resolved cell tone (parks keep the terrain green underneath)
+      let cr = r, cg = g, cb = b, cw = 0;
+      if (street) { cr = 0.2; cg = 0.21; cb = 0.23; cw = 1; }
+      else if (!park) {
         const v = 0.5 + hash2(Math.floor(x / 104), Math.floor(z / 104)) * 0.16;
-        r = lerp(r, v, a * 0.85); g = lerp(g, v, a * 0.85); b = lerp(b, v * 0.98, a * 0.85);
+        cr = v; cg = v; cb = v * 0.98; cw = 0.85;
       }
+      const w = a * lerp(0.8, cw, gk); // 0.8 = weight of the averaged fabric
+      r = lerp(r, lerp(0.42, cr, gk), w);
+      g = lerp(g, lerp(0.43, cg, gk), w);
+      b = lerp(b, lerp(0.42, cb, gk), w);
     }
 
     // steep faces turn to bare rock

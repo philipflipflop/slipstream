@@ -42,6 +42,13 @@ Cloudflare builds with **npm 10.9.2**; local npm is 11. Two rules:
   pure. Hit volumes derive from `buildScatter` in terrainBuilder — the SAME lists
   the renderer instances. Never place scatter outside `buildScatter`, or rendering
   and collision will disagree.
+- Scatter invariants: a lower scatter level's lists must stay an exact PREFIX of a
+  higher level's (same RNG stream, only loop bounds differ) and towers must be
+  identical at every level — chunk upgrades keep prefix instances full-size and
+  grow only the new suffix, so violating this reintroduces scatter pop-in.
+- Patterns painted into vertex colours must respect the `texel` param of
+  `colorAt` (city street grid fades to its average tone when under-sampled) —
+  otherwise coarse LODs and the far shell alias into shimmering moiré.
 - Mobile rendering: touch devices skip the logarithmic depth buffer, so they rely
   on the AGL-scaled near plane (main.ts frame()) + the water sheet's polygon
   offset/raise (`Water` `coarseDepth` flag) to avoid shoreline z-fighting.

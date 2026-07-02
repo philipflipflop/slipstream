@@ -8,11 +8,15 @@ export interface SaveData {
   mode: 'free' | 'race';
   world: WorldTheme;
   quality: Quality;
+  /** quality-heuristic schema version — bump to re-derive saved defaults */
+  qv: number;
   invertY: boolean;
   sensitivity: number;
   muted: boolean;
   bestTimes: Record<string, number>;
 }
+
+const QUALITY_VERSION = 2; // v2: 6-core phones (iPhones) rate medium
 
 const KEY = 'slipstream.save.v1';
 
@@ -22,6 +26,7 @@ export function loadSave(): SaveData {
     mode: 'free',
     world: 'archipelago',
     quality: defaultQuality(),
+    qv: QUALITY_VERSION,
     invertY: false,
     sensitivity: 1,
     muted: false,
@@ -31,7 +36,15 @@ export function loadSave(): SaveData {
     const raw = localStorage.getItem(KEY);
     if (!raw) return def;
     const parsed = JSON.parse(raw) as Partial<SaveData>;
-    return { ...def, ...parsed, bestTimes: { ...(parsed.bestTimes ?? {}) } };
+    const out = { ...def, ...parsed, bestTimes: { ...(parsed.bestTimes ?? {}) } };
+    // saves written before a heuristic bump re-derive the device default
+    // once (e.g. iPhones that an older build wrongly pinned to 'low');
+    // any quality the user picks afterwards persists with the new version
+    if (parsed.qv !== QUALITY_VERSION) {
+      out.quality = defaultQuality();
+      out.qv = QUALITY_VERSION;
+    }
+    return out;
   } catch {
     return def;
   }

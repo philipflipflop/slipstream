@@ -13,6 +13,7 @@ export interface ChunkPayload {
   cx: number;
   cz: number;
   res: number;
+  scatter: 0 | 1 | 2;
   positions: Float32Array;
   normals: Float32Array;
   colors: Float32Array;
@@ -171,7 +172,7 @@ export function buildChunkPayload(
       normals[v * 3 + 1] = ny * il;
       normals[v * 3 + 2] = nz * il;
 
-      gen.colorAt(wx, wz, latH(ci, cj), 1 - ny * il, colorTmp);
+      gen.colorAt(wx, wz, latH(ci, cj), 1 - ny * il, colorTmp, step);
       colors[v * 3] = colorTmp[0];
       colors[v * 3 + 1] = colorTmp[1];
       colors[v * 3 + 2] = colorTmp[2];
@@ -197,6 +198,7 @@ export function buildChunkPayload(
 
   return {
     cx, cz, res,
+    scatter: scatterLevel,
     positions, normals, colors, baseY, index,
     treeMats: Float32Array.from(sc.treeMats),
     treeTints: Float32Array.from(sc.treeTints),
@@ -245,8 +247,9 @@ export function buildScatter(
   };
 
   // ---- city towers (metro theme) ----
-  // Towers are skyline landmarks: they're placed at EVERY scatter level —
-  // distant rings keep only the tall ones so downtown reads from 10 km out.
+  // Towers are placed IDENTICALLY at every scatter level: the skyline never
+  // changes composition as rings upgrade, so buildings only ever appear via
+  // the fresh-chunk grow-in — never as a pop when a chunk rebuilds closer.
   if (gen.cityMaskAt(x0 + CHUNK_SIZE / 2, z0 + CHUNK_SIZE / 2) > 0.02 ||
       gen.cityMaskAt(x0, z0) > 0.02 || gen.cityMaskAt(x0 + CHUNK_SIZE, z0 + CHUNK_SIZE) > 0.02) {
     const BLOCK = 104;
@@ -277,7 +280,6 @@ export function buildScatter(
         // a few genuine supertalls anchor the downtown cores
         const supertall = dt > 0.5 && hash2(bx * 53, bz * 59 + 13) > 0.94;
         if (supertall) ht = 260 + h2 * 190;
-        if (scatterLevel === 0 && ht < 55) continue; // far rings: skyline only
 
         const w = 22 + hash2(bx - 5, bz + 9) * 26;
         const d = 22 + hash2(bx + 19, bz + 23) * 26;
@@ -305,9 +307,10 @@ export function buildScatter(
           tier(w, d, ht * 0.55);
           tier(w * 0.74, d * 0.74, ht * 0.82);
           tier(w * 0.5, d * 0.5, ht);
+          // spire stays wide enough not to shimmer sub-pixel from across the bay
           const o = s.towerMats.length;
           s.towerMats.length = o + 16;
-          composeYRot(s.towerMats, o, wx, h - 0.5, wz, 0, 2.4, ht + 22 + h2 * 42, 2.4);
+          composeYRot(s.towerMats, o, wx, h - 0.5, wz, 0, 3.6, ht + 22 + h2 * 42, 3.6);
           s.towerTints.push(0.3, 0.32, 0.35);
         } else if (ht > 110 && hash2(bx * 61, bz * 67 + 9) > 0.5) {
           tier(w, d, ht * 0.68);
@@ -326,7 +329,7 @@ export function buildScatter(
           }
         }
         // a low annex beside the main tower fills out the block
-        if (hsh > 0.45 && scatterLevel > 0) {
+        if (hsh > 0.45) {
           const aw = 14 + hash2(bx * 13, bz) * 14;
           const ah = 6 + hash2(bx, bz * 17) * 10;
           const o2 = s.towerMats.length;
@@ -525,7 +528,7 @@ export function buildFarPayload(
       normals[v * 3 + 1] = ny * il;
       normals[v * 3 + 2] = nz * il;
 
-      gen.colorAt(wx, wz, hc, 1 - ny * il, colorTmp);
+      gen.colorAt(wx, wz, hc, 1 - ny * il, colorTmp, cellSize);
       colors[v * 3] = colorTmp[0];
       colors[v * 3 + 1] = colorTmp[1];
       colors[v * 3 + 2] = colorTmp[2];
