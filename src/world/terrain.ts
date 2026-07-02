@@ -178,6 +178,28 @@ function mergeGeoms(geoms: THREE.BufferGeometry[]): THREE.BufferGeometry {
 
 const MAX_INFLIGHT = 3;
 
+/** Shared "already full-size" grow uniform for re-instanced (upgraded) chunks. */
+const FULL_GROWN = { value: 1 };
+
+/**
+ * Clone a scatter material so its instances scale with a per-chunk grow
+ * uniform (each object swells from its own base point alongside the terrain
+ * geomorph — trees/buildings rise out of the ground instead of popping).
+ * All clones share one GL program per base kind via the cache key.
+ */
+function makeGrowMat(base: THREE.MeshLambertMaterial, u: { value: number }): THREE.MeshLambertMaterial {
+  const mat = base.clone();
+  mat.onBeforeCompile = (sh) => {
+    sh.uniforms.uGrow = u;
+    sh.vertexShader = 'uniform float uGrow;\n' + sh.vertexShader.replace(
+      '#include <begin_vertex>',
+      '#include <begin_vertex>\n\ttransformed *= uGrow;',
+    );
+  };
+  mat.customProgramCacheKey = () => (base.map ? 'tower-grow' : 'scatter-grow');
+  return mat;
+}
+
 export class TerrainManager {
   readonly gen: WorldGen;
   private chunks = new Map<string, Chunk>();
@@ -278,8 +300,8 @@ export class TerrainManager {
   }
 
   private scatterForRing(ring: number): 0 | 1 | 2 {
-    if (ring > 4) return 0;
-    return ring <= 2 ? 2 : 1;
+    if (ring > 6) return 0;
+    return ring <= 3 ? 2 : 1;
   }
 
   /** Current streaming radius (widens at altitude so the view fills out). */
@@ -594,6 +616,9 @@ export class TerrainManager {
     const morph = { u: { value: 0 }, t: 0 };
     this.morphs.push(morph);
     const mat = this.makeChunkMat(morph.u);
+    // fresh chunks grow their scatter with the terrain swell; LOD upgrades
+    // re-instance the same objects, so those must appear at full size
+    const growU = old ? FULL_GROWN : morph.u;
 
     const mesh = new THREE.Mesh(geo, mat);
     mesh.position.set(p.cx * CHUNK_SIZE, 0, p.cz * CHUNK_SIZE);
@@ -605,15 +630,16 @@ export class TerrainManager {
     group.add(mesh);
     const disposables: Array<{ dispose(): void }> = [geo, mat];
 
-    const addInstances = (geo: THREE.BufferGeometry, mat: THREE.Material, mats: Float32Array, tints: Float32Array): void => {
+    const addInstances = (geo: THREE.BufferGeometry, base: THREE.MeshLambertMaterial, mats: Float32Array, tints: Float32Array): void => {
       const count = mats.length / 16;
       if (count === 0) return;
+      const mat = makeGrowMat(base, growU);
       const im = new THREE.InstancedMesh(geo, mat, count);
       (im.instanceMatrix.array as Float32Array).set(mats);
       im.instanceMatrix.needsUpdate = true;
       if (tints.length > 0) im.instanceColor = new THREE.InstancedBufferAttribute(tints, 3);
       group.add(im);
-      disposables.push({ dispose: () => im.dispose() });
+      disposables.push(mat, { dispose: () => im.dispose() });
     };
     addInstances(this.treeGeo, this.treeMat, p.treeMats, p.treeTints);
     addInstances(this.leafGeo, this.treeMat, p.leafMats, p.leafTints);

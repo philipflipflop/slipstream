@@ -86,7 +86,11 @@ const fresh = buildChunkPayload(gen, 3, 2, 14, 0, 0, cellSize);
       const wx = 3 * 900 + fresh.positions[v * 3];
       const wz = 2 * 900 + fresh.positions[v * 3 + 2];
       if (wx % cellSize === 0 && wz % cellSize === 0) {
-        assert.ok(fresh.baseY[v] <= y - 5.4, `lattice vertex ${i},${j}: baseY ${fresh.baseY[v]} vs y ${y}`);
+        // dry land never morphs up through the water sheet: those verts are
+        // clamped to just above the waterline instead of the shell envelope
+        const clamped = y > 0.5 && Math.abs(fresh.baseY[v] - Math.min(0.7, y)) < 1e-6;
+        assert.ok(fresh.baseY[v] <= y - 5.4 || clamped,
+          `lattice vertex ${i},${j}: baseY ${fresh.baseY[v]} vs y ${y}`);
         onLattice++;
       }
       // loose sanity bound only — in steep terrain the envelope legitimately

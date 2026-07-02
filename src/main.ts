@@ -66,6 +66,8 @@ class Game {
   private baseFogNear = 2500;
   private baseFogFar = 7000;
   private fogFarCap = 26000;
+  private coarseDepth = false; // touch + low preset: no log depth buffer
+  private nearIdx = 0;         // stepped near-plane band on the coarse path
 
   // state
   private state: GameState = 'boot';
@@ -95,13 +97,16 @@ class Game {
     const theme = worldParam && WORLDS.some((w) => w.id === worldParam) ? worldParam : this.save.world;
     this.gen = new WorldGen(undefined, theme);
 
+    // uniform relative depth precision at any distance — kills shoreline
+    // z-fighting without biasing the water. It defeats early-Z, so the only
+    // devices that skip it are touch devices on the LOW preset; those fall
+    // back to the stepped near plane + water depth bias. (The flag is fixed
+    // at renderer creation: a quality change applies it on the next reload.)
+    this.coarseDepth = touch && this.save.quality === 'low';
     this.renderer = new THREE.WebGLRenderer({
       antialias: true,
       powerPreference: 'high-performance',
-      // uniform relative depth precision at any distance — kills shoreline
-      // z-fighting without biasing the water (a bias floods low terrain when
-      // viewed from far away). Skipped on touch GPUs: it defeats early-Z.
-      logarithmicDepthBuffer: !touch,
+      logarithmicDepthBuffer: !this.coarseDepth,
     });
     this.renderer.domElement.classList.add('gl');
     this.renderer.shadowMap.enabled = false;
@@ -115,8 +120,8 @@ class Game {
     this.scene.background = null; // dome handles it
 
     this.terrain = new TerrainManager(this.scene, this.gen);
-    // touch skips the log depth buffer, so water needs the depth-bias path
-    this.water = new Water(this.scene, this.sky.fogColor, this.sky.sunDir, touch);
+    // without the log depth buffer the water needs the depth-bias path
+    this.water = new Water(this.scene, this.sky.fogColor, this.sky.sunDir, this.coarseDepth);
     this.airport = new Airport(this.scene, this.gen);
     this.rings = new RingCourse(this.scene, this.gen);
     this.obstacles = new ObstacleField(this.gen);
@@ -381,22 +386,22 @@ class Game {
       this.terrain.radius = 8;
       this.terrain.buildBudget = 2;
     }
-    this.terrain.altBonus = q === 'low' ? 2 : 4;
+    this.terrain.altBonus = q === 'low' ? 3 : q === 'medium' ? 5 : 6;
     // far horizon shell density, how far each LOD reaches (in rings), and
     // how far the fog may open up at altitude (cap stays well inside the
     // shell so its edge is never visible)
     const t = this.terrain;
     if (q === 'low') {
       t.configureFar(80, 600); // 48 km shell
-      [t.ultraRing, t.fineRing, t.midRing, t.fineRingHigh, t.midRingHigh] = [-1, 2, 4, 3, 5];
+      [t.ultraRing, t.fineRing, t.midRing, t.fineRingHigh, t.midRingHigh] = [-1, 2, 5, 3, 6];
       this.fogFarCap = 14000;
     } else if (q === 'medium') {
       t.configureFar(150, 360); // 54 km shell
-      [t.ultraRing, t.fineRing, t.midRing, t.fineRingHigh, t.midRingHigh] = [0, 3, 5, 4, 6];
+      [t.ultraRing, t.fineRing, t.midRing, t.fineRingHigh, t.midRingHigh] = [0, 3, 6, 4, 7];
       this.fogFarCap = 20000;
     } else {
       t.configureFar(210, 300); // 63 km shell
-      [t.ultraRing, t.fineRing, t.midRing, t.fineRingHigh, t.midRingHigh] = [1, 3, 5, 5, 8];
+      [t.ultraRing, t.fineRing, t.midRing, t.fineRingHigh, t.midRingHigh] = [1, 4, 6, 5, 9];
       this.fogFarCap = 26000;
     }
     const view = this.terrain.radius * CHUNK_SIZE;
@@ -533,12 +538,12 @@ class Game {
     this.simTime += dt;
     const st = this.aircraft.state;
 
-    // stream the world around a point led ahead of the aircraft (~3 s of
-    // travel, capped at 3 chunks): chunks in the direction of flight reach
-    // full resolution before you arrive, not as you cross into each ring
+    // stream the world around a point led ahead of the aircraft (~5 s of
+    // travel, capped at 5 chunks): chunks in the direction of flight reach
+    // full resolution well before you arrive, not as you cross each ring
     const agl = st.pos.y - this.gen.heightAt(st.pos.x, st.pos.z);
-    const leadX = st.pos.x + clamp(st.vel.x * 3, -2700, 2700);
-    const leadZ = st.pos.z + clamp(st.vel.z * 3, -2700, 2700);
+    const leadX = st.pos.x + clamp(st.vel.x * 5, -4500, 4500);
+    const leadZ = st.pos.z + clamp(st.vel.z * 5, -4500, 4500);
     this.terrain.update(leadX, leadZ, agl, dt);
 
     // fog opens out with the streamed radius and, above that, with altitude:
@@ -556,15 +561,21 @@ class Game {
     this.sky.update(st.pos, fog.far, dt);
     this.airport.update(this.simTime, st.pos.x, st.pos.z);
 
-    // depth precision: without the log depth buffer (mobile) far shorelines
-    // land inside depth-buffer noise and shimmer; sliding the near plane out
-    // with height above ground restores precision exactly when nothing can
-    // be close to the camera anyway (capped below the chase-cam distance)
+    // coarse-depth fallback (touch + low, no log buffer): step the near
+    // plane out with altitude to reclaim precision. Discrete bands with
+    // hysteresis — a continuously sliding near plane re-quantises the depth
+    // buffer every frame, which itself reads as shoreline flicker.
     const cam = this.flightCam.camera;
-    const nearWant = this.state === 'flying' || this.state === 'crashed'
-      ? clamp(1 + (agl - 250) * 0.012, 1, 10)
-      : 1;
-    if (Math.abs(cam.near - nearWant) > 0.05) {
+    if (this.coarseDepth && (this.state === 'flying' || this.state === 'crashed')) {
+      const up = [500, 1050, 1700];
+      const down = [340, 820, 1400];
+      if (this.nearIdx < 3 && agl > up[this.nearIdx]) this.nearIdx++;
+      else if (this.nearIdx > 0 && agl < down[this.nearIdx - 1]) this.nearIdx--;
+    } else {
+      this.nearIdx = 0;
+    }
+    const nearWant = [1, 3, 6, 10][this.nearIdx]; // cap below chase-cam range
+    if (cam.near !== nearWant) {
       cam.near = nearWant;
       cam.updateProjectionMatrix();
     }

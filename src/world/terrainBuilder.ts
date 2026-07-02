@@ -152,7 +152,12 @@ export function buildChunkPayload(
       const isSkirt = isSkirtJ || i !== ci;
       const wx = x0 + ci * step;
       let h = latH(ci, cj);
-      baseY[v] = startH(ci, cj) - (isSkirt ? skirtDrop : 0);
+      let b = startH(ci, cj);
+      // never morph dry land up through the water sheet: coastal chunks
+      // otherwise sweep their shoreline across the plane for the whole
+      // swell animation, which reads as water-edge flicker
+      if (h > WATER_LEVEL + 0.5 && b < WATER_LEVEL + 0.7) b = Math.min(WATER_LEVEL + 0.7, h);
+      baseY[v] = b - (isSkirt ? skirtDrop : 0);
       if (isSkirt) h -= skirtDrop;
       positions[v * 3] = wx - x0;
       positions[v * 3 + 1] = h;

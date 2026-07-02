@@ -48,6 +48,7 @@ export function persist(data: SaveData): void {
 function defaultQuality(): Quality {
   const coarse = window.matchMedia('(pointer: coarse)').matches;
   const cores = navigator.hardwareConcurrency ?? 4;
-  if (coarse) return cores >= 8 ? 'medium' : 'low';
+  // modern iPhones report 6 cores — they belong on medium, not the floor
+  if (coarse) return cores >= 6 ? 'medium' : 'low';
   return cores >= 8 ? 'high' : 'medium';
 }
