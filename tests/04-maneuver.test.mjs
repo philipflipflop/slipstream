@@ -22,10 +22,13 @@ for (const spec of CATALOG) {
   const inp = { pitch: 0, roll: 0, yaw: 0, throttle: 0.7, flaps: 0, gearDown: false, brakes: false };
 
   const h0 = st.heading;
-  // roll in for 1.5 s, hold a gentle pull for 8 s
+  // roll in for 1.5 s, hold a gentle pull for 8 s. Helicopter cyclic is
+  // attitude-command: releasing the stick levels the disc, so the bank is
+  // HELD through the manoeuvre to keep the turn going.
+  const heli = spec.engine === 'heli';
   for (let t = 0; t < 12; t += dt) {
-    inp.roll = t < 1.5 ? 0.5 : 0;
-    inp.pitch = t >= 1.5 ? 0.25 : 0;
+    inp.roll = t < 1.5 || heli ? 0.5 : 0;
+    inp.pitch = t >= 1.5 ? (heli ? 0.1 : 0.25) : 0;
     stepFlight(spec, st, inp, dt, heightAt);
   }
   const turned = Math.abs(st.heading - h0);

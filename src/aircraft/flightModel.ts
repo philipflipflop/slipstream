@@ -97,6 +97,10 @@ export function stepFlight(
   heightAt: HeightFn,
 ): void {
   if (st.crashed) return;
+  if (spec.engine === 'heli') {
+    stepHeli(spec, st, inp, dt, heightAt);
+    return;
+  }
 
   const rho = 1.225 * Math.exp(-Math.max(st.pos.y, 0) / 8500);
   const V = st.vel.length();
@@ -331,6 +335,156 @@ export function stepFlight(
   st.quat.multiply(_dq).normalize();
 
   // instruments (compass heading: clockwise from north, east = +90°)
+  _fwd.set(0, 0, -1).applyQuaternion(st.quat);
+  st.heading = Math.atan2(_fwd.x, -_fwd.z);
+  _euler.setFromQuaternion(st.quat, 'YXZ');
+  st.pitchAngle = _euler.x;
+  st.rollAngle = _euler.z;
+}
+
+/**
+ * Helicopter dynamics — a compact momentum model rather than blade-element:
+ *   throttle = collective (rotor thrust along body-up, governed RPM)
+ *   pitch/roll = cyclic as ATTITUDE command (SAS feel — keyboard-flyable)
+ *   yaw = pedals (rate command + weathervane at speed + torque at hover)
+ * Thrust gains translational lift through ETL, ground effect in the hover,
+ * loses authority with density altitude and climb-rate inflow, and droops
+ * near vne (retreating blade). Skid gear: no rolling, firm friction, and a
+ * far lower tolerance for sideways or fast arrivals than wheels.
+ */
+function stepHeli(
+  spec: AircraftSpec,
+  st: FlightState,
+  inp: ControlInputs,
+  dt: number,
+  heightAt: HeightFn,
+): void {
+  const rho = 1.225 * Math.exp(-Math.max(st.pos.y, 0) / 8500);
+  const V = st.vel.length();
+  st.airspeed = V;
+  st.aoa = 0;
+  st.stalled = false;
+
+  const groundY = heightAt(st.pos.x, st.pos.z);
+  const agl = st.pos.y - Math.max(groundY, WATER_LEVEL) - spec.gearHeight;
+  const R = Math.sqrt(spec.wingArea / Math.PI); // rotor radius from disc area
+
+  _qInv.copy(st.quat).invert();
+  _vLocal.copy(st.vel).applyQuaternion(_qInv);
+
+  // collective through a short rotor/governor lag
+  st.spool += clamp(inp.throttle - st.spool, -2.4 * dt, 2.0 * dt);
+  const coll = st.spool;
+
+  // --- rotor thrust along body up ---
+  const ge = clamp(1 - agl / (R * 1.1), 0, 1);         // ground effect
+  const vh = Math.hypot(st.vel.x, st.vel.z);
+  const etl = 1 + 0.13 * clamp(vh / 18, 0, 1);         // translational lift
+  const dens = 0.62 + 0.38 * (rho / 1.225);            // density altitude
+  const inflow = 1 - 0.42 * clamp(st.vel.y / 10, -0.25, 1); // climb costs power
+  const fast = clamp((V / spec.vne - 0.85) / 0.3, 0, 1);    // retreating-blade droop
+  const lift = spec.maxThrust * coll * dens * etl * inflow *
+    (1 + 0.10 * ge * ge) * (1 - 0.18 * fast);
+  _force.set(0, lift, 0);
+  st.thrustFrac = coll;
+
+  // --- fuselage drag (anisotropic flat plate: the disc resists vertical
+  // airflow far more than the streamlined nose does forward flight) ---
+  const f = spec.cd0 * spec.wingArea;
+  _force.x -= 0.5 * rho * V * _vLocal.x * f * 1.9;
+  _force.y -= 0.5 * rho * V * _vLocal.y * f * 4.2;
+  _force.z -= 0.5 * rho * V * _vLocal.z * f;
+
+  st.gForce = _force.y / (spec.mass * GRAV);
+
+  _force.applyQuaternion(st.quat);
+  _force.y -= spec.mass * GRAV;
+  st.vel.addScaledVector(_force, dt / spec.mass);
+  st.pos.addScaledVector(st.vel, dt);
+
+  // --- attitude: cyclic commands an attitude, pedals command yaw rate ---
+  const av = st.angVel;
+  _euler.setFromQuaternion(st.quat, 'YXZ');
+  const lowV = clamp(1 - vh / 40, 0, 1);
+
+  const targetPitch = inp.pitch * 0.45;  // + = nose up, ~26° full deflection
+  const targetRoll = -inp.roll * 0.6;    // euler.z, − = bank right
+  let aaX = (targetPitch - _euler.x) * 4.5 * spec.pitchRate - av.x * 3.8;
+  let aaZ = (targetRoll - _euler.z) * 4.0 * spec.rollRate - av.z * 4.2;
+
+  let slip = 0;
+  if (vh > 2) slip = Math.atan2(_vLocal.x, -_vLocal.z);
+  let aaY =
+    -inp.yaw * spec.yawRate * 2.6 -
+    av.y * 3.0 -
+    slip * 2.4 * clamp(vh / 25, 0, 1) -
+    coll * 0.22 * lowV; // torque: nose walks right at high power in the hover
+
+  // light turbulence, strongest down low (same shaping as fixed-wing)
+  if (turbulence > 0 && !st.onGround) {
+    st.gustT += dt;
+    const g = st.gustT;
+    const ti = turbulence * (0.35 + 0.65 * clamp(1 - st.pos.y / 2500, 0, 1));
+    aaX += (Math.sin(g * 2.17) + Math.sin(g * 5.3 + 2.0)) * 0.04 * ti;
+    aaZ += (Math.sin(g * 1.73 + 4.0) + Math.sin(g * 4.1 + 1.0)) * 0.06 * ti;
+    aaY += Math.sin(g * 1.31 + 2.6) * 0.03 * ti;
+    st.vel.y += Math.sin(g * 2.43 + 0.7) * 0.5 * ti * dt;
+  }
+
+  // --- skid gear ---
+  const surfaceY = Math.max(groundY, WATER_LEVEL - 0.5);
+  const contactY = surfaceY + spec.gearHeight;
+  if (st.pos.y <= contactY) {
+    const sinkRate = -st.vel.y;
+    _up.set(0, 1, 0).applyQuaternion(st.quat);
+    const onWater = groundY < WATER_LEVEL - 0.6;
+    if (onWater) {
+      crash(st, V > 20 ? 'HIT THE WATER AT SPEED' : 'DITCHED IN THE SEA');
+      return;
+    }
+    if (sinkRate > 5) {
+      crash(st, 'STRUCTURAL FAILURE — HARD LANDING');
+      return;
+    }
+    if (_up.y < 0.85) {
+      crash(st, 'ROLLED THE SKIDS ON TOUCHDOWN');
+      return;
+    }
+    if (surfaceSlope(heightAt, st.pos.x, st.pos.z) > 0.28) {
+      crash(st, 'TOUCHED DOWN ON STEEP GROUND');
+      return;
+    }
+    if (vh > 16) {
+      crash(st, 'SKIDS DUG IN — TOO FAST');
+      return;
+    }
+
+    st.onGround = true;
+    st.pos.y = contactY;
+    if (st.vel.y < 0) st.vel.y = 0;
+
+    // skids scrape to a stop fast; there is no steering on the ground
+    _hVel.set(st.vel.x, 0, st.vel.z);
+    const gs = _hVel.length();
+    if (gs > 1e-6) {
+      const drop = Math.min((6 + gs * 0.4) * dt, gs);
+      st.vel.addScaledVector(_hVel.normalize(), -drop);
+    }
+    aaY -= av.y * 6;
+    aaZ += (0 - _euler.z) * 9 - av.z * 6;
+    aaX += (spec.groundPitch - _euler.x) * 7 - av.x * 4;
+    st.gForce = 1;
+  } else {
+    st.onGround = false;
+  }
+
+  av.x += aaX * dt;
+  av.y += aaY * dt;
+  av.z += aaZ * dt;
+
+  _dq.set(av.x * dt * 0.5, av.y * dt * 0.5, av.z * dt * 0.5, 1).normalize();
+  st.quat.multiply(_dq).normalize();
+
   _fwd.set(0, 0, -1).applyQuaternion(st.quat);
   st.heading = Math.atan2(_fwd.x, -_fwd.z);
   _euler.setFromQuaternion(st.quat, 'YXZ');

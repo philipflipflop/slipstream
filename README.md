@@ -1,7 +1,7 @@
 # ✈ SLIPSTREAM
 
 An endless-world flight simulator that runs entirely in the browser — desktop and mobile.
-Four aircraft with genuinely different flight models, an infinite procedurally generated
+Six aircraft with genuinely different flight models (including a helicopter), an infinite procedurally generated
 archipelago, a glass-cockpit HUD, a time-trial ring course, and a fully procedural
 soundscape. No model files, no textures, no audio assets: everything is generated at runtime.
 
@@ -66,6 +66,8 @@ speed tape. If `STALL` flashes — nose down, power up.
 | Aircraft | Character |
 | --- | --- |
 | **Skylark ST-2** | Forgiving high-wing trainer. Slow, stable, lands anywhere. |
+| **Islander BN2T** | Turbine utility twin, tuned to the real BN2T's book numbers: ~330 m ground roll, ~1,000 fpm climb, ~170 kt max cruise, 45–52 kt stalls. |
+| **Bell 505 Jet Ranger X** | Light helicopter with its own flight-model regime: throttle is the collective, cyclic is attitude-command, pedals turn the hover. Translational lift, ground effect, torque, skid landings anywhere flat — and its own crash modes (chop the collective at height and you'll meet one). |
 | **Falcon Mk.IV** | WWII warbird. Huge roll rate, bites in the stall, tail-dragger. |
 | **Vector V-25** | Delta-wing fighter. Afterburner at 100% throttle, 900+ kt, internal cannon — pop the target balloons east of Meridian Field. |
 | **Meridian 700** | 16-tonne executive jet. Stately, fast in cruise, needs planning. |
@@ -120,7 +122,7 @@ thrust model) — the handling differences fall out of the numbers, not scripts.
 
 - `?autofly=1` — autopilot takes off and climbs (demo / smoke test; telemetry in the tab title)
 - `&ff=60` — fast-forward N seconds of physics before the first frame
-- `&ac=vector` — select aircraft (`skylark`, `falcon`, `vector`, `meridian`)
+- `&ac=vector` — select aircraft (`skylark`, `islander`, `jetranger`, `falcon`, `vector`, `meridian`)
 - `&mode=race` — start in Ring Rush
 - `&touch=1` — force the touch UI on desktop
 - `&apt=1` — spawn at another fixed airfield (1 = Northgate, 2 = Highmoor)

@@ -20,6 +20,7 @@ export class Aircraft {
   state: FlightState;
 
   private props: THREE.Object3D[] = [];
+  private tailRotors: THREE.Object3D[] = [];
   private propDiscs: THREE.Mesh[] = [];
   private aileronL?: THREE.Object3D;
   private aileronR?: THREE.Object3D;
@@ -29,6 +30,7 @@ export class Aircraft {
   private burner?: THREE.Mesh;
 
   private propAngle = 0;
+  private rotorSpin = 0; // helicopter rotor spool 0..1 (governed once up)
   private gearAnim = 1; // 1 = down
   private smoothPitch = 0;
   private smoothRoll = 0;
@@ -41,6 +43,7 @@ export class Aircraft {
 
     this.model.traverse((o) => {
       if (o.name === 'prop') this.props.push(o);
+      else if (o.name === 'tailrotor') this.tailRotors.push(o);
       else if (o.name === 'propDisc') this.propDiscs.push(o as THREE.Mesh);
       else if (o.name === 'aileronL') this.aileronL = o;
       else if (o.name === 'aileronR') this.aileronR = o;
@@ -54,6 +57,7 @@ export class Aircraft {
   resetOnRunway(heightAt: HeightFn, field?: AirfieldDef): void {
     spawnOnRunway(this.spec, this.state, heightAt, field);
     this.gearAnim = 1;
+    this.rotorSpin = 0;
     this.syncModel();
   }
 
@@ -74,11 +78,20 @@ export class Aircraft {
   private animate(inp: ControlInputs, dt: number): void {
     const st = this.state;
 
-    // prop spin + blur disc
+    // prop spin + blur disc. Helicopter rotors are governed: they spool to
+    // 100% at flight start and hold RPM regardless of collective.
     if (this.props.length > 0) {
-      const rpmFrac = 0.12 + inp.throttle * 0.88;
-      this.propAngle += rpmFrac * 75 * dt;
+      const heli = this.spec.engine === 'heli';
+      let rpmFrac: number;
+      if (heli) {
+        this.rotorSpin = damp(this.rotorSpin, st.crashed ? 0 : 1, 0.55, dt);
+        rpmFrac = this.rotorSpin;
+      } else {
+        rpmFrac = 0.12 + inp.throttle * 0.88;
+      }
+      this.propAngle += rpmFrac * (heli ? 44 : 75) * dt;
       for (const p of this.props) p.rotation.z = this.propAngle;
+      for (const t of this.tailRotors) t.rotation.z = this.propAngle * 5.2;
       for (const d of this.propDiscs) {
         const m = d.material as THREE.MeshBasicMaterial;
         m.opacity = damp(m.opacity, rpmFrac > 0.35 ? 0.16 : 0, 8, dt);

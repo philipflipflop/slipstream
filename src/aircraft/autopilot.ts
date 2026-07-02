@@ -47,6 +47,32 @@ export class Autopilot {
   update(spec: AircraftSpec, st: FlightState, c: ControlInputs, dt: number): void {
     if (!this.engaged) return;
 
+    // helicopter: the loops swap — collective holds altitude, pitch attitude
+    // holds speed. The heli flight model is already attitude-command, so the
+    // AP can write attitude targets straight through the stick.
+    if (spec.engine === 'heli') {
+      const altErr = this.targetAlt - st.pos.y;
+      const vsTarget = clamp(altErr * 0.2, -4.5, 4.5);
+      const vsErr = vsTarget - st.vel.y;
+      this.thrInt = clamp(this.thrInt + vsErr * 0.06 * dt, 0, 1);
+      c.throttle = clamp(this.thrInt + vsErr * 0.10, 0, 1);
+
+      // nose down to chase speed; the trim integrator removes the P-only
+      // droop (holding speed needs a standing nose-down attitude)
+      const spdErr = this.targetSpd - st.airspeed;
+      const rawTarget = -spdErr * 0.014 + this.pitchTrim;
+      if (rawTarget > -0.32 && rawTarget < 0.22) {
+        this.pitchTrim = clamp(this.pitchTrim - spdErr * 0.008 * dt, -0.3, 0.3);
+      }
+      c.pitch = clamp(clamp(rawTarget, -0.32, 0.22) / 0.45, -1, 1);
+
+      const hErr = wrapAngle(this.targetHdg - st.heading);
+      const bankTargetRight = clamp(hErr * 1.4, -0.35, 0.35);
+      c.roll = clamp(bankTargetRight / 0.6, -1, 1);
+      c.yaw = 0;
+      return;
+    }
+
     // --- altitude via a vertical-speed target the airframe can actually fly ---
     // airspeed protection: as speed decays toward 75% of the hold speed the
     // climb demand washes out and turns into a descend-to-recover demand,

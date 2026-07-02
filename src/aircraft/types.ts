@@ -1,4 +1,4 @@
-export type EngineKind = 'prop' | 'jet';
+export type EngineKind = 'prop' | 'jet' | 'heli';
 
 export interface AircraftSpec {
   id: string;
@@ -13,6 +13,9 @@ export interface AircraftSpec {
   topSpeedKt: number;
 
   // --- physics ---
+  // For helicopters (engine 'heli'): wingArea = rotor disc area, maxThrust =
+  // max rotor thrust at sea level, vne caps the dive, cd0·wingArea acts as
+  // the fuselage flat-plate area. Wing/flap/stall fields are ignored.
   mass: number;       // kg
   wingArea: number;   // m²
   aspect: number;     // wing aspect ratio

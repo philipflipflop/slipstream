@@ -88,6 +88,13 @@ export class InputManager {
     this.cycleFlaps(this.flapsDir);
   }
 
+  /** Aircraft without flaps (helicopter): snap any cycled state back to 0. */
+  resetFlaps(): void {
+    this.flapsStep = 0;
+    this.flapsDir = 1;
+    this.controls.flaps = 0;
+  }
+
   setTouchAxes(x: number, y: number): void { this.touchAxes = { x, y }; }
   clearTouchAxes(): void { this.touchAxes = null; }
   setTouchYaw(v: number): void { this.touchYaw = v; }

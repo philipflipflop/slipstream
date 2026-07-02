@@ -31,6 +31,23 @@ const _m = new THREE.Matrix4();
 const _q = new THREE.Quaternion();
 const _s = new THREE.Vector3(1, 1, 1);
 const _zAxis = new THREE.Vector3(0, 0, 1);
+const _prev = new THREE.Vector3();
+const _seg = new THREE.Vector3();
+const _toC = new THREE.Vector3();
+
+/**
+ * Swept collision: rounds cover ~15–20 m per frame at muzzle velocity —
+ * more than a balloon's diameter — so a point-in-sphere test at the end of
+ * the step tunnels straight through. Test the whole travel segment instead.
+ */
+function segmentHitsSphere(p0: THREE.Vector3, p1: THREE.Vector3, c: THREE.Vector3, r: number): boolean {
+  _seg.subVectors(p1, p0);
+  _toC.subVectors(c, p0);
+  const len2 = _seg.lengthSq();
+  const t = len2 > 1e-9 ? THREE.MathUtils.clamp(_toC.dot(_seg) / len2, 0, 1) : 0;
+  _toC.addScaledVector(_seg, -t); // now: c − closest point on segment
+  return _toC.lengthSq() < r * r;
+}
 
 export class GunneryRange {
   ammo = AMMO_MAX;
@@ -87,6 +104,11 @@ export class GunneryRange {
     }
   }
 
+  /** Positions of the balloons still flying (tests + future HUD cues). */
+  liveTargets(): THREE.Vector3[] {
+    return this.balloons.filter((b) => b.alive).map((b) => b.pos);
+  }
+
   /** Restock and reinflate everything (called on flight start). */
   reset(): void {
     this.ammo = AMMO_MAX;
@@ -128,16 +150,21 @@ export class GunneryRange {
     // --- integrate rounds ---
     for (let i = this.rounds.length - 1; i >= 0; i--) {
       const r = this.rounds[i];
+      _prev.copy(r.pos);
       r.vel.y -= 9.81 * dt;
       r.pos.addScaledVector(r.vel, dt);
       r.ttl -= dt;
 
+      // solid checks sample the midpoint too — a step outruns a small house
+      const mx = (_prev.x + r.pos.x) / 2;
+      const my = (_prev.y + r.pos.y) / 2;
+      const mz = (_prev.z + r.pos.z) / 2;
       let dead = r.ttl <= 0 || r.pos.y < this.gen.heightAt(r.pos.x, r.pos.z) || r.pos.y < 0 ||
-        (this.solid !== null && this.solid(r.pos.x, r.pos.y, r.pos.z));
+        (this.solid !== null && (this.solid(r.pos.x, r.pos.y, r.pos.z) || this.solid(mx, my, mz)));
       if (!dead) {
         for (const b of this.balloons) {
           if (!b.alive) continue;
-          if (r.pos.distanceToSquared(b.pos) < BALLOON_R * BALLOON_R) {
+          if (segmentHitsSphere(_prev, r.pos, b.pos, BALLOON_R)) {
             this.pop(b);
             dead = true;
             break;

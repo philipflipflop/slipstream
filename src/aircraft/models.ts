@@ -275,6 +275,41 @@ function buildSkylark(): THREE.Group {
   return g;
 }
 
+/** Two-blade teetering rotor (helicopter). Blades along local Y spin about
+ *  local Z — orient the GROUP so that axis points where the rotor needs it
+ *  (rotation.x = -π/2 for a main rotor, rotation.y = π/2 for a tail rotor);
+ *  aircraft.ts animates rotation.z exactly like a propeller. */
+function heliRotor(radius: number, chord: number, name = 'prop'): THREE.Group {
+  const g = new THREE.Group();
+  g.name = name;
+  const hub = mesh(new THREE.CylinderGeometry(radius * 0.035 + 0.06, radius * 0.035 + 0.06, 0.2, 8), std(0x35383c, 0.5, 0.6));
+  hub.rotation.x = Math.PI / 2;
+  g.add(hub);
+  const thick = radius * 0.012 + 0.02;
+  const bladeGeo = new THREE.BoxGeometry(chord, radius, thick);
+  const tipGeo = new THREE.BoxGeometry(chord * 1.04, radius * 0.14, thick + 0.004);
+  for (let i = 0; i < 2; i++) {
+    const holder = new THREE.Group();
+    const b = mesh(bladeGeo, std(0x2b2e33, 0.6, 0.25));
+    b.position.y = radius / 2 + 0.08;
+    b.rotation.y = 0.09;
+    holder.add(b);
+    const tip = mesh(tipGeo, std(0xd23b2f, 0.5, 0.2));
+    tip.position.y = radius + 0.08 - radius * 0.07;
+    tip.rotation.y = 0.09;
+    holder.add(tip);
+    holder.rotation.z = i * Math.PI;
+    g.add(holder);
+  }
+  const disc = new THREE.Mesh(
+    new THREE.CircleGeometry(radius + 0.08, 28),
+    new THREE.MeshBasicMaterial({ color: 0x999999, transparent: true, opacity: 0, depthWrite: false, side: THREE.DoubleSide }),
+  );
+  disc.name = 'propDisc';
+  g.add(disc);
+  return g;
+}
+
 /* ================================================================
    FALCON Mk.IV — polished-aluminium warbird, yellow nose
    ================================================================ */
@@ -383,6 +418,226 @@ function buildFalcon(): THREE.Group {
   prop.position.set(0, 0, -5.05);
   g.add(prop);
   navLights(g, 5.7, -0.25, 0.22);
+  return g;
+}
+
+/* ================================================================
+   ISLANDER BN2T — slab-sided high-wing turbine twin, blue over white
+   ================================================================ */
+function buildIslander(): THREE.Group {
+  const g = new THREE.Group();
+  const white = std(0xf3f4f2, 0.4, 0.08);
+  const blue = std(0x27459c, 0.4, 0.15);
+  const winMat = std(0x131c26, 0.2, 0.7);
+
+  // slab-sided cabin, raked nose, upswept rear
+  const fuse = mesh(fuseGeo([
+    { z: -5.3, r: 0.26, ry: 0.3, y: -0.28 },
+    { z: -4.4, r: 0.62, ry: 0.72, y: -0.02 },
+    { z: -3.3, r: 0.72, ry: 0.86, y: 0.05 },
+    { z: -0.4, r: 0.72, ry: 0.86, y: 0.05 },
+    { z: 2.2, r: 0.48, ry: 0.66, y: 0.24 },
+    { z: 4.2, r: 0.22, ry: 0.4, y: 0.5 },
+    { z: 5.3, r: 0.1, ry: 0.24, y: 0.62 },
+  ]), white);
+  g.add(fuse);
+
+  // windshield + long cabin glazing + blue cheat swoosh
+  const shield = mesh(new THREE.SphereGeometry(0.68, 10, 7), GLASS);
+  shield.scale.set(0.95, 0.55, 0.85);
+  shield.position.set(0, 0.58, -4.05);
+  g.add(shield);
+  const winStrip = mesh(new THREE.BoxGeometry(1.5, 0.3, 5.2), winMat);
+  winStrip.position.set(0, 0.48, -1.5);
+  g.add(winStrip);
+  const cheat = mesh(new THREE.BoxGeometry(1.48, 0.12, 8.6), blue);
+  cheat.position.set(0, 0.02, -0.7);
+  g.add(cheat);
+
+  // cantilever high wing — near-constant chord, the STOL secret
+  const wing = mesh(wingGeo([
+    { x: -7.45, chord: 1.9, t: 0.15, rise: 0.06 },
+    { x: -1.0, chord: 2.03, t: 0.24 },
+    { x: 1.0, chord: 2.03, t: 0.24 },
+    { x: 7.45, chord: 1.9, t: 0.15, rise: 0.06 },
+  ]), std(0x27459c, 0.4, 0.15, true)); // blue upper surface reads at any angle
+  wing.position.set(0, 0.98, -1.3);
+  g.add(wing);
+  for (const sx of [-1, 1]) {
+    const surf = mesh(new THREE.BoxGeometry(2.6, 0.07, 0.5), white);
+    surf.position.set(0, 0, 0.25);
+    g.add(hinged(sx < 0 ? 'aileronL' : 'aileronR', surf, 5.6 * sx, 0.96, -0.35));
+  }
+
+  // wing-slung turboprop nacelles
+  for (const sx of [-1, 1]) {
+    const nac = mesh(fuseGeo([
+      { z: -1.5, r: 0.3 },
+      { z: -0.8, r: 0.42 },
+      { z: 0.6, r: 0.38 },
+      { z: 1.5, r: 0.18 },
+    ], 10), white);
+    nac.position.set(2.55 * sx, 0.72, -1.4);
+    g.add(nac);
+    const exh = mesh(new THREE.CylinderGeometry(0.07, 0.09, 0.5, 6), std(0x4c4a45, 0.5, 0.7));
+    exh.rotation.x = Math.PI / 2 - 0.25;
+    exh.position.set(2.55 * sx + 0.28 * sx, 0.52, -0.5);
+    g.add(exh);
+    const prop = propeller(3, 0.98, 0.22);
+    prop.position.set(2.55 * sx, 0.72, -3.0);
+    g.add(prop);
+  }
+
+  // tall near-rectangular fin + fuselage-mounted tailplane
+  const finGeo = wingGeo([
+    { x: 0, chord: 1.6, t: 0.1 },
+    { x: 1.95, chord: 1.05, t: 0.07, sweep: 0.55 },
+  ]);
+  finGeo.rotateZ(Math.PI / 2);
+  const fin = mesh(finGeo, std(0x27459c, 0.4, 0.15, true));
+  fin.position.set(0, 0.62, 4.55);
+  g.add(fin);
+  const rudSurf = mesh(new THREE.BoxGeometry(0.06, 1.8, 0.44), white);
+  rudSurf.position.set(0, 0.8, 0.22);
+  g.add(hinged('rudder', rudSurf, 0, 1.0, 5.3));
+
+  const hstab = mesh(wingGeo([
+    { x: -2.4, chord: 0.85, t: 0.08, sweep: 0.14 },
+    { x: 0, chord: 1.1, t: 0.1 },
+    { x: 2.4, chord: 0.85, t: 0.08, sweep: 0.14 },
+  ]), std(0xf3f4f2, 0.4, 0.08, true));
+  hstab.position.set(0, 0.62, 4.45);
+  g.add(hstab);
+  const elevSurf = mesh(new THREE.BoxGeometry(4.4, 0.06, 0.42), white);
+  elevSurf.position.set(0, 0, 0.21);
+  g.add(hinged('elevator', elevSurf, 0, 0.62, 5.05));
+
+  // fixed gear: nose leg + main legs hung from the nacelles
+  const gear = new THREE.Group();
+  gear.name = 'gear';
+  const nw = wheel(0.26, 0.16);
+  nw.position.set(0, -1.02, -4.5);
+  gear.add(nw, strut(0, -0.35, -4.4, 0, -0.98, -4.5, 0.06));
+  for (const sx of [-1, 1]) {
+    for (const dx of [-0.16, 0.16]) {
+      const w = wheel(0.3, 0.15);
+      w.position.set(2.55 * sx + dx, -1.0, 0.55);
+      gear.add(w);
+    }
+    gear.add(strut(2.55 * sx, 0.45, 0.2, 2.55 * sx, -0.95, 0.55, 0.07));
+  }
+  g.add(gear);
+
+  navLights(g, 7.55, -1.25, 1.1);
+  return g;
+}
+
+/* ================================================================
+   BELL 505 JET RANGER X — light turbine helicopter, oxide red
+   ================================================================ */
+function buildJetRanger(): THREE.Group {
+  const g = new THREE.Group();
+  const red = std(0x8e2026, 0.35, 0.3);
+  const dark = std(0x26282c, 0.5, 0.4);
+
+  // cabin pod flowing into the boom
+  const body = mesh(fuseGeo([
+    { z: -2.6, r: 0.16, ry: 0.24, y: -0.34 },
+    { z: -1.9, r: 0.6, ry: 0.74, y: -0.06 },
+    { z: -0.7, r: 0.78, ry: 0.92, y: 0.04 },
+    { z: 0.7, r: 0.74, ry: 0.88, y: 0.08 },
+    { z: 1.6, r: 0.44, ry: 0.52, y: 0.26 },
+    { z: 2.4, r: 0.26, ry: 0.3, y: 0.34 },
+  ]), red);
+  g.add(body);
+
+  // wraparound windscreen + cabin glazing
+  const shield = mesh(new THREE.SphereGeometry(0.78, 12, 8), GLASS);
+  shield.scale.set(0.88, 0.72, 0.95);
+  shield.position.set(0, 0.3, -1.5);
+  g.add(shield);
+  const side = mesh(new THREE.BoxGeometry(1.62, 0.5, 1.5), std(0x131c26, 0.2, 0.7));
+  side.position.set(0, 0.32, -0.35);
+  g.add(side);
+
+  // flat belly pan (the 505's signature flat floor)
+  const pan = mesh(new THREE.BoxGeometry(1.35, 0.16, 2.6), dark);
+  pan.position.set(0, -0.86, -0.5);
+  g.add(pan);
+
+  // engine cowl + intake + upturned exhaust
+  const cowl = mesh(fuseGeo([
+    { z: -0.7, r: 0.34 },
+    { z: 0.2, r: 0.4 },
+    { z: 1.3, r: 0.28 },
+  ], 10), dark);
+  cowl.position.set(0, 1.06, 0.9);
+  g.add(cowl);
+  const exhaust = mesh(new THREE.CylinderGeometry(0.14, 0.17, 0.5, 8), std(0x4c4a45, 0.5, 0.7));
+  exhaust.rotation.x = Math.PI / 2 - 1.2;
+  exhaust.position.set(0, 1.2, 2.05);
+  g.add(exhaust);
+
+  // tail boom, stabilizer with end plates, swept fin + skid
+  const boom = mesh(fuseGeo([
+    { z: 1.6, r: 0.3, ry: 0.34, y: 0.3 },
+    { z: 3.4, r: 0.22, ry: 0.26, y: 0.38 },
+    { z: 5.2, r: 0.16, ry: 0.18, y: 0.46 },
+    { z: 6.9, r: 0.12, ry: 0.14, y: 0.52 },
+  ], 10), red);
+  g.add(boom);
+  const hstab = mesh(new THREE.BoxGeometry(2.16, 0.06, 0.56), dark);
+  hstab.position.set(0, 0.62, 4.4);
+  g.add(hstab);
+  for (const sx of [-1, 1]) {
+    const plate = mesh(new THREE.BoxGeometry(0.05, 0.5, 0.6), dark);
+    plate.position.set(1.08 * sx, 0.62, 4.4);
+    g.add(plate);
+  }
+  const finGeo = wingGeo([
+    { x: 0, chord: 0.95, t: 0.08 },
+    { x: 1.45, chord: 0.55, t: 0.05, sweep: 0.55 },
+  ]);
+  finGeo.rotateZ(Math.PI / 2);
+  const fin = mesh(finGeo, std(0x8e2026, 0.35, 0.3, true));
+  fin.position.set(0, 0.55, 6.55);
+  g.add(fin);
+  const ventral = mesh(new THREE.BoxGeometry(0.06, 0.55, 0.5), dark);
+  ventral.position.set(0, 0.2, 6.6);
+  g.add(ventral);
+  g.add(strut(0, -0.05, 6.5, 0, -0.35, 6.85, 0.03, 0x26282c)); // tail-rotor guard
+
+  // rotor mast + two-blade teetering main rotor (flat via rotation.x)
+  const mast = mesh(new THREE.CylinderGeometry(0.09, 0.11, 0.6, 8), dark);
+  mast.position.set(0, 1.55, 0.1);
+  g.add(mast);
+  const rotor = heliRotor(5.6, 0.34);
+  rotor.rotation.x = -Math.PI / 2;
+  rotor.position.set(0, 1.88, 0.1);
+  g.add(rotor);
+
+  // two-blade tail rotor on the left of the fin (spins in the X plane)
+  const tail = heliRotor(0.8, 0.14, 'tailrotor');
+  tail.rotation.y = Math.PI / 2;
+  tail.position.set(-0.3, 0.62, 6.7);
+  g.add(tail);
+
+  // skid gear: rails, upturned toes, twin cross arches
+  const gear = new THREE.Group();
+  gear.name = 'gear';
+  const railGeo = new THREE.CylinderGeometry(0.05, 0.05, 3.1, 8);
+  for (const sx of [-1, 1]) {
+    const rail = mesh(railGeo, std(0x9aa0a6, 0.5, 0.4));
+    rail.rotation.x = Math.PI / 2;
+    rail.position.set(0.99 * sx, -1.27, -0.35);
+    gear.add(rail);
+    gear.add(strut(0.99 * sx, -1.26, -1.9, 0.99 * sx, -1.02, -2.35, 0.045));
+    gear.add(strut(0.99 * sx, -1.25, -1.2, 0.42 * sx, -0.72, -1.15, 0.05));
+    gear.add(strut(0.99 * sx, -1.25, 0.75, 0.42 * sx, -0.72, 0.8, 0.05));
+  }
+  g.add(gear);
+
+  navLights(g, 1.05, -0.4, -0.2);
   return g;
 }
 
@@ -654,6 +909,8 @@ function buildMeridian(): THREE.Group {
 export function buildAircraftModel(id: string): THREE.Group {
   switch (id) {
     case 'skylark': return buildSkylark();
+    case 'islander': return buildIslander();
+    case 'jetranger': return buildJetRanger();
     case 'falcon': return buildFalcon();
     case 'vector': return buildVector();
     case 'meridian': return buildMeridian();

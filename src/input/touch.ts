@@ -55,9 +55,11 @@ export class TouchControls {
     apOn = false,
     airbrakeOn = false,
     hasAirbrake = false,
+    hasFlaps = true,
   ): void {
     this.gearBtn.style.display = retractable ? 'grid' : 'none';
     this.gearBtn.classList.toggle('lit', gearDown);
+    this.flapBtn.style.display = hasFlaps ? 'grid' : 'none';
     this.flapBtn.textContent = flaps > 0 ? `FLAP ${Math.round(flaps * 3)}` : 'FLAP';
     this.flapBtn.classList.toggle('lit', flaps > 0);
     this.apBtn.classList.toggle('lit', apOn);

@@ -15,13 +15,20 @@ for (const spec of CATALOG) {
 
   let liftoffT = -1;
   let maxV = 0;
+  const heli = spec.engine === 'heli';
   for (let t = 0; t <= 180; t += dt) {
-    inp.pitch = st.airspeed > vr && st.pitchAngle < 0.16 ? 0.35 : 0;
-    if (liftoffT > 0) {
-      inp.gearDown = false;
+    if (heli) {
+      // vertical climb-out on the collective, then nose over to accelerate
       inp.flaps = 0;
-      const targetPitch = st.pos.y > 800 ? 0.02 : 0.12;
-      inp.pitch = (targetPitch - st.pitchAngle) * 6 - st.angVel.x * 1.2;
+      inp.pitch = st.pos.y > 8 + 40 && st.airspeed < spec.vne * 0.85 ? -0.6 : 0;
+    } else {
+      inp.pitch = st.airspeed > vr && st.pitchAngle < 0.16 ? 0.35 : 0;
+      if (liftoffT > 0) {
+        inp.gearDown = false;
+        inp.flaps = 0;
+        const targetPitch = st.pos.y > 800 ? 0.02 : 0.12;
+        inp.pitch = (targetPitch - st.pitchAngle) * 6 - st.angVel.x * 1.2;
+      }
     }
     stepFlight(spec, st, inp, dt, heightAt);
     if (liftoffT < 0 && !st.onGround && st.pos.y > 8 + spec.gearHeight + 2) liftoffT = t;

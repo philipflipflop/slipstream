@@ -164,6 +164,19 @@ export class SoundEngine {
       this.jetNoiseGain.gain.setTargetAtTime(0.012 + rpm * 0.025, t, 0.1); // a little engine wash
       this.jetFilter.frequency.setTargetAtTime(500, t, 0.1);
       this.whineGain.gain.setTargetAtTime(0, t, 0.1);
+    } else if (this.kind === 'heli') {
+      // governed rotor: constant deep blade chop that bites harder with
+      // collective, over a steady turbine hiss and a thin gearbox whine
+      const bite = 0.3 + throttle * 0.7;
+      const f = 24 + bite * 5;
+      this.oscA.frequency.setTargetAtTime(f + Math.sin(time * 8.5) * 0.8, t, 0.05);
+      this.oscB.frequency.setTargetAtTime(f * 1.5, t, 0.05);
+      this.engineFilter.frequency.setTargetAtTime(240 + bite * 460, t, 0.1);
+      this.engineGain.gain.setTargetAtTime(0.1 + bite * 0.15, t, 0.1);
+      this.jetFilter.frequency.setTargetAtTime(950, t, 0.2);
+      this.jetNoiseGain.gain.setTargetAtTime(0.035 + bite * 0.05, t, 0.15);
+      this.whine.frequency.setTargetAtTime(2800 + bite * 500, t, 0.2);
+      this.whineGain.gain.setTargetAtTime(0.006, t, 0.2);
     } else {
       const spool = 0.12 + thrustFrac * 0.88;
       this.engineGain.gain.setTargetAtTime(0.0, t, 0.1);

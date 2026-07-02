@@ -265,6 +265,11 @@ class Game {
     });
     this.input.on('flaps', () => {
       if (this.state !== 'flying') return;
+      if (this.aircraft.spec.flapsCl <= 0) {
+        this.input.resetFlaps();
+        this.screens.toast('NO FLAPS FITTED');
+        return;
+      }
       const f = Math.round(this.input.controls.flaps * 3);
       this.screens.toast(f === 0 ? 'FLAPS UP' : `FLAPS ${f}`);
     });
@@ -790,6 +795,7 @@ class Game {
       this.autopilot.engaged,
       this.input.controls.airbrake,
       this.aircraft.spec.airbrakeCd > 0,
+      this.aircraft.spec.flapsCl > 0,
     );
     this.screens.setPortraitWarning(true);
   }
@@ -799,10 +805,16 @@ class Game {
     const c = this.input.controls;
     c.throttle = 1;
     const radar = st.pos.y - this.gen.heightAt(st.pos.x, st.pos.z);
-    const rotateSpeed = Math.sqrt((2 * this.aircraft.spec.mass * 9.81) /
-      (1.225 * this.aircraft.spec.wingArea * 1.1)) * 0.85;
-    c.pitch = st.airspeed > rotateSpeed && st.pitchAngle < 0.14 ? 0.3 : 0;
-    c.roll = 0;
+    if (this.aircraft.spec.engine === 'heli') {
+      // vertical climb-out, then nose over to accelerate into cruise
+      c.pitch = radar > 30 && st.airspeed < 40 ? -0.5 : 0;
+      c.roll = 0;
+    } else {
+      const rotateSpeed = Math.sqrt((2 * this.aircraft.spec.mass * 9.81) /
+        (1.225 * this.aircraft.spec.wingArea * 1.1)) * 0.85;
+      c.pitch = st.airspeed > rotateSpeed && st.pitchAngle < 0.14 ? 0.3 : 0;
+      c.roll = 0;
+    }
     if (!st.onGround && radar > 50) c.gearDown = false;
     document.title =
       `v=${st.airspeed.toFixed(1)} y=${st.pos.y.toFixed(1)} z=${st.pos.z.toFixed(0)} ` +

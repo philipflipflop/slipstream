@@ -52,6 +52,17 @@ Cloudflare builds with **npm 10.9.2**; local npm is 11. Two rules:
 - Mobile rendering: touch devices skip the logarithmic depth buffer, so they rely
   on the AGL-scaled near plane (main.ts frame()) + the water sheet's polygon
   offset/raise (`Water` `coarseDepth` flag) to avoid shoreline z-fighting.
+- `src/aircraft/flightModel.ts` — `stepFlight` branches to `stepHeli` when
+  `spec.engine === 'heli'` (Bell 505): throttle = collective, cyclic is
+  attitude-command (`inp.pitch·0.45` / `−inp.roll·0.6` are the target Euler
+  angles — the autopilot's heli branch writes attitude targets straight
+  through the stick), pedals are yaw rate. Skid-gear crash rules differ from
+  wheels (sink > 5 m/s, roll, slope, run-on > 16 m/s). Test 12-newaircraft
+  pins both new types near their book numbers.
+- `src/combat/range.ts` — round↔balloon collision is SWEPT (segment vs
+  sphere): at muzzle velocity a round outruns a balloon diameter per frame,
+  so an end-of-step point test tunnels. Keep any new projectile/target
+  check swept (test 13-balloons).
 - Conventions: -Z = north = heading 0; runway along Z at origin; heading =
   `atan2(fwd.x, -fwd.z)`.
 

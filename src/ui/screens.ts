@@ -389,6 +389,9 @@ export class Screens {
             (clicks near a runway snap to it), then ENGAGE NAV and the autopilot flies it.
             In the Vector, hold <kbd>Space</kbd> airborne to fire — ten target balloons
             float east of Meridian Field.
+            <b>Helicopter (Bell 505):</b> throttle is the collective — raise it past
+            ~60% to lift off straight up, nose down gently to fly forward, and land
+            anywhere flat by easing it back down. Rudder pedal-turns the hover.
           </p>
           <div class="row"><button class="btn primary close">Got It</button></div>
         </div>
