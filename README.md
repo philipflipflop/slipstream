@@ -31,6 +31,18 @@ deterministic, all sharing the home airfield cluster):
 | **Redstone Mesa** | Layered desert plateaus carved by winding canyon systems. |
 | **Meridian Bay** | A coastal metropolis: two downtown cores with 400 m+ setback supertalls, glass and concrete towers, street grids, parks and suburbs. |
 
+### Time of day
+
+Every world flies under four selectable skies — **Dawn Patrol**, **High Noon**,
+**Golden Hour** and **Full Moon** — picked from the hangar (or `?tod=dawn|day|dusk|night`).
+The dark presets light the world up: a procedural star field and moon, glowing
+city windows and blinking red obstruction beacons on the supertalls (Meridian Bay
+at night is worth the trip), runway edge lights, and aircraft anti-collision
+beacon/strobes plus a working landing light that pools on the tarmac in the flare.
+Every runway also carries **PAPI** approach lights — four boxes beside the southern
+threshold showing real red/white glideslope indication ("two white two red,
+you're all right") computed live from your approach angle, day or night.
+
 ## Flying
 
 | Control | Keys |
@@ -123,6 +135,7 @@ thrust model) — the handling differences fall out of the numbers, not scripts.
 - `?autofly=1` — autopilot takes off and climbs (demo / smoke test; telemetry in the tab title)
 - `&ff=60` — fast-forward N seconds of physics before the first frame
 - `&ac=vector` — select aircraft (`skylark`, `islander`, `jetranger`, `falcon`, `vector`, `meridian`)
+- `&tod=night` — time of day (`dawn`, `day`, `dusk`, `night`)
 - `&mode=race` — start in Ring Rush
 - `&touch=1` — force the touch UI on desktop
 - `&apt=1` — spawn at another fixed airfield (1 = Northgate, 2 = Highmoor)

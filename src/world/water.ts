@@ -4,6 +4,7 @@
  */
 import * as THREE from 'three';
 import { WATER_LEVEL } from './heightfield';
+import type { DaylightPreset } from './daylight';
 
 const VERT = /* glsl */ `
   #include <common>
@@ -25,6 +26,7 @@ const FRAG = /* glsl */ `
   uniform vec3 uCamPos;
   uniform vec3 uShallow;
   uniform vec3 uDeep;
+  uniform vec3 uGlint;
   uniform vec3 uFogColor;
   uniform float uFogNear;
   uniform float uFogFar;
@@ -59,11 +61,11 @@ const FRAG = /* glsl */ `
     float fres = pow(1.0 - max(dot(viewDir, n), 0.0), 3.0);
     vec3 base = mix(uDeep, uShallow, fres * 0.7 + 0.12);
 
-    // sun glint (sparkle also calms with distance)
+    // sun/moon glint (sparkle also calms with distance)
     vec3 hv = normalize(viewDir + uSunDir);
     float spec = pow(max(dot(n, hv), 0.0), 220.0) * 1.6;
     float sparkle = pow(max(dot(n, hv), 0.0), 36.0) * 0.25 * waveAmt;
-    vec3 col = base + (spec + sparkle) * vec3(1.0, 0.92, 0.75);
+    vec3 col = base + (spec + sparkle) * uGlint;
 
     // LINEAR falloff matching THREE.Fog exactly — terrain and water must
     // fade identically or the boundary between them reads as a "map edge"
@@ -77,7 +79,10 @@ export class Water {
   mesh: THREE.Mesh;
   private mat: THREE.ShaderMaterial;
 
-  constructor(scene: THREE.Scene, fogColor: THREE.Color, sunDir: THREE.Vector3, coarseDepth = false) {
+  constructor(
+    scene: THREE.Scene, fogColor: THREE.Color, sunDir: THREE.Vector3,
+    coarseDepth = false, preset?: DaylightPreset,
+  ) {
     // big enough to underlie the entire far terrain shell (~63 km)
     const geo = new THREE.PlaneGeometry(66000, 66000, 1, 1);
     geo.rotateX(-Math.PI / 2);
@@ -96,8 +101,9 @@ export class Water {
         uTime: { value: 0 },
         uSunDir: { value: sunDir.clone() },
         uCamPos: { value: new THREE.Vector3() },
-        uShallow: { value: new THREE.Color(0x2e8c9e) },
-        uDeep: { value: new THREE.Color(0x0a3550) },
+        uShallow: { value: new THREE.Color(preset?.waterShallow ?? 0x2e8c9e) },
+        uDeep: { value: new THREE.Color(preset?.waterDeep ?? 0x0a3550) },
+        uGlint: { value: new THREE.Vector3(...(preset?.glint ?? [1.0, 0.92, 0.75])) },
         uFogColor: { value: fogColor.clone() },
         uFogNear: { value: 2000 },
         uFogFar: { value: 7000 },

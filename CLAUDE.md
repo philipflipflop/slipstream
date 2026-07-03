@@ -74,6 +74,19 @@ Cloudflare builds with **npm 10.9.2**; local npm is 11. Two rules:
   sphere): at muzzle velocity a round outruns a balloon diameter per frame,
   so an end-of-step point test tunnels. Keep any new projectile/target
   check swept (test 13-balloons).
+- `src/world/daylight.ts` — time-of-day presets (dawn/day/dusk/night). The
+  palette is FIXED at construction and threads into Sky (dome uniforms,
+  stars, disc, scene lights), Water (colors + glint), TerrainManager
+  (windowGlow: emissive tower maps + supertall beacons — the emissiveMap is
+  only attached when glow > 0 so the day preset keeps the cheap shader),
+  and Aircraft.addExteriorLights (landing-light SpotLight only on dark
+  presets: one extra scene light). Changing tod reloads, like worlds.
+  Landing light lesson: a spotlight grazing a flat runway loses ~94% to
+  Lambert's cosine — model it as a collimated beam (decay 0) with a huge
+  intensity, aimed a few degrees below boresight.
+- PAPI (airport.ts): four boxes per field, per-frame red/white from the
+  aircraft's actual angle to each box vs [3.5, 3.2, 2.8, 2.5]°; world
+  positions captured after the field pivot via getWorldPosition.
 - Conventions: -Z = north = heading 0; runway along Z at origin; heading =
   `atan2(fwd.x, -fwd.z)`.
 
@@ -84,5 +97,7 @@ Cloudflare builds with **npm 10.9.2**; local npm is 11. Two rules:
 - Visual changes: headless Chrome needs
   `--headless=new --disable-frame-rate-limit --disable-gpu-vsync --virtual-time-budget=N --screenshot=...`
   (without the frame-rate flags it pumps ~3 rAF frames and captures the boot
-  screen). Dev URL params: `?autofly=1&ff=N&ac=vector&apt=N&ap=1`; telemetry is in
-  the tab title. Runs are occasionally flaky — retry.
+  screen). Dev URL params: `?autofly=1&ff=N&ac=vector&apt=N&ap=1&tod=night`;
+  telemetry is in the tab title. Runs are occasionally flaky — retry. Dark
+  screenshots legitimately compress below 100 kB — don't use a large
+  min-size gate to detect boot-screen captures on night scenes.

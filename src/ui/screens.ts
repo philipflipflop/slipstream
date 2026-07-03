@@ -5,6 +5,7 @@
  */
 import { CATALOG } from '../aircraft/catalog';
 import { WORLDS, WorldTheme } from '../world/heightfield';
+import { DAYLIGHTS, TimeOfDay } from '../world/daylight';
 import type { SaveData, Quality } from '../save';
 import { formatTime } from '../core/math';
 
@@ -26,6 +27,7 @@ export class Screens {
   onAircraft: (id: string) => void = () => {};
   onMode: (mode: 'free' | 'race') => void = () => {};
   onWorld: (world: WorldTheme) => void = () => {};
+  onTod: (tod: TimeOfDay) => void = () => {};
   onSettings: () => void = () => {};
   onAnyClick: () => void = () => {};
   /** kind: 'hdg' | 'alt' | 'spd'; dir: -1 | 1 */
@@ -132,6 +134,7 @@ export class Screens {
                 </button>
               </div>
               <div class="world-row"></div>
+              <div class="tod-row"></div>
               <div class="best-time"></div>
             </div>
           </div>
@@ -178,6 +181,18 @@ export class Screens {
       chip.addEventListener('click', () => {
         const id = chip.dataset.world as WorldTheme;
         if (id !== this.save.world) this.onWorld(id);
+      });
+    });
+
+    // time-of-day selector
+    const tRow = m.querySelector('.tod-row')!;
+    tRow.innerHTML = DAYLIGHTS.map(
+      (d) => `<button class="tod-chip" data-tod="${d.id}" title="${d.desc}">${d.name}</button>`,
+    ).join('');
+    tRow.querySelectorAll<HTMLButtonElement>('.tod-chip').forEach((chip) => {
+      chip.addEventListener('click', () => {
+        const id = chip.dataset.tod as TimeOfDay;
+        if (id !== this.save.tod) this.onTod(id);
       });
     });
 
@@ -230,6 +245,9 @@ export class Screens {
     });
     m.querySelectorAll<HTMLButtonElement>('.world-chip').forEach((chip) => {
       chip.classList.toggle('on', chip.dataset.world === this.save.world);
+    });
+    m.querySelectorAll<HTMLButtonElement>('.tod-chip').forEach((chip) => {
+      chip.classList.toggle('on', chip.dataset.tod === this.save.tod);
     });
 
     const best = this.save.bestTimes[spec.id];
@@ -383,6 +401,9 @@ export class Screens {
           <h2>CONTROLS</h2>
           <div class="keys">${this.isTouch ? touchRows + keyRows : keyRows}</div>
           <p style="color:var(--fog);font-size:12.5px;line-height:1.5">
+            Pick a time of day in the hangar — at night the runway edge lights and the
+            four PAPI boxes beside the threshold guide you home (two white two red =
+            on the glide path; all red = too low).
             Flying 101: full throttle, let speed build past the white arc, then ease back.
             Keep the nose where the speed stays healthy — if <b style="color:var(--danger)">STALL</b> flashes,
             push forward and add power. Land into the runway slow, flaps down, gentle sink.

@@ -1,10 +1,12 @@
 /**
- * Atmosphere: gradient sky dome with sun disc, hemisphere + directional
- * lighting (shadow frustum follows the player), and a wrapping layer of
- * billboard cumulus clouds built from a generated canvas texture.
+ * Atmosphere: gradient sky dome with sun/moon disc and a procedural star
+ * field, hemisphere + directional lighting (shadow frustum follows the
+ * player), and a wrapping layer of billboard cumulus clouds built from a
+ * generated canvas texture. All colours come from the daylight preset.
  */
 import * as THREE from 'three';
 import { clamp, damp } from '../core/math';
+import type { DaylightPreset } from './daylight';
 
 const SKY_VERT = /* glsl */ `
   varying vec3 vDir;
@@ -20,18 +22,39 @@ const SKY_FRAG = /* glsl */ `
   uniform vec3 uZenith;
   uniform vec3 uHorizon;
   uniform vec3 uGroundGlow;
+  uniform vec3 uGlowColor;
+  uniform float uGlowAmt;
+  uniform vec3 uDiscColor;
+  uniform float uDiscBoost;
+  uniform float uStars;
   varying vec3 vDir;
+
+  float hash13(vec3 p) {
+    p = fract(p * 0.1031);
+    p += dot(p, p.zyx + 31.32);
+    return fract((p.x + p.y) * p.z);
+  }
+
   void main() {
     vec3 d = normalize(vDir);
     float h = clamp(d.y, -1.0, 1.0);
     vec3 col = mix(uHorizon, uZenith, pow(max(h, 0.0), 0.62));
     col = mix(uGroundGlow, col, smoothstep(-0.18, 0.06, h));
 
+    // star field: hashed cells on the direction vector — each bright cell is
+    // a couple of pixels, i.e. a star. Fades toward the horizon haze.
+    if (uStars > 0.001) {
+      float star = smoothstep(0.9982, 1.0, hash13(floor(d * 480.0)));
+      float twinkleSeed = hash13(floor(d * 480.0) + 7.0);
+      col += vec3(0.9, 0.95, 1.0) * star * (0.4 + 0.6 * twinkleSeed)
+        * uStars * smoothstep(0.02, 0.24, h);
+    }
+
     float sunAmt = max(dot(d, uSunDir), 0.0);
-    // warm haze around the sun
-    col += vec3(1.0, 0.55, 0.22) * pow(sunAmt, 14.0) * 0.42;
-    // the disc itself
-    col += vec3(1.0, 0.88, 0.66) * smoothstep(0.9994, 0.9999, sunAmt) * 6.0;
+    // haze around the disc
+    col += uGlowColor * pow(sunAmt, 14.0) * uGlowAmt;
+    // the disc itself (sun by day, moon by night)
+    col += uDiscColor * smoothstep(0.9994, 0.9999, sunAmt) * uDiscBoost;
     gl_FragColor = vec4(col, 1.0);
   }
 `;
@@ -63,16 +86,19 @@ function makeCloudTexture(): THREE.CanvasTexture {
 }
 
 export class Sky {
-  readonly sunDir = new THREE.Vector3(0.42, 0.46, -0.55).normalize();
+  readonly sunDir: THREE.Vector3;
   readonly sun: THREE.DirectionalLight;
   readonly hemi: THREE.HemisphereLight;
-  readonly fogColor = new THREE.Color(0xc6d3e0);
+  readonly fogColor: THREE.Color;
   private dome: THREE.Mesh;
   private clouds: THREE.Sprite[] = [];
   private cloudBaseOpacity: number[] = [];
   private cloudSpan = 9000;
 
-  constructor(scene: THREE.Scene, cloudCount: number) {
+  constructor(scene: THREE.Scene, cloudCount: number, preset: DaylightPreset) {
+    this.sunDir = new THREE.Vector3(...preset.sunDir).normalize();
+    this.fogColor = new THREE.Color(preset.horizon);
+
     const geo = new THREE.SphereGeometry(1, 32, 18);
     const mat = new THREE.ShaderMaterial({
       vertexShader: SKY_VERT,
@@ -81,11 +107,16 @@ export class Sky {
       depthWrite: false,
       uniforms: {
         uSunDir: { value: this.sunDir.clone() },
-        uZenith: { value: new THREE.Color(0x2c63b8) },
+        uZenith: { value: new THREE.Color(preset.zenith) },
         // horizon band IS the fog colour — fogged geometry then melts
         // seamlessly into the sky instead of silhouetting a "map edge"
         uHorizon: { value: this.fogColor.clone() },
-        uGroundGlow: { value: this.fogColor.clone().multiplyScalar(0.82) },
+        uGroundGlow: { value: this.fogColor.clone().multiplyScalar(preset.groundGlow) },
+        uGlowColor: { value: new THREE.Vector3(...preset.glowColor) },
+        uGlowAmt: { value: preset.glowAmt },
+        uDiscColor: { value: new THREE.Color(preset.discColor) },
+        uDiscBoost: { value: preset.discBoost },
+        uStars: { value: preset.stars },
       },
     });
     this.dome = new THREE.Mesh(geo, mat);
@@ -94,10 +125,10 @@ export class Sky {
     this.dome.scale.setScalar(30000);
     scene.add(this.dome);
 
-    this.hemi = new THREE.HemisphereLight(0xbcd3f5, 0x57604c, 0.75);
+    this.hemi = new THREE.HemisphereLight(preset.hemiSky, preset.hemiGround, preset.hemiIntensity);
     scene.add(this.hemi);
 
-    this.sun = new THREE.DirectionalLight(0xfff1d6, 2.4);
+    this.sun = new THREE.DirectionalLight(preset.sunColor, preset.sunIntensity);
     this.sun.position.copy(this.sunDir).multiplyScalar(1800);
     this.sun.castShadow = false;
     this.sun.shadow.mapSize.set(2048, 2048);
@@ -116,8 +147,9 @@ export class Sky {
     for (let i = 0; i < cloudCount; i++) {
       const mat2 = new THREE.SpriteMaterial({
         map: tex,
+        color: preset.cloudTint,
         transparent: true,
-        opacity: 0.5 + Math.random() * 0.32,
+        opacity: (0.5 + Math.random() * 0.32) * preset.cloudOpacity,
         depthWrite: false,
         fog: false,
       });

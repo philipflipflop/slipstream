@@ -32,6 +32,10 @@ export class Aircraft {
   private propAngle = 0;
   private rotorSpin = 0; // helicopter rotor spool 0..1 (governed once up)
   private gearAnim = 1; // 1 = down
+  private lightT = 0;
+  private beaconLight: THREE.Mesh | null = null;
+  private strobeLight: THREE.Mesh | null = null;
+  private landingLight: THREE.SpotLight | null = null;
   private smoothPitch = 0;
   private smoothRoll = 0;
   private smoothYaw = 0;
@@ -52,6 +56,38 @@ export class Aircraft {
       else if (o.name === 'gear') this.gear = o;
       else if (o.name === 'burner') this.burner = o as THREE.Mesh;
     });
+  }
+
+  /**
+   * Exterior lights: red anti-collision beacon on the spine and a white
+   * tail strobe (always fitted — they blink day and night, like the real
+   * things), plus an optional landing-light spotlight for the dark presets
+   * (one extra scene light, so the day preset skips the shader cost).
+   */
+  addExteriorLights(withLandingLight: boolean): void {
+    const box = new THREE.Box3().setFromObject(this.model);
+    const glowGeo = new THREE.SphereGeometry(0.16, 6, 5);
+    this.beaconLight = new THREE.Mesh(glowGeo, new THREE.MeshBasicMaterial({ color: 0xff2222 }));
+    this.beaconLight.position.set(0, box.max.y + 0.12, (box.min.z + box.max.z) * 0.35);
+    this.model.add(this.beaconLight);
+    this.strobeLight = new THREE.Mesh(glowGeo, new THREE.MeshBasicMaterial({ color: 0xffffff }));
+    this.strobeLight.position.set(0, box.max.y * 0.55, box.max.z - 0.25);
+    this.model.add(this.strobeLight);
+
+    if (withLandingLight) {
+      // decay 0: a landing light is a collimated beam, not a bare bulb —
+      // with distance falloff it would vanish long before the runway
+      // aimed ~5° below boresight. Intensity looks huge, but the beam meets
+      // a flat runway at grazing incidence — Lambert's cosine eats ~94% of
+      // it, exactly why real landing lights are hundreds of thousands of
+      // candela. ACES tone mapping rolls off anything hit face-on.
+      const spot = new THREE.SpotLight(0xfff2d8, 14, 460, 0.3, 0.5, 0);
+      spot.position.set(0, -0.3, box.min.z + 1.2);
+      spot.target.position.set(0, -6.6, box.min.z - 72);
+      this.model.add(spot);
+      this.model.add(spot.target);
+      this.landingLight = spot;
+    }
   }
 
   resetOnRunway(heightAt: HeightFn, field?: AirfieldDef): void {
@@ -116,6 +152,19 @@ export class Aircraft {
       const s = clamp(this.gearAnim, 0.001, 1);
       this.gear.scale.setScalar(s);
       this.gear.visible = this.gearAnim > 0.04;
+    }
+
+    // exterior lights: slow red beacon pulse, sharp white double strobe
+    if (this.beaconLight) {
+      this.lightT += dt;
+      const bt = this.lightT % 1.9;
+      this.beaconLight.visible = bt < 0.28 && !st.crashed;
+      const stT = this.lightT % 1.3;
+      this.strobeLight!.visible = (stT < 0.05 || (stT > 0.12 && stT < 0.17)) && !st.crashed;
+      if (this.landingLight) {
+        this.landingLight.visible =
+          !st.crashed && (this.spec.retractableGear ? inp.gearDown : true);
+      }
     }
 
     // afterburner

@@ -1,5 +1,6 @@
 /** localStorage persistence for settings + best times. */
 import type { WorldTheme } from './world/heightfield';
+import type { TimeOfDay } from './world/daylight';
 
 export type Quality = 'low' | 'medium' | 'high';
 
@@ -7,6 +8,7 @@ export interface SaveData {
   aircraft: string;
   mode: 'free' | 'race';
   world: WorldTheme;
+  tod: TimeOfDay;
   quality: Quality;
   /** quality-heuristic schema version — bump to re-derive saved defaults */
   qv: number;
@@ -25,6 +27,7 @@ export function loadSave(): SaveData {
     aircraft: 'skylark',
     mode: 'free',
     world: 'archipelago',
+    tod: 'day',
     quality: defaultQuality(),
     qv: QUALITY_VERSION,
     invertY: false,

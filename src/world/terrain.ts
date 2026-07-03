@@ -134,6 +134,47 @@ function towerTexture(style: 'punched' | 'curtain'): THREE.CanvasTexture {
   return tex;
 }
 
+/** Night-lights emissive map: black facade, a scatter of lit offices. The
+ *  same UV layout as towerTexture so windows glow exactly where they are. */
+function towerEmissive(style: 'punched' | 'curtain'): THREE.CanvasTexture {
+  const c = document.createElement('canvas');
+  c.width = 128;
+  c.height = 256;
+  const ctx = c.getContext('2d')!;
+  ctx.fillStyle = '#000000';
+  ctx.fillRect(0, 0, 128, 256);
+  const litColor = (): string => {
+    const r = Math.random();
+    return r > 0.85 ? 'rgba(210, 228, 255, 0.9)'   // cool fluorescent
+      : r > 0.7 ? 'rgba(255, 244, 214, 0.95)'      // bright warm
+      : 'rgba(255, 214, 140, 0.85)';               // amber
+  };
+  if (style === 'punched') {
+    for (let fy = 0; fy < 24; fy++) {
+      for (let fx = 0; fx < 10; fx++) {
+        if (Math.random() < 0.38) {
+          ctx.fillStyle = litColor();
+          ctx.fillRect(4 + fx * 12.4, 8 + fy * 10.2, 8.4, 6.6);
+        }
+      }
+    }
+  } else {
+    // curtain wall: runs of lit glazing within each band
+    for (let fy = 0; fy < 31; fy++) {
+      for (let fx = 0; fx < 8; fx++) {
+        if (Math.random() < 0.42) {
+          ctx.fillStyle = litColor();
+          ctx.fillRect(fx * 16.5 + 4, fy * 8 + 1.5, 13, 5.5);
+        }
+      }
+    }
+  }
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = 4;
+  return tex;
+}
+
 function buildHouseGeometry(): THREE.BufferGeometry {
   const parts: THREE.BufferGeometry[] = [];
   const walls = new THREE.BoxGeometry(1, 1, 1);
@@ -253,8 +294,17 @@ export class TerrainManager {
   // running geomorph animations (one per freshly finalized chunk)
   private morphs: Array<{ u: { value: number }; t: number }> = [];
 
-  constructor(private scene: THREE.Scene, gen: WorldGen) {
+  /** 0 = day (no cost); > 0 lights the city windows at that intensity and
+   *  > 0.3 also fits blinking red obstruction beacons to the supertalls.
+   *  Fixed at construction — a time-of-day change reloads, like a world. */
+  private windowGlow: number;
+  private beaconMat: THREE.MeshBasicMaterial | null = null;
+  private beaconGeo: THREE.SphereGeometry | null = null;
+  private beaconTime = 0;
+
+  constructor(private scene: THREE.Scene, gen: WorldGen, windowGlow = 0) {
     this.gen = gen;
+    this.windowGlow = windowGlow;
     this.terrainMat = new THREE.MeshLambertMaterial({ vertexColors: true });
     this.treeMat = new THREE.MeshLambertMaterial({ vertexColors: true });
     this.houseMat = new THREE.MeshLambertMaterial({ vertexColors: true });
@@ -265,6 +315,20 @@ export class TerrainManager {
     this.towerGeo = buildTowerGeometry();
     this.towerMat = new THREE.MeshLambertMaterial({ map: towerTexture('punched') });
     this.glassMat = new THREE.MeshLambertMaterial({ map: towerTexture('curtain') });
+    if (windowGlow > 0) {
+      // lit offices (emissiveMap is only attached when it will be used —
+      // the day preset keeps the cheaper shader variant)
+      this.towerMat.emissive = new THREE.Color(0xffffff);
+      this.towerMat.emissiveMap = towerEmissive('punched');
+      this.towerMat.emissiveIntensity = windowGlow;
+      this.glassMat.emissive = new THREE.Color(0xffffff);
+      this.glassMat.emissiveMap = towerEmissive('curtain');
+      this.glassMat.emissiveIntensity = windowGlow;
+    }
+    if (windowGlow > 0.3) {
+      this.beaconGeo = new THREE.SphereGeometry(2.4, 6, 5);
+      this.beaconMat = new THREE.MeshBasicMaterial({ color: 0xff2a2a, transparent: true, opacity: 0.9 });
+    }
 
     try {
       this.worker = new Worker(new URL('./terrain.worker.ts', import.meta.url), { type: 'module' });
@@ -318,6 +382,13 @@ export class TerrainManager {
   update(px: number, pz: number, agl = 0, dt = 0.016): void {
     const cx = Math.floor(px / CHUNK_SIZE);
     const cz = Math.floor(pz / CHUNK_SIZE);
+
+    // obstruction beacons blink in a slow aviation-red double pulse
+    if (this.beaconMat) {
+      this.beaconTime += dt;
+      const t = this.beaconTime % 1.6;
+      this.beaconMat.opacity = t < 0.18 || (t > 0.3 && t < 0.42) ? 0.95 : 0.08;
+    }
 
     // advance geomorphs: fresh chunks swell from the surface they replaced
     for (let i = this.morphs.length - 1; i >= 0; i--) {
@@ -677,6 +748,29 @@ export class TerrainManager {
     addInstances(this.houseGeo, this.houseMat, p.houseMats, p.houseTints);
     addInstances(this.towerGeo, this.towerMat, p.towerMats, p.towerTints);
     addInstances(this.towerGeo, this.glassMat, p.glassMats, p.glassTints);
+
+    // night: red obstruction beacons on the tall towers (matrices are
+    // composeYRot, so el[5] = height and el[12..14] = base position)
+    if (this.beaconMat && this.beaconGeo) {
+      const tops: number[] = [];
+      for (const arr of [p.towerMats, p.glassMats]) {
+        for (let i = 0; i < arr.length; i += 16) {
+          const sy = arr[i + 5];
+          if (sy > 150) tops.push(arr[i + 12], arr[i + 13] + sy + 3, arr[i + 14]);
+        }
+      }
+      if (tops.length > 0) {
+        const bm = new THREE.InstancedMesh(this.beaconGeo, this.beaconMat, tops.length / 3);
+        const bmm = new THREE.Matrix4();
+        for (let i = 0; i < tops.length / 3; i++) {
+          bmm.makeTranslation(tops[i * 3], tops[i * 3 + 1], tops[i * 3 + 2]);
+          bm.setMatrixAt(i, bmm);
+        }
+        bm.instanceMatrix.needsUpdate = true;
+        group.add(bm);
+        disposables.push({ dispose: () => bm.dispose() });
+      }
+    }
 
     this.scene.add(group);
     this.chunks.set(key, {

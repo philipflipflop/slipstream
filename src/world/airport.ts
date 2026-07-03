@@ -49,7 +49,13 @@ interface BuiltField {
   group: THREE.Group;
   sock: THREE.Mesh;
   beacon: THREE.Mesh | null;
+  /** PAPI boxes (southern approach) + their world positions, outermost first */
+  papi: Array<{ mesh: THREE.Mesh; world: THREE.Vector3 }>;
 }
+
+/** PAPI glide-path thresholds, outermost box first: 4 white = high,
+ *  2 white 2 red = on the 3° slope, 4 red = dangerously low. */
+const PAPI_DEG = [3.5, 3.2, 2.8, 2.5];
 
 export class Airport {
   private built = new Map<string, BuiltField>();
@@ -63,7 +69,7 @@ export class Airport {
     this.rwMat = new THREE.MeshLambertMaterial({ map: this.tex });
   }
 
-  update(time: number, px: number, pz: number): void {
+  update(time: number, px: number, pz: number, py = 0): void {
     // animate whatever exists
     for (const f of this.built.values()) {
       f.sock.rotation.x = Math.sin(time * 2.1) * 0.08;
@@ -71,6 +77,18 @@ export class Airport {
       if (f.beacon) {
         const pulse = (Math.sin(time * 4.2) + 1) * 0.5;
         (f.beacon.material as THREE.MeshBasicMaterial).color.setRGB(0.45 + pulse, 0.08, 0.08);
+      }
+      // PAPI: each box compares the aircraft's angle above its own position
+      // against its slope threshold — white above, red below, so the row
+      // reads the classic "two white two red, you're all right"
+      for (let i = 0; i < f.papi.length; i++) {
+        const b = f.papi[i];
+        const dist = Math.hypot(px - b.world.x, pz - b.world.z);
+        if (dist > 9000) continue; // too far to resolve — skip the math
+        const angle = Math.atan2(py - b.world.y, Math.max(dist, 1)) * (180 / Math.PI);
+        (b.mesh.material as THREE.MeshBasicMaterial).color.setHex(
+          angle > PAPI_DEG[i] ? 0xfff4e0 : 0xff2418,
+        );
       }
     }
 
@@ -143,6 +161,16 @@ export class Airport {
       beacon = this.buildMajorExtras(g, ap);
     }
 
+    // PAPI row on the left of the southern touchdown zone (runway 36 side)
+    const papi: Array<{ mesh: THREE.Mesh; world: THREE.Vector3 }> = [];
+    const papiGeo = new THREE.BoxGeometry(1.8, 0.9, 0.9);
+    for (let i = 0; i < 4; i++) {
+      const box = new THREE.Mesh(papiGeo, new THREE.MeshBasicMaterial({ color: 0xfff4e0 }));
+      box.position.set(ap.x - ap.width / 2 - 16 - i * 9, E + 0.8, ap.z + ap.length / 2 - 260);
+      g.add(box);
+      papi.push({ mesh: box, world: new THREE.Vector3() });
+    }
+
     // furniture is laid out as if the runway ran north–south; spin the whole
     // field around its centre to the actual runway heading
     let root: THREE.Object3D = g;
@@ -155,7 +183,9 @@ export class Airport {
       root = pivot;
     }
     this.scene.add(root);
-    this.built.set(key, { def: ap, group: root as THREE.Group, sock, beacon });
+    root.updateMatrixWorld(true);
+    for (const b of papi) b.mesh.getWorldPosition(b.world); // rotation-proof
+    this.built.set(key, { def: ap, group: root as THREE.Group, sock, beacon, papi });
   }
 
   private buildMajorExtras(g: THREE.Group, ap: AirfieldDef): THREE.Mesh {

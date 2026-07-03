@@ -211,6 +211,16 @@ html, body {
 .world-chip.on { border-color: var(--amber); background: rgba(58, 42, 16, .4); }
 .world-chip.on .wc-name { color: var(--amber); }
 
+.tod-row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+.tod-chip {
+  flex: 1; min-width: 72px; text-align: center; cursor: pointer;
+  border: 1px solid var(--line); background: rgba(10, 19, 34, .55);
+  padding: 6px 8px; color: var(--fog); font-family: var(--font-ui);
+  font-weight: 700; letter-spacing: .1em; font-size: 10.5px; text-transform: uppercase;
+  transition: border-color .2s, background .2s, color .2s;
+}
+.tod-chip.on { border-color: var(--amber); background: rgba(58, 42, 16, .4); color: var(--amber); }
+
 .menu-foot {
   display: flex; gap: 12px; align-items: center; justify-content: space-between;
   padding-top: 14px; flex-wrap: wrap;

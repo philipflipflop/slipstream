@@ -8,6 +8,7 @@ import * as THREE from 'three';
 import './styles.css';
 
 import { WorldGen, AIRPORTS, WORLDS, WorldTheme } from './world/heightfield';
+import { daylightById, DAYLIGHTS, DaylightPreset, TimeOfDay } from './world/daylight';
 import { TerrainManager, CHUNK_SIZE } from './world/terrain';
 import { Water } from './world/water';
 import { Sky } from './world/sky';
@@ -89,6 +90,8 @@ class Game {
   private autoFly = false;
   private spawnField = AIRPORTS[0];
 
+  private daylight: DaylightPreset;
+
   constructor() {
     const touch = isTouchDevice();
 
@@ -96,6 +99,13 @@ class Game {
     const worldParam = new URLSearchParams(location.search).get('world') as WorldTheme | null;
     const theme = worldParam && WORLDS.some((w) => w.id === worldParam) ? worldParam : this.save.world;
     this.gen = new WorldGen(undefined, theme);
+
+    // time of day: ?tod= overrides the saved choice (smoke tests)
+    const todParam = new URLSearchParams(location.search).get('tod') as TimeOfDay | null;
+    this.daylight = daylightById(
+      todParam && DAYLIGHTS.some((d) => d.id === todParam) ? todParam : this.save.tod,
+    );
+    this.save.tod = this.daylight.id; // menu chips reflect the active preset
 
     // uniform relative depth precision at any distance — kills shoreline
     // z-fighting without biasing the water. It defeats early-Z, so the only
@@ -115,13 +125,13 @@ class Game {
     this.renderer.toneMappingExposure = 1.05;
     document.getElementById('app')!.appendChild(this.renderer.domElement);
 
-    this.sky = new Sky(this.scene, touch ? 26 : 56);
+    this.sky = new Sky(this.scene, touch ? 26 : 56, this.daylight);
     this.scene.fog = new THREE.Fog(this.sky.fogColor, 2500, 7000);
     this.scene.background = null; // dome handles it
 
-    this.terrain = new TerrainManager(this.scene, this.gen);
+    this.terrain = new TerrainManager(this.scene, this.gen, this.daylight.windowGlow);
     // without the log depth buffer the water needs the depth-bias path
-    this.water = new Water(this.scene, this.sky.fogColor, this.sky.sunDir, this.coarseDepth);
+    this.water = new Water(this.scene, this.sky.fogColor, this.sky.sunDir, this.coarseDepth, this.daylight);
     this.airport = new Airport(this.scene, this.gen);
     this.rings = new RingCourse(this.scene, this.gen);
     this.obstacles = new ObstacleField(this.gen);
@@ -132,6 +142,7 @@ class Game {
     setTurbulence(0.7); // light chop down low; tests run with 0
 
     this.aircraft = new Aircraft(specById(this.save.aircraft));
+    this.aircraft.addExteriorLights(this.daylight.landingLight);
     this.scene.add(this.aircraft.model);
     this.aircraft.resetOnRunway(this.heightFn, this.spawnField);
 
@@ -219,6 +230,13 @@ class Game {
       // a world swap regenerates literally everything — a clean reload is
       // simpler and leak-proof compared to disposing the whole scene graph
       this.save.world = w;
+      persist(this.save);
+      location.reload();
+    };
+    s.onTod = (t) => {
+      // same story: the palette threads through shaders, materials and
+      // lights fixed at construction — reload and come back re-lit
+      this.save.tod = t;
       persist(this.save);
       location.reload();
     };
@@ -457,6 +475,7 @@ class Game {
     this.scene.remove(this.aircraft.model);
     this.aircraft.dispose();
     this.aircraft = new Aircraft(specById(id));
+    this.aircraft.addExteriorLights(this.daylight.landingLight);
     this.scene.add(this.aircraft.model);
     this.aircraft.resetOnRunway(this.heightFn, this.spawnField);
     this.sound.uiClick();
@@ -585,7 +604,7 @@ class Game {
 
     this.water.update(this.simTime, this.flightCam.camera.position);
     this.sky.update(st.pos, fog.far, dt);
-    this.airport.update(this.simTime, st.pos.x, st.pos.z);
+    this.airport.update(this.simTime, st.pos.x, st.pos.z, st.pos.y);
 
     // coarse-depth fallback (touch + low, no log buffer): step the near
     // plane out with altitude to reclaim precision. Discrete bands with
