@@ -78,8 +78,20 @@ const GRAV = 9.81;
 let turbulence = 0;
 export function setTurbulence(t: number): void { turbulence = t; }
 
+/**
+ * Steady wind, world m/s, the direction the air MOVES TOWARD (defaults to
+ * calm so tests stay bit-exact). All aerodynamics run on air-relative
+ * velocity while positions integrate inertially — crosswind drift, crab
+ * angles, head/tailwind ground-roll differences and hovering into wind all
+ * fall out of that one subtraction.
+ */
+let windX = 0;
+let windZ = 0;
+export function setWind(vx: number, vz: number): void { windX = vx; windZ = vz; }
+
 // scratch (no per-frame allocation)
 const _qInv = new THREE.Quaternion();
+const _vAir = new THREE.Vector3();
 const _vLocal = new THREE.Vector3();
 const _wDir = new THREE.Vector3();
 const _liftDir = new THREE.Vector3();
@@ -108,7 +120,8 @@ export function stepFlight(
   }
 
   const rho = 1.225 * Math.exp(-Math.max(st.pos.y, 0) / 8500);
-  const V = st.vel.length();
+  _vAir.set(st.vel.x - windX, st.vel.y, st.vel.z - windZ);
+  const V = _vAir.length();
   st.airspeed = V;
 
   const groundY = heightAt(st.pos.x, st.pos.z);
@@ -121,7 +134,7 @@ export function stepFlight(
   const ge = clamp(1 - agl / (span * 0.9), 0, 1);
 
   _qInv.copy(st.quat).invert();
-  _vLocal.copy(st.vel).applyQuaternion(_qInv);
+  _vLocal.copy(_vAir).applyQuaternion(_qInv);
 
   // --- aerodynamic angles ---
   let aoa = 0;
@@ -365,7 +378,8 @@ function stepHeli(
   heightAt: HeightFn,
 ): void {
   const rho = 1.225 * Math.exp(-Math.max(st.pos.y, 0) / 8500);
-  const V = st.vel.length();
+  _vAir.set(st.vel.x - windX, st.vel.y, st.vel.z - windZ);
+  const V = _vAir.length();
   st.airspeed = V;
   st.aoa = 0;
   st.stalled = false;
@@ -375,7 +389,7 @@ function stepHeli(
   const R = Math.sqrt(spec.wingArea / Math.PI); // rotor radius from disc area
 
   _qInv.copy(st.quat).invert();
-  _vLocal.copy(st.vel).applyQuaternion(_qInv);
+  _vLocal.copy(_vAir).applyQuaternion(_qInv);
 
   // collective through a short rotor/governor lag
   st.spool += clamp(inp.throttle - st.spool, -2.4 * dt, 2.0 * dt);
@@ -383,7 +397,7 @@ function stepHeli(
 
   // --- rotor thrust along body up ---
   const ge = clamp(1 - agl / (R * 1.1), 0, 1);         // ground effect
-  const vh = Math.hypot(st.vel.x, st.vel.z);
+  const vh = Math.hypot(_vAir.x, _vAir.z);             // AIR-relative: hovering into wind earns ETL
   const etl = 1 + 0.13 * clamp(vh / 18, 0, 1);         // translational lift
   const dens = 0.62 + 0.38 * (rho / 1.225);            // density altitude
   const inflow = 1 - 0.42 * clamp(st.vel.y / 10, -0.25, 1); // climb costs power
@@ -511,7 +525,7 @@ function stepHeli(
       crash(st, 'TOUCHED DOWN ON STEEP GROUND');
       return;
     }
-    if (vh > 16) {
+    if (Math.hypot(st.vel.x, st.vel.z) > 16) { // GROUND speed — wind doesn't dig skids in
       crash(st, 'SKIDS DUG IN — TOO FAST');
       return;
     }

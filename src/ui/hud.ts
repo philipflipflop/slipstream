@@ -25,6 +25,7 @@ export interface HudData {
   stalled: boolean;
   afterburner: boolean;
   vne: number;        // m/s
+  wind: null | { fromDeg: number; kt: number };
   heli: null | {
     trq: number;      // engine torque 0..1 (0 with the engine cut)
     nr: number;       // rotor RPM, 1 = 100%
@@ -340,6 +341,13 @@ export class Hud {
     // groundspeed readout just under the airspeed box
     ctx.fillStyle = this.g(0.85);
     ctx.fillText(`GS ${Math.round(d.groundspeed * MS_TO_KT)}`, x + 4 * s, cy + 26 * s);
+    if (d.wind) {
+      ctx.fillStyle = this.g(0.55);
+      ctx.fillText(
+        `W ${String(Math.round(d.wind.fromDeg)).padStart(3, '0')}°/${d.wind.kt}`,
+        x + 4 * s, cy + 42 * s,
+      );
+    }
 
     if (!full) return;
 

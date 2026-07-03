@@ -87,6 +87,22 @@ Cloudflare builds with **npm 10.9.2**; local npm is 11. Two rules:
 - PAPI (airport.ts): four boxes per field, per-frame red/white from the
   aircraft's actual angle to each box vs [3.5, 3.2, 2.8, 2.5]°; world
   positions captured after the field pivot via getWorldPosition.
+- Airfield lights are treated as POINT SOURCES: fog:false materials +
+  per-frame rescaling so they hold ~2–3 px at any range (night divisor
+  350, cap 60×), plus a white/green beacon + steady glow sprite per field
+  after dark. GOTCHA: SpriteMaterial sizeAttenuation:false renders
+  nothing under the logarithmicDepthBuffer — scale world-size sprites
+  linearly with distance instead. InstancedMesh light strings need
+  frustumCulled = false (their bounds are the tiny base geometry).
+- Wind: `setWind(vx, vz)` in flightModel (module state, default calm —
+  tests stay bit-exact). Aero uses air-relative velocity, integration is
+  inertial. Heli ground-contact checks must use GROUND speed, not air.
+  main.rollWind(): random 3–15 kt in free flight, calm in races/autofly,
+  `?wind=hdg,kt` override; windsock orientation via Airport.setWind.
+- Streaming is EUCLIDEAN (disc, not Chebyshev square): requeue/feed/
+  finalize all use hypot; the far-shell hole (rebuildFarIndex) is a
+  matching circle at effRadius − 2.2 chunks. Keep any new ring logic
+  circular or the square horizon returns at altitude.
 - Conventions: -Z = north = heading 0; runway along Z at origin; heading =
   `atan2(fwd.x, -fwd.z)`.
 

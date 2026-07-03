@@ -16,7 +16,7 @@ import { Airport } from './world/airport';
 import { RingCourse, RING_COUNT } from './world/rings';
 import { GunneryRange } from './combat/range';
 import { ObstacleField } from './world/obstacles';
-import { setTurbulence, crash } from './aircraft/flightModel';
+import { setTurbulence, setWind, crash } from './aircraft/flightModel';
 import { Route, bearingTo, distanceTo } from './nav/route';
 import { Aircraft } from './aircraft/aircraft';
 import { specById } from './aircraft/catalog';
@@ -90,6 +90,10 @@ class Game {
   private autoFly = false;
   private spawnField = AIRPORTS[0];
 
+  // steady wind for this flight (aviation: heading it blows FROM + knots)
+  private windFromDeg = 0;
+  private windKt = 0;
+
   private daylight: DaylightPreset;
 
   constructor() {
@@ -132,7 +136,7 @@ class Game {
     this.terrain = new TerrainManager(this.scene, this.gen, this.daylight.windowGlow);
     // without the log depth buffer the water needs the depth-bias path
     this.water = new Water(this.scene, this.sky.fogColor, this.sky.sunDir, this.coarseDepth, this.daylight);
-    this.airport = new Airport(this.scene, this.gen);
+    this.airport = new Airport(this.scene, this.gen, this.daylight.landingLight);
     this.rings = new RingCourse(this.scene, this.gen);
     this.obstacles = new ObstacleField(this.gen);
     this.range = new GunneryRange(this.scene, this.gen);
@@ -430,23 +434,25 @@ class Game {
       this.terrain.radius = 8;
       this.terrain.buildBudget = 2;
     }
-    this.terrain.altBonus = q === 'low' ? 3 : q === 'medium' ? 5 : 6;
+    // circular streaming holds ~27% fewer chunks than the old square at the
+    // same radius — spent here on a wider high-altitude reach
+    this.terrain.altBonus = q === 'low' ? 4 : q === 'medium' ? 7 : 8;
     // far horizon shell density, how far each LOD reaches (in rings), and
     // how far the fog may open up at altitude (cap stays well inside the
     // shell so its edge is never visible)
     const t = this.terrain;
     if (q === 'low') {
-      t.configureFar(80, 600); // 48 km shell
+      t.configureFar(80, 680); // 54 km shell
       [t.ultraRing, t.fineRing, t.midRing, t.fineRingHigh, t.midRingHigh] = [-1, 2, 5, 3, 6];
-      this.fogFarCap = 14000;
+      this.fogFarCap = 15000;
     } else if (q === 'medium') {
-      t.configureFar(150, 360); // 54 km shell
+      t.configureFar(150, 460); // 69 km shell
       [t.ultraRing, t.fineRing, t.midRing, t.fineRingHigh, t.midRingHigh] = [0, 3, 6, 4, 7];
-      this.fogFarCap = 20000;
+      this.fogFarCap = 23000;
     } else {
-      t.configureFar(210, 300); // 63 km shell
+      t.configureFar(210, 380); // 80 km shell
       [t.ultraRing, t.fineRing, t.midRing, t.fineRingHigh, t.midRingHigh] = [1, 4, 6, 5, 9];
-      this.fogFarCap = 26000;
+      this.fogFarCap = 30000;
     }
     const view = this.terrain.radius * CHUNK_SIZE;
     this.baseFogNear = view * 0.38;
@@ -482,9 +488,35 @@ class Game {
     persist(this.save);
   }
 
+  /**
+   * Roll the flight's wind. Free flight gets a light random breeze (3–15 kt)
+   * so no two approaches are the same; races and autofly smoke tests stay
+   * calm so times and trajectories are comparable. ?wind=hdg,kt overrides.
+   */
+  private rollWind(): void {
+    const p = new URLSearchParams(location.search).get('wind');
+    if (p) {
+      const [h, k] = p.split(',').map(Number);
+      this.windFromDeg = ((h || 0) % 360 + 360) % 360;
+      this.windKt = Math.max(0, k || 0);
+    } else if (this.save.mode === 'race' || this.autoFly) {
+      this.windFromDeg = 0;
+      this.windKt = 0;
+    } else {
+      this.windFromDeg = Math.floor(Math.random() * 360);
+      this.windKt = Math.round(3 + Math.random() * 12);
+    }
+    const ms = this.windKt / MS_TO_KT;
+    const rad = (this.windFromDeg * Math.PI) / 180;
+    // wind vector points TOWARD from-heading + 180°
+    setWind(-Math.sin(rad) * ms, Math.cos(rad) * ms);
+    this.airport.setWind(rad, this.windKt);
+  }
+
   private startFlight(): void {
     this.sound.init();
     this.input.resetForFlight();
+    this.rollWind();
     this.aircraft.resetOnRunway(this.heightFn, this.spawnField);
     this.sound.setEngineKind(this.aircraft.spec.engine);
     this.flightCam.set('chase');
@@ -505,7 +537,14 @@ class Game {
     this.minimap.show(true);
     this.touch?.show(true);
     this.touch?.setThrottle(0);
-    this.screens.toast(this.save.mode === 'race' ? 'RING RUSH — GO!' : 'CLEARED FOR TAKEOFF', 2400);
+    this.screens.toast(
+      this.save.mode === 'race'
+        ? 'RING RUSH — GO!'
+        : this.windKt > 0
+          ? `CLEARED FOR TAKEOFF — WIND ${String(this.windFromDeg).padStart(3, '0')}° AT ${this.windKt} KT`
+          : 'CLEARED FOR TAKEOFF',
+      2800,
+    );
   }
 
   private pause(): void {
@@ -860,10 +899,13 @@ class Game {
       c.roll = 0;
     }
     if (!st.onGround && radar > 50) c.gearDown = false;
+    const apDbg = (this.airport as unknown as { built: Map<string, { aeroBeacon: unknown }> }).built;
+    let beacons = 0;
+    for (const f of apDbg.values()) if (f.aeroBeacon) beacons++;
     document.title =
-      `v=${st.airspeed.toFixed(1)} y=${st.pos.y.toFixed(1)} z=${st.pos.z.toFixed(0)} ` +
+      `v=${st.airspeed.toFixed(1)} x=${st.pos.x.toFixed(0)} y=${st.pos.y.toFixed(1)} z=${st.pos.z.toFixed(0)} ` +
       `gnd=${st.onGround} thr=${c.throttle.toFixed(2)} tf=${st.thrustFrac.toFixed(2)} ` +
-      `pit=${st.pitchAngle.toFixed(2)} crash=${st.crashed}`;
+      `pit=${st.pitchAngle.toFixed(2)} crash=${st.crashed} flds=${apDbg.size} bcn=${beacons}`;
   }
 
   private crashFrame(dt: number): void {
@@ -919,6 +961,7 @@ class Game {
       stalled: st.stalled,
       afterburner: !!spec.afterburner && c.throttle >= 0.995,
       vne: spec.vne,
+      wind: this.windKt > 0 ? { fromDeg: this.windFromDeg, kt: this.windKt } : null,
       heli: spec.engine === 'heli'
         ? {
             trq: st.thrustFrac,

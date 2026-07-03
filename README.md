@@ -42,6 +42,19 @@ beacon/strobes plus a working landing light that pools on the tarmac in the flar
 Every runway also carries **PAPI** approach lights — four boxes beside the southern
 threshold showing real red/white glideslope indication ("two white two red,
 you're all right") computed live from your approach angle, day or night.
+Airfield lights behave like real point sources: edge lights and PAPI hold a
+couple of pixels at any range instead of vanishing, and after dark every field
+runs a rotating **white/green airport beacon** you can spot from 15+ km — that's
+how you find a runway at night.
+
+### Wind
+
+Free flight rolls a light breeze each takeoff (3–15 kt from a random heading —
+the tower calls it on the clearance, the HUD shows it under groundspeed, and
+every windsock points with it). All aerodynamics run on air-relative velocity,
+so crosswind drift, crab angles, IAS/GS splits, into-wind hovering and
+wind-aware autorotations all just emerge. Races and smoke tests stay calm so
+times are comparable; `?wind=hdg,kt` forces a specific wind.
 
 ## Flying
 
@@ -136,6 +149,7 @@ thrust model) — the handling differences fall out of the numbers, not scripts.
 - `&ff=60` — fast-forward N seconds of physics before the first frame
 - `&ac=vector` — select aircraft (`skylark`, `islander`, `jetranger`, `falcon`, `vector`, `meridian`)
 - `&tod=night` — time of day (`dawn`, `day`, `dusk`, `night`)
+- `&wind=240,12` — force wind (heading it blows from, knots); free flight is random otherwise
 - `&mode=race` — start in Ring Rush
 - `&touch=1` — force the touch UI on desktop
 - `&apt=1` — spawn at another fixed airfield (1 = Northgate, 2 = Highmoor)

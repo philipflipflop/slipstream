@@ -32,6 +32,9 @@ export interface DaylightPreset {
   waterShallow: number;
   waterDeep: number;
   glint: [number, number, number]; // specular sparkle colour on water
+  /** near-field wave-crest glitter (1 by day; ~0.1 at night or a black sea
+   *  renders a glowing dot grid instead of moonlight) */
+  glintNear: number;
   landingLight: boolean; // aircraft carry a working landing light
 }
 
@@ -60,6 +63,7 @@ export const DAYLIGHTS: DaylightPreset[] = [
     waterShallow: 0x3a7f96,
     waterDeep: 0x0a2c46,
     glint: [1.0, 0.72, 0.5],
+    glintNear: 0.55,
     landingLight: true,
   },
   {
@@ -86,6 +90,7 @@ export const DAYLIGHTS: DaylightPreset[] = [
     waterShallow: 0x2e8c9e,
     waterDeep: 0x0a3550,
     glint: [1.0, 0.92, 0.75],
+    glintNear: 1,
     landingLight: false,
   },
   {
@@ -112,6 +117,7 @@ export const DAYLIGHTS: DaylightPreset[] = [
     waterShallow: 0x3b6f86,
     waterDeep: 0x0a2740,
     glint: [1.0, 0.6, 0.35],
+    glintNear: 0.4,
     landingLight: true,
   },
   {
@@ -137,7 +143,10 @@ export const DAYLIGHTS: DaylightPreset[] = [
     cloudOpacity: 0.5,
     waterShallow: 0x14384a,
     waterDeep: 0x040f1c,
-    glint: [0.75, 0.85, 1.05],
+    // restrained: full-strength sparkle over a near-black sea reads as a
+    // glittering dot grid, not moonlight
+    glint: [0.5, 0.6, 0.8],
+    glintNear: 0.08,
     landingLight: true,
   },
 ];

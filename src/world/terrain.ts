@@ -429,8 +429,8 @@ export class TerrainManager {
     // keep the worker fed, nearest jobs first
     while (this.pending.size < MAX_INFLIGHT && this.queue.length > 0) {
       const job = this.queue.shift()!;
-      const ring = Math.max(Math.abs(job.cx - cx), Math.abs(job.cz - cz));
-      if (ring > this.effRadius()) continue; // stale
+      const ring = Math.hypot(job.cx - cx, job.cz - cz);
+      if (ring > this.effRadius() + 0.5) continue; // stale
       const key = `${job.cx},${job.cz}`;
       let res = this.resForRing(ring);
       const scatter = this.scatterForRing(ring);
@@ -486,11 +486,16 @@ export class TerrainManager {
     return true;
   }
 
+  // Rings are EUCLIDEAN chunk distance: coverage is a disc, so the horizon
+  // seam reads as distance haze in every direction instead of a square
+  // platform (Chebyshev coverage varied ±40% between axis and diagonal
+  // headings — that's what made high-altitude edges pop in as tiles). A
+  // disc also holds ~27% fewer chunks than the old square at the same
+  // radius, which pays for the wider high-altitude reach.
   private requeue(cx: number, cz: number): void {
     const radius = this.effRadius();
     for (const [key, chunk] of this.chunks) {
-      const ring = Math.max(Math.abs(chunk.cx - cx), Math.abs(chunk.cz - cz));
-      if (ring > radius + 1) {
+      if (Math.hypot(chunk.cx - cx, chunk.cz - cz) > radius + 1.5) {
         this.scene.remove(chunk.group);
         for (const d of chunk.disposables) d.dispose();
         this.chunks.delete(key);
@@ -499,9 +504,10 @@ export class TerrainManager {
     this.queue.length = 0;
     for (let dz = -radius; dz <= radius; dz++) {
       for (let dx = -radius; dx <= radius; dx++) {
+        const ring = Math.hypot(dx, dz);
+        if (ring > radius + 0.5) continue; // outside the disc
         const tx = cx + dx;
         const tz = cz + dz;
-        const ring = Math.max(Math.abs(dx), Math.abs(dz));
         const want = this.resForRing(ring);
         const wantS = this.scatterForRing(ring);
         const existing = this.chunks.get(`${tx},${tz}`);
@@ -573,8 +579,9 @@ export class TerrainManager {
   }
 
   /**
-   * Re-index the shell, skipping quads fully inside the area the detailed
-   * chunk ring is guaranteed to cover (two rings of slack for streaming lag).
+   * Re-index the shell, skipping quads fully inside the DISC the detailed
+   * chunk coverage is guaranteed to fill (~2 rings of slack for streaming
+   * lag) — the hole is circular to match the Euclidean streaming metric.
    * Index-only: vertices stay put, so this is cheap enough to run on every
    * chunk crossing.
    */
@@ -583,24 +590,25 @@ export class TerrainManager {
     const cells = this.farGeoCells;
     const cs = this.farGeoCell;
     const half = (cells * cs) / 2;
-    let hx0 = Infinity, hx1 = -Infinity, hz0 = Infinity, hz1 = -Infinity;
+    let ccx = Infinity, ccz = Infinity, holeR2 = -1;
     if (this.lastCx !== Infinity) {
-      const r = this.effRadius() - 2;
-      hx0 = (this.lastCx - r) * CHUNK_SIZE;
-      hx1 = (this.lastCx + r + 1) * CHUNK_SIZE;
-      hz0 = (this.lastCz - r) * CHUNK_SIZE;
-      hz1 = (this.lastCz + r + 1) * CHUNK_SIZE;
+      ccx = (this.lastCx + 0.5) * CHUNK_SIZE;
+      ccz = (this.lastCz + 0.5) * CHUNK_SIZE;
+      const holeR = (this.effRadius() - 2.2) * CHUNK_SIZE;
+      holeR2 = holeR > 0 ? holeR * holeR : -1;
     }
     const idx = this.farIndexArr;
     const n = cells + 1;
     let q = 0;
     for (let j = 0; j < cells; j++) {
       const z0 = this.farGeoOz - half + j * cs;
-      const inZ = z0 >= hz0 && z0 + cs <= hz1;
+      // farthest z-extent of this quad row from the hole centre
+      const dz = Math.max(Math.abs(z0 - ccz), Math.abs(z0 + cs - ccz));
       for (let i = 0; i < cells; i++) {
-        if (inZ) {
+        if (holeR2 > 0) {
           const x0 = this.farGeoOx - half + i * cs;
-          if (x0 >= hx0 && x0 + cs <= hx1) continue; // chunks cover this quad
+          const dx = Math.max(Math.abs(x0 - ccx), Math.abs(x0 + cs - ccx));
+          if (dx * dx + dz * dz < holeR2) continue; // chunks cover this quad
         }
         const a = j * n + i;
         const b = a + 1;
@@ -683,8 +691,8 @@ export class TerrainManager {
     const key = `${p.cx},${p.cz}`;
     if ((this.pending.get(key) ?? 0) === p.res * 4 + p.scatter) this.pending.delete(key);
 
-    const ring = Math.max(Math.abs(p.cx - this.lastCx), Math.abs(p.cz - this.lastCz));
-    if (ring > this.effRadius() + 1) return; // flew away while it was baking
+    const ring = Math.hypot(p.cx - this.lastCx, p.cz - this.lastCz);
+    if (ring > this.effRadius() + 1.5) return; // flew away while it was baking
 
     const old = this.chunks.get(key);
     if (old) {

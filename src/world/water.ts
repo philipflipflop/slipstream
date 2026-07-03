@@ -27,6 +27,7 @@ const FRAG = /* glsl */ `
   uniform vec3 uShallow;
   uniform vec3 uDeep;
   uniform vec3 uGlint;
+  uniform float uGlintNear;
   uniform vec3 uFogColor;
   uniform float uFogNear;
   uniform float uFogFar;
@@ -61,10 +62,13 @@ const FRAG = /* glsl */ `
     float fres = pow(1.0 - max(dot(viewDir, n), 0.0), 3.0);
     vec3 base = mix(uDeep, uShallow, fres * 0.7 + 0.12);
 
-    // sun/moon glint (sparkle also calms with distance)
+    // sun/moon glint (sparkle also calms with distance). uGlintNear damps
+    // the NEAR-field wave-crest glitter: over a bright daytime sea it reads
+    // as sparkle, over a near-black night sea the same term reads as a
+    // glowing dot grid — night presets fade it and keep the distant path
     vec3 hv = normalize(viewDir + uSunDir);
-    float spec = pow(max(dot(n, hv), 0.0), 220.0) * 1.6;
-    float sparkle = pow(max(dot(n, hv), 0.0), 36.0) * 0.25 * waveAmt;
+    float spec = pow(max(dot(n, hv), 0.0), 220.0) * 1.6 * mix(1.0, uGlintNear, waveAmt);
+    float sparkle = pow(max(dot(n, hv), 0.0), 36.0) * 0.25 * waveAmt * uGlintNear;
     vec3 col = base + (spec + sparkle) * uGlint;
 
     // LINEAR falloff matching THREE.Fog exactly — terrain and water must
@@ -83,8 +87,8 @@ export class Water {
     scene: THREE.Scene, fogColor: THREE.Color, sunDir: THREE.Vector3,
     coarseDepth = false, preset?: DaylightPreset,
   ) {
-    // big enough to underlie the entire far terrain shell (~63 km)
-    const geo = new THREE.PlaneGeometry(66000, 66000, 1, 1);
+    // big enough to underlie the entire far terrain shell (~80 km)
+    const geo = new THREE.PlaneGeometry(96000, 96000, 1, 1);
     geo.rotateX(-Math.PI / 2);
     this.mat = new THREE.ShaderMaterial({
       vertexShader: VERT,
@@ -104,6 +108,7 @@ export class Water {
         uShallow: { value: new THREE.Color(preset?.waterShallow ?? 0x2e8c9e) },
         uDeep: { value: new THREE.Color(preset?.waterDeep ?? 0x0a3550) },
         uGlint: { value: new THREE.Vector3(...(preset?.glint ?? [1.0, 0.92, 0.75])) },
+        uGlintNear: { value: preset?.glintNear ?? 1 },
         uFogColor: { value: fogColor.clone() },
         uFogNear: { value: 2000 },
         uFogFar: { value: 7000 },
