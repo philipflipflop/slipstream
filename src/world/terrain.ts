@@ -493,6 +493,7 @@ export class TerrainManager {
       const snap = this.farSnap();
       const ox = Math.round(px / snap) * snap;
       const oz = Math.round(pz / snap) * snap;
+      if (ox === this.farOx && oz === this.farOz) return; // nothing to gain
       this.farPending = true;
       if (this.worker) {
         this.worker.postMessage({ type: 'far', ox, oz, cells: this.farCells, cellSize: this.farCellSize });

@@ -443,16 +443,20 @@ class Game {
     // how far the fog may open up at altitude (cap stays well inside the
     // shell so its edge is never visible)
     const t = this.terrain;
+    // shell cellSize MUST share a small LCM with CHUNK_SIZE (900): the
+    // recenter grid is that LCM, so 380/460/680-m cells made the horizon
+    // lurch forward in 17–30 km jumps ("deficit builds, then the edge pops
+    // in one go") — 450/600 recenter every 900–1800 m, imperceptibly
     if (q === 'low') {
-      t.configureFar(80, 680); // 54 km shell
+      t.configureFar(90, 600); // 54 km shell
       [t.ultraRing, t.fineRing, t.midRing, t.fineRingHigh, t.midRingHigh] = [-1, 2, 5, 3, 6];
       this.fogFarCap = 15000;
     } else if (q === 'medium') {
-      t.configureFar(150, 460); // 69 km shell
+      t.configureFar(150, 450); // 67.5 km shell
       [t.ultraRing, t.fineRing, t.midRing, t.fineRingHigh, t.midRingHigh] = [0, 3, 6, 4, 7];
       this.fogFarCap = 23000;
     } else {
-      t.configureFar(210, 380); // 80 km shell
+      t.configureFar(180, 450); // 81 km shell
       [t.ultraRing, t.fineRing, t.midRing, t.fineRingHigh, t.midRingHigh] = [1, 4, 6, 5, 9];
       this.fogFarCap = 30000;
     }

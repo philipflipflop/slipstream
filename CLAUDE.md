@@ -54,7 +54,10 @@ Cloudflare builds with **npm 10.9.2**; local npm is 11. Two rules:
   music playing ('playback' stopped music like a video app; 'ambient'
   obeys the mute switch). The silent `<audio>` keepalive is only for
   pre-16.4 WebKit — that element itself pauses music, never add it back
-  on the modern path.
+  on the modern path. iOS also parks interrupted contexts in state
+  'interrupted' (WebKit extension) — resume on ANY state !== 'running'
+  (every pointer gesture hits init via the body capture listener) and on
+  visibilitychange, or the sim stays silent after Siri/calls/app switches.
 - Ground physics: below 1.5 m/s ground speed, aero yaw moments are zeroed
   (static tire grip) — parked aircraft must not weathervane or slide in
   wind (pinned in tests/14).
@@ -117,6 +120,15 @@ Cloudflare builds with **npm 10.9.2**; local npm is 11. Two rules:
   disc and the below-horizon sky dome (groundGlow ≈ 0.95–0.97 of fog)
   must stay near the fog colour or the shell edge ghosts through as a
   colour step at altitude. Keep any new ring logic circular.
+- far-shell cellSize MUST have a small LCM with CHUNK_SIZE (900) — the
+  recenter snap grid is that LCM. 450→900, 600→1800 are fine; 380/460/680
+  gave 17–30 km snap grids and the horizon lurched forward in giant jumps
+  ("deficit builds then the edge pops in one go" at cruise).
+- Minimap sampling is LED ~15 s ahead along the ground track (pan
+  overrides the lead) — a lazily trailing sample centre leaves a black
+  band hatching in at the map's leading edge at speed. The expanded chart
+  pans (drag; tap = waypoint, ⌖ ACFT recenters) — it draws from the
+  ANALYTIC heightfield, so planning range costs no 3D streaming.
 - The far-shell hole must NEVER outrun real coverage: rebuildFarIndex
   clamps it to nearestGapRing() − 1.2 (closest missing chunk), and it is
   re-punched wider when the queue drains (farHoleDirty). Punching the

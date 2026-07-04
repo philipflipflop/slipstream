@@ -69,13 +69,27 @@ export class SoundEngine {
   init(): void {
     this.claimMediaRoute();
     if (this.ctx) {
-      if (this.ctx.state === 'suspended') void this.ctx.resume();
+      // iOS reports 'interrupted' (a WebKit extension) after Siri, a call,
+      // or another app's audio session takes over — checking only
+      // 'suspended' left the context dead until a reload. Anything that
+      // isn't running gets a resume attempt (init fires on every pointer
+      // gesture via the body capture listener, so recovery is one tap).
+      if (this.ctx.state !== 'running') void this.ctx.resume().catch(() => {});
       return;
     }
     const AC = window.AudioContext ?? (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
     if (!AC) return;
     const ctx = new AC();
     this.ctx = ctx;
+
+    // coming back from the app switcher / an interruption: re-assert the
+    // audio session and revive the context without waiting for a tap
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden && this.ctx && this.ctx.state !== 'running') {
+        this.claimMediaRoute();
+        void this.ctx.resume().catch(() => {});
+      }
+    });
 
     this.master = ctx.createGain();
     this.master.gain.value = this.muted ? 0 : 0.7;

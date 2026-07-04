@@ -110,7 +110,9 @@ thrust model) — the handling differences fall out of the numbers, not scripts.
   seeded so they're always in the same place — each with its own runway heading. The
   minimap marks every runway as an oriented strip (so you can line up an approach from
   miles out) and always points the way home. Press `N` for the **flight computer**: a
-  zoomable north-up chart — click to drop waypoints (clicks near a runway snap to it),
+  zoomable, scrollable north-up chart — drag to pan far beyond the streamed horizon
+  (it draws from the analytic heightfield, so distant terrain and airfields cost no
+  3D rendering), click to drop waypoints (clicks near a runway snap to it),
   read per-leg true headings, distances and ETE, then ENGAGE NAV and the autopilot
   flies the plan, sequencing each fix.
 - **Ring Rush** — 14 gates against the clock. Best time per aircraft is saved locally.

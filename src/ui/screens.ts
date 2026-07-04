@@ -407,8 +407,9 @@ export class Screens {
             Flying 101: full throttle, let speed build past the white arc, then ease back.
             Keep the nose where the speed stays healthy — if <b style="color:var(--danger)">STALL</b> flashes,
             push forward and add power. Land into the runway slow, flaps down, gentle sink.
-            Press <kbd>N</kbd> for the flight computer: click the chart to plan a route
-            (clicks near a runway snap to it), then ENGAGE NAV and the autopilot flies it.
+            Press <kbd>N</kbd> for the flight computer: drag to scroll the chart far
+            beyond the horizon, click to plan a route (clicks near a runway snap to
+            it), then ENGAGE NAV and the autopilot flies it.
             In the Vector, hold <kbd>Space</kbd> airborne to fire — ten target balloons
             float east of Meridian Field.
             <b>Helicopter (Bell 505):</b> throttle is the collective — raise it past
