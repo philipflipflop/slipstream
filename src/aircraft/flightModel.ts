@@ -403,12 +403,16 @@ function stepHeli(
   const inflow = 1 - 0.42 * clamp(st.vel.y / 10, -0.25, 1); // climb costs power
   const fast = clamp((V / spec.vne - 0.85) / 0.3, 0, 1);    // retreating-blade droop
 
-  // autorotation: air rising up through the disc keeps the rotor driven —
-  // free thrust with the collective full down. With forward speed this
-  // settles into the textbook ~8 m/s / 3–4:1 glide; straight down the bite
-  // caps out and the sink rate stays brutal, exactly like the real manoeuvre
+  // autorotation: airflow through the disc keeps the rotor driven — free
+  // thrust with the collective full down. BOTH components matter: vertical
+  // upflow (descent, flares) AND forward airspeed across the disc (a
+  // turning rotor in forward flight keeps lifting immediately — that's how
+  // gyroplanes fly), so a collective chop at cruise eases into the glide
+  // instead of dropping out of the sky while the sink builds. Straight
+  // down the bite caps out and the sink rate stays brutal, as in life.
   const descend = Math.max(0, -_vLocal.y);
-  const autoBite = clamp(descend / 16, 0, 0.5);
+  const drive = descend + Math.min(vh, 50) * 0.064;
+  const autoBite = clamp(drive / 16, 0, 0.55);
   const effColl = Math.max(coll, autoBite);
 
   // vortex ring state ("power settling"): descending into your own downwash
@@ -429,7 +433,8 @@ function stepHeli(
   if (!engineOut) {
     st.rotorRpm += (1 - st.rotorRpm) * 1.4 * dt; // relight: governor spools NR back
   } else {
-    const nrEq = clamp(descend / 7.5, 0, 1.12) - coll * 0.55;
+    // forward airspeed drives the windmilling rotor too, not just descent
+    const nrEq = clamp(drive / 7.5, 0, 1.12) - coll * 0.55;
     st.rotorRpm += (Math.max(nrEq, 0) - st.rotorRpm) * 0.5 * dt;
   }
   st.rotorRpm = clamp(st.rotorRpm, 0, 1.15);
@@ -466,8 +471,11 @@ function stepHeli(
   // control authority rides on the rotor: a drooped disc barely answers
   const auth = clamp(0.15 + 0.85 * nr2, 0.15, 1);
 
-  const targetPitch = inp.pitch * 0.45;  // + = nose up, ~26° full deflection
-  const targetRoll = -inp.roll * 0.6;    // euler.z, − = bank right
+  // full deflection reaches ±40° pitch / ±54° bank — enough for steep
+  // turns and aggressive quick-stops without losing the SAS-stable feel
+  // (testers called the old ±26°/±34° envelope "on rails")
+  const targetPitch = inp.pitch * 0.7;   // + = nose up
+  const targetRoll = -inp.roll * 0.95;   // euler.z, − = bank right
   let aaX = ((targetPitch - _euler.x) * 4.5 * spec.pitchRate - av.x * 3.8) * auth;
   let aaZ = ((targetRoll - _euler.z) * 4.0 * spec.rollRate - av.z * 4.2) * auth;
 

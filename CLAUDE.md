@@ -56,7 +56,11 @@ Cloudflare builds with **npm 10.9.2**; local npm is 11. Two rules:
   `spec.engine === 'heli'` (Bell 505): throttle = collective, cyclic is
   attitude-command (`inp.pitch·0.45` / `−inp.roll·0.6` are the target Euler
   angles — the autopilot's heli branch writes attitude targets straight
-  through the stick), pedals are yaw rate. Realism terms (all in stepHeli,
+  through the stick; full deflection = ±40° pitch / ±54° bank), pedals
+  are yaw rate. The rotor is driven by BOTH vertical upflow and forward
+  airspeed (`drive = descend + min(vh,50)·0.064`) — chop the collective
+  at cruise and it eases into a ~1,450 fpm / ~4:1 glide instead of
+  free-falling while sink builds. Realism terms (all in stepHeli,
   each pinned by test 12): autorotation via `autoBite` (upflow drives the
   rotor — collective-down glides at ~1,700 fpm / 3:1, vertical drop stays
   deadly), vortex ring state (powered sink > ~6.5 m/s at vh < 11 loses lift
@@ -100,9 +104,18 @@ Cloudflare builds with **npm 10.9.2**; local npm is 11. Two rules:
   main.rollWind(): random 3–15 kt in free flight, calm in races/autofly,
   `?wind=hdg,kt` override; windsock orientation via Airport.setWind.
 - Streaming is EUCLIDEAN (disc, not Chebyshev square): requeue/feed/
-  finalize all use hypot; the far-shell hole (rebuildFarIndex) is a
-  matching circle at effRadius − 2.2 chunks. Keep any new ring logic
-  circular or the square horizon returns at altitude.
+  finalize all use hypot; the far shell's OUTER edge is also trimmed to a
+  disc and the below-horizon sky dome (groundGlow ≈ 0.95–0.97 of fog)
+  must stay near the fog colour or the shell edge ghosts through as a
+  colour step at altitude. Keep any new ring logic circular.
+- The far-shell hole must NEVER outrun real coverage: rebuildFarIndex
+  clamps it to nearestGapRing() − 1.2 (closest missing chunk), and it is
+  re-punched wider when the queue drains (farHoleDirty). Punching the
+  planned radius while chunks are still baking shows sky-dome void below
+  and makes every arriving tile pop against nothing — this was the true
+  cause of the "tiles jump into frame at altitude" reports. Streaming
+  radius grows through altitude TIERS (altBonusTiers[4], hysteresis at
+  1150/3200/5200 m up), and the finalize budget triples on deep backlogs.
 - Conventions: -Z = north = heading 0; runway along Z at origin; heading =
   `atan2(fwd.x, -fwd.z)`.
 

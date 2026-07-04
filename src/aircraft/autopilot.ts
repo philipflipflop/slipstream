@@ -70,7 +70,7 @@ export class Autopilot {
       if (rawTarget > -0.32 && rawTarget < 0.22) {
         this.pitchTrim = clamp(this.pitchTrim - spdErr * 0.008 * dt, -0.3, 0.3);
       }
-      c.pitch = clamp(clamp(rawTarget, -0.32, 0.22) / 0.45, -1, 1);
+      c.pitch = clamp(clamp(rawTarget, -0.32, 0.22) / 0.7, -1, 1);
 
       // heading: banked turns in cruise, pedals in the hover — holding a
       // hover heading with bank against the torque would orbit the spot
@@ -86,7 +86,7 @@ export class Autopilot {
       } else {
         c.yaw = 0;
       }
-      c.roll = clamp(bankTargetRight / 0.6, -1, 1);
+      c.roll = clamp(bankTargetRight / 0.95, -1, 1);
       return;
     }
 

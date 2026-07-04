@@ -453,11 +453,16 @@ html, body {
 .tbtn:active, .tbtn.held { background: rgba(255, 179, 64, .85); color: #1d1304; border-color: var(--amber-hot); }
 .tbtn.lit { border-color: var(--phos); color: var(--phos); }
 
+/* rudder pedals: big targets, spread toward both thumbs — helicopter
+   pedal work is constant, so these must be hittable without hunting */
 .rudder-zone {
-  position: absolute; bottom: calc(20px + var(--sab)); left: 50%; transform: translateX(-50%);
-  display: flex; gap: 8px; pointer-events: none;
+  position: absolute; bottom: calc(22px + var(--sab)); left: 50%; transform: translateX(-50%);
+  display: flex; gap: clamp(40px, 12vw, 130px); pointer-events: none;
 }
-.rudder-zone .tbtn { position: relative; pointer-events: auto; width: 64px; }
+.rudder-zone .tbtn {
+  position: relative; pointer-events: auto;
+  width: clamp(76px, 11vw, 104px); height: 58px; font-size: 12px;
+}
 
 /* landscape nudge */
 #rotate-hint {

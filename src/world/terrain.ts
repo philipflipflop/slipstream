@@ -271,9 +271,11 @@ export class TerrainManager {
   radius = 7;
   /** payload finalizations (GPU uploads) per frame */
   buildBudget = 2;
-  /** extra rings streamed in when flying high, set by quality preset */
-  altBonus = 4;
-  private highAlt = false;
+  /** extra rings per altitude tier [ground, low, mid, high]: the visible
+   *  seam distance must grow with how far you can see, or the leading edge
+   *  hatches tiles in plain view at 20k ft (set by quality preset) */
+  altBonusTiers = [0, 4, 6, 8];
+  private altTier = 0;
 
   // far shell: one coarse mega-mesh of the horizon underneath the chunk ring
   private farMesh: THREE.Mesh | null = null;
@@ -293,6 +295,8 @@ export class TerrainManager {
 
   // running geomorph animations (one per freshly finalized chunk)
   private morphs: Array<{ u: { value: number }; t: number }> = [];
+  // shell hole needs re-punching once coverage completes
+  private farHoleDirty = false;
 
   /** 0 = day (no cost); > 0 lights the city windows at that intensity and
    *  > 0.3 also fits blinking red obstruction beacons to the supertalls.
@@ -362,9 +366,10 @@ export class TerrainManager {
   // view, so the fine rings reach further out (but ultra is skipped: 8 m
   // facets are indistinguishable from 16 m ones a kilometre below you).
   private resForRing(ring: number): number {
-    if (!this.highAlt && ring <= this.ultraRing) return 112;
-    if (ring <= (this.highAlt ? this.fineRingHigh : this.fineRing)) return 56;
-    if (ring <= (this.highAlt ? this.midRingHigh : this.midRing)) return 28;
+    const high = this.altTier >= 1;
+    if (!high && ring <= this.ultraRing) return 112;
+    if (ring <= (high ? this.fineRingHigh : this.fineRing)) return 56;
+    if (ring <= (high ? this.midRingHigh : this.midRing)) return 28;
     return 14;
   }
 
@@ -375,7 +380,7 @@ export class TerrainManager {
 
   /** Current streaming radius (widens at altitude so the view fills out). */
   effRadius(): number {
-    return this.radius + (this.highAlt ? this.altBonus : 0);
+    return this.radius + this.altBonusTiers[this.altTier];
   }
 
   /** Call every frame with the player position + height above ground. */
@@ -401,11 +406,18 @@ export class TerrainManager {
       }
     }
 
-    // hysteresis so the radius doesn't flap around the threshold
-    const wasHigh = this.highAlt;
-    this.highAlt = agl > (wasHigh ? 750 : 1150);
-    if (this.highAlt !== wasHigh && this.lastCx !== Infinity) {
-      this.requeue(this.lastCx, this.lastCz);
+    // altitude tiers with hysteresis so the radius doesn't flap around a
+    // threshold: reach keeps growing as you climb
+    {
+      const up = [1150, 3200, 5200];
+      const down = [750, 2600, 4400];
+      let tier = this.altTier;
+      if (tier < 3 && agl > up[tier]) tier++;
+      else if (tier > 0 && agl < down[tier - 1]) tier--;
+      if (tier !== this.altTier) {
+        this.altTier = tier;
+        if (this.lastCx !== Infinity) this.requeue(this.lastCx, this.lastCz);
+      }
     }
 
     if (cx !== this.lastCx || cz !== this.lastCz) {
@@ -414,9 +426,22 @@ export class TerrainManager {
       this.requeue(cx, cz);
     }
 
-    // upload finished payloads (budgeted — uploads are cheap but not free)
-    for (let i = 0; i < this.buildBudget && this.results.length > 0; i++) {
+    // upload finished payloads (budgeted — uploads are cheap but not free).
+    // A deep backlog (altitude-tier requeue floods hundreds of far res-14
+    // chunks) triples the budget: those payloads are tiny and the view
+    // fills out in seconds instead of a quarter minute.
+    const budget = this.queue.length + this.results.length > 120
+      ? this.buildBudget * 3
+      : this.buildBudget;
+    for (let i = 0; i < budget && this.results.length > 0; i++) {
       this.finalize(this.results.shift()!);
+    }
+
+    // once the queue fully drains, re-punch the shell hole out to the now-
+    // complete coverage (it was held small while chunks were missing)
+    if (this.farHoleDirty && this.pending.size === 0 && this.queue.length === 0) {
+      this.farHoleDirty = false;
+      this.rebuildFarIndex();
     }
 
     // far shell: swap in a freshly baked horizon
@@ -578,12 +603,26 @@ export class TerrainManager {
     this.scene.add(mesh);
   }
 
+  /** Distance (in rings) of the closest missing chunk inside the disc. */
+  private nearestGapRing(): number {
+    const R = Math.ceil(this.effRadius());
+    for (let r = 0; r <= R; r++) {
+      for (let dz = -r; dz <= r; dz++) {
+        for (let dx = -r; dx <= r; dx++) {
+          if (Math.max(Math.abs(dx), Math.abs(dz)) !== r) continue; // ring shell only
+          if (Math.hypot(dx, dz) > this.effRadius() + 0.5) continue;
+          if (!this.chunks.has(`${this.lastCx + dx},${this.lastCz + dz}`)) return r;
+        }
+      }
+    }
+    return R + 1;
+  }
+
   /**
    * Re-index the shell, skipping quads fully inside the DISC the detailed
-   * chunk coverage is guaranteed to fill (~2 rings of slack for streaming
-   * lag) — the hole is circular to match the Euclidean streaming metric.
-   * Index-only: vertices stay put, so this is cheap enough to run on every
-   * chunk crossing.
+   * chunk coverage ACTUALLY fills — the hole is circular to match the
+   * Euclidean streaming metric. Index-only: vertices stay put, so this is
+   * cheap enough to run on every chunk crossing.
    */
   private rebuildFarIndex(): void {
     if (!this.farGeo || !this.farIndexArr) return;
@@ -594,19 +633,33 @@ export class TerrainManager {
     if (this.lastCx !== Infinity) {
       ccx = (this.lastCx + 0.5) * CHUNK_SIZE;
       ccz = (this.lastCz + 0.5) * CHUNK_SIZE;
-      const holeR = (this.effRadius() - 2.2) * CHUNK_SIZE;
+      // the hole must never outrun the chunks that actually EXIST: when
+      // streaming lags (fast climb, altitude-tier requeue, slow device) the
+      // shell keeps underlying the gap, so fresh tiles geomorph up from
+      // visible coarse terrain instead of popping in over sky-dome void
+      const holeRings = Math.min(this.effRadius() - 2.2, this.nearestGapRing() - 1.2);
+      const holeR = holeRings * CHUNK_SIZE;
       holeR2 = holeR > 0 ? holeR * holeR : -1;
     }
     const idx = this.farIndexArr;
     const n = cells + 1;
+    // the OUTER edge is a disc too (trim the square's corners): the terrain
+    // silhouette then reads as a circle at every scale, not a rounded square
+    const rimR2 = half * half;
     let q = 0;
     for (let j = 0; j < cells; j++) {
       const z0 = this.farGeoOz - half + j * cs;
       // farthest z-extent of this quad row from the hole centre
       const dz = Math.max(Math.abs(z0 - ccz), Math.abs(z0 + cs - ccz));
+      // nearest z-extent from the MESH centre (outer rim test)
+      const zr0 = z0 - this.farGeoOz;
+      const nz = zr0 > 0 ? zr0 : (zr0 + cs < 0 ? -(zr0 + cs) : 0);
       for (let i = 0; i < cells; i++) {
+        const x0 = this.farGeoOx - half + i * cs;
+        const xr0 = x0 - this.farGeoOx;
+        const nx = xr0 > 0 ? xr0 : (xr0 + cs < 0 ? -(xr0 + cs) : 0);
+        if (nx * nx + nz * nz > rimR2) continue; // outside the rim disc
         if (holeR2 > 0) {
-          const x0 = this.farGeoOx - half + i * cs;
           const dx = Math.max(Math.abs(x0 - ccx), Math.abs(x0 + cs - ccx));
           if (dx * dx + dz * dz < holeR2) continue; // chunks cover this quad
         }
@@ -784,6 +837,7 @@ export class TerrainManager {
     this.chunks.set(key, {
       key, cx: p.cx, cz: p.cz, res: p.res, scatter: p.scatter, counts, group, disposables,
     });
+    this.farHoleDirty = true; // coverage grew — widen the shell hole when idle
 
     // if this was a capped first build, queue the full-strength upgrade
     const want = this.resForRing(ring);

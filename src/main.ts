@@ -435,8 +435,10 @@ class Game {
       this.terrain.buildBudget = 2;
     }
     // circular streaming holds ~27% fewer chunks than the old square at the
-    // same radius — spent here on a wider high-altitude reach
-    this.terrain.altBonus = q === 'low' ? 4 : q === 'medium' ? 7 : 8;
+    // same radius — spent here on wider high-altitude reach, growing with
+    // altitude tiers so 20k ft still has terrain streaming ahead of the seam
+    this.terrain.altBonusTiers =
+      q === 'low' ? [0, 4, 5, 6] : q === 'medium' ? [0, 7, 9, 11] : [0, 8, 11, 14];
     // far horizon shell density, how far each LOD reaches (in rings), and
     // how far the fog may open up at altitude (cap stays well inside the
     // shell so its edge is never visible)
