@@ -80,8 +80,9 @@ On touch devices: left virtual stick (pitch/roll), right throttle lever (stays w
 set it), rudder pedals bottom-centre, hold-to-brake, and a top row of buttons — gear,
 flaps (cycles 0-1-2-3-2-1-0, so one tap takes a stop back out), camera, autopilot,
 speed brake and **NAV**, which opens the flight computer chart. Pause is the ⏸ button
-top-right. Sound plays through the media channel, so the iPhone mute switch doesn't
-silence it.
+top-right. Sound plays through the media channel as a *mixing* audio session
+('transient'), so the iPhone mute switch doesn't silence it and your background
+music keeps playing alongside it.
 
 **Takeoff:** full throttle, one notch of flaps, rotate gently past the middle of the
 speed tape. If `STALL` flashes — nose down, power up.

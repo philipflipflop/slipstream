@@ -293,8 +293,9 @@ export class TerrainManager {
   private farCells = 140;
   private farCellSize = 450;
 
-  // running geomorph animations (one per freshly finalized chunk)
-  private morphs: Array<{ u: { value: number }; t: number }> = [];
+  // running geomorph animations (one per freshly finalized chunk);
+  // dur stretches with distance so far tiles swell too slowly to notice
+  private morphs: Array<{ u: { value: number }; t: number; dur: number }> = [];
   // shell hole needs re-punching once coverage completes
   private farHoleDirty = false;
 
@@ -398,7 +399,7 @@ export class TerrainManager {
     // advance geomorphs: fresh chunks swell from the surface they replaced
     for (let i = this.morphs.length - 1; i >= 0; i--) {
       const m = this.morphs[i];
-      m.t = Math.min(m.t + dt / 1.1, 1);
+      m.t = Math.min(m.t + dt / m.dur, 1);
       m.u.value = m.t * m.t * (3 - 2 * m.t);
       if (m.t >= 1) {
         this.morphs[i] = this.morphs[this.morphs.length - 1];
@@ -762,7 +763,10 @@ export class TerrainManager {
     geo.setAttribute('baseY', new THREE.BufferAttribute(p.baseY, 1));
     geo.setIndex(new THREE.BufferAttribute(p.index, 1));
 
-    const morph = { u: { value: 0 }, t: 0 };
+    // nearby chunks swell in ~a second; the outer rings take several — at
+    // that range a slow swell reads as nothing at all (this is what kills
+    // the residual "tiles hatch at the edge" feel at altitude)
+    const morph = { u: { value: 0 }, t: 0, dur: 1.1 + Math.min(ring, 20) * 0.14 };
     this.morphs.push(morph);
     const mat = this.makeChunkMat(morph.u);
 

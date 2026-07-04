@@ -103,15 +103,25 @@ const mkInp = (o = {}) => ({
   console.log(`  ✓ hover hold fights a 10 kt breeze (${wander.toFixed(0)} m wander in 60 s)`);
 }
 
-// ground roll: parked aircraft stays parked in wind (friction wins)
+// ground grip: a parked jet in a 10 kt crosswind neither slides sideways
+// nor weathervanes — tire grip reacts the aero forces (playtester report:
+// the Vector was creeping sideways on the runway before takeoff)
 {
-  const sk = specById('skylark');
+  const vec = specById('vector');
   const st = createState();
-  spawnOnRunway(sk, st, flat);
-  setWind(-7, 0);
+  spawnOnRunway(vec, st, flat);
+  const h0 = st.heading;
+  const x0 = st.pos.x, z0 = st.pos.z;
+  setWind(-5.1, 0); // 10 kt from the east
   const inp = mkInp();
-  for (let t = 0; t < 10; t += dt) stepFlight(sk, st, inp, dt, flat);
+  for (let t = 0; t < 20; t += dt) stepFlight(vec, st, inp, dt, flat);
   setWind(0, 0);
-  assert.ok(Math.hypot(st.vel.x, st.vel.z) < 0.5, 'parked aircraft blown down the apron');
-  console.log('  ✓ parked aircraft holds position in wind');
+  let dh = st.heading - h0;
+  while (dh > Math.PI) dh -= 2 * Math.PI;
+  while (dh < -Math.PI) dh += 2 * Math.PI;
+  const slid = Math.hypot(st.pos.x - x0, st.pos.z - z0);
+  assert.ok(Math.hypot(st.vel.x, st.vel.z) < 0.5, 'parked jet blown down the apron');
+  assert.ok(Math.abs(dh) < 0.035, `parked jet weathervaned (${(dh * 57.3).toFixed(1)}°)`);
+  assert.ok(slid < 1.5, `parked jet slid ${slid.toFixed(1)} m in a 10 kt crosswind`);
+  console.log(`  ✓ parked jet holds heading and position in a 10 kt crosswind (${(dh * 57.3).toFixed(2)}°, ${slid.toFixed(2)} m)`);
 }

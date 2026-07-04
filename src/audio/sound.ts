@@ -36,15 +36,26 @@ export class SoundEngine {
   /**
    * iOS routes WebAudio through the *ringer* channel by default, so the
    * mute switch silences the sim even with the media volume up. Declaring
-   * the session as 'playback' (Safari 16.4+) — and, as a fallback for older
-   * WebKit, keeping a silent looping <audio> element alive — moves the page
-   * onto the media channel, like a video player.
+   * an audio session type (Safari 16.4+) moves us onto the media channel.
+   * 'transient' is the type that MIXES with background audio (the spec's
+   * "plays on top of playback audio") — 'playback' behaved like a video
+   * app and stopped the user's music. If 'transient' isn't accepted, fall
+   * back to 'playback' (mute switch beats music). Older WebKit keeps the
+   * silent looping <audio> keepalive — note that element is itself media
+   * playback and pauses music, which is why it's skipped when the modern
+   * API exists.
    */
   private claimMediaRoute(): void {
     const nav = navigator as Navigator & { audioSession?: { type: string } };
-    try {
-      if (nav.audioSession) nav.audioSession.type = 'playback';
-    } catch { /* older Safari: fall through to the <audio> kick */ }
+    if (nav.audioSession) {
+      try {
+        nav.audioSession.type = 'transient';
+        if (nav.audioSession.type !== 'transient') nav.audioSession.type = 'playback';
+      } catch {
+        try { nav.audioSession.type = 'playback'; } catch { /* leave default */ }
+      }
+      return;
+    }
     if (!this.mediaKick) {
       const a = document.createElement('audio');
       a.loop = true;

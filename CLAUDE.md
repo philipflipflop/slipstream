@@ -49,6 +49,15 @@ Cloudflare builds with **npm 10.9.2**; local npm is 11. Two rules:
 - Patterns painted into vertex colours must respect the `texel` param of
   `colorAt` (city street grid fades to its average tone when under-sampled) —
   otherwise coarse LODs and the far shell alias into shimmering moiré.
+- iOS audio: `navigator.audioSession.type = 'transient'` (sound.ts) — the
+  MIXING media-channel type: bypasses the mute switch AND keeps the user's
+  music playing ('playback' stopped music like a video app; 'ambient'
+  obeys the mute switch). The silent `<audio>` keepalive is only for
+  pre-16.4 WebKit — that element itself pauses music, never add it back
+  on the modern path.
+- Ground physics: below 1.5 m/s ground speed, aero yaw moments are zeroed
+  (static tire grip) — parked aircraft must not weathervane or slide in
+  wind (pinned in tests/14).
 - Mobile rendering: touch devices skip the logarithmic depth buffer, so they rely
   on the AGL-scaled near plane (main.ts frame()) + the water sheet's polygon
   offset/raise (`Water` `coarseDepth` flag) to avoid shoreline z-fighting.

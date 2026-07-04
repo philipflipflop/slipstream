@@ -319,6 +319,11 @@ export function stepFlight(
       st.vel.addScaledVector(_hVel.normalize(), -drop);
     }
 
+    // tire grip: parked, the wheels react aero yaw moments STATICALLY — a
+    // real jet sits dead still in a 10 kt crosswind, it neither slides nor
+    // weathervanes. Grip yields progressively as ground speed builds.
+    aaY *= gs < 1.5 ? 0 : 0.12 * clamp(gs / 15, 0.3, 1);
+
     // nosewheel steering, fading with speed
     const steer = -inp.yaw * 1.1 * clamp(1 - gs / 90, 0.18, 1) * clamp(gs / 4, 0, 1);
     aaY += (steer - av.y) * 6;
