@@ -483,12 +483,19 @@ export class TerrainManager {
       }
     }
 
-    // recentre the horizon shell only when no chunk work is outstanding —
-    // it's the biggest single job and must never delay nearby terrain
-    // (the queue drains between chunk crossings even at fighter speeds)
+    // recentre the horizon shell preferably when no chunk work is
+    // outstanding — it's the biggest single job. But at cruise in the top
+    // altitude tier the queue may NEVER fully drain (slower devices), and
+    // a starved shell drifts kilometres stale then lurches forward in one
+    // visible step; past ~7 km of drift the rebuild goes ahead of the
+    // chunk queue (one ~100 ms worker job every few km — imperceptible).
+    const farDrift = Math.max(Math.abs(px - this.farOx), Math.abs(pz - this.farOz));
     if (
-      !this.farPending && this.pending.size === 0 && this.queue.length === 0 &&
-      (Math.abs(px - this.farOx) > 4500 || Math.abs(pz - this.farOz) > 4500)
+      !this.farPending &&
+      // the FIRST build still waits for boot chunks (never delay spawn
+      // terrain); only re-centres of an existing shell may jump the queue
+      ((this.farMesh !== null && farDrift > 6800) ||
+        (this.pending.size === 0 && this.queue.length === 0 && farDrift > 4500))
     ) {
       const snap = this.farSnap();
       const ox = Math.round(px / snap) * snap;

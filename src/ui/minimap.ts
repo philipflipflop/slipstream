@@ -223,29 +223,33 @@ export class Minimap {
     const vx = px + (this.expanded ? this.panX : 0);
     const vz = pz + (this.expanded ? this.panZ : 0);
 
-    // sample around a point LED ahead of the view along the track — at
-    // 400 kt a lazily-trailing centre used to leave a black band hatching
-    // in at the leading edge every ~20 s (pan overrides the lead)
+    // sample a square GROWN by a lead along the track and centred ahead:
+    // it must cover the full display circle around the aircraft (no
+    // trailing gap) AND reach ahead so the direction of travel is always
+    // painted (no leading gap hatching in every ~20 s at cruise). Pan
+    // overrides the lead.
     const panned = this.expanded && (this.panX !== 0 || this.panZ !== 0);
     const lead = panned ? 0 : Math.min(gs * 15, RANGE * 0.45);
     const lookX = vx + Math.sin(heading) * lead;
     const lookZ = vz - Math.cos(heading) * lead;
+    const half = RANGE + lead; // sampled half-width ≥ display radius + lead
 
     // refresh a few sample rows per frame, re-centring before the view
     // can outrun the sampled square
-    const stale = Math.hypot(lookX - this.centerX, lookZ - this.centerZ) > RANGE * 0.16 || this.sampleRange !== RANGE;
+    const stale = Math.hypot(lookX - this.centerX, lookZ - this.centerZ) > RANGE * 0.16 ||
+      Math.abs(half - this.sampleRange) > RANGE * 0.2;
     if (stale || this.sampleRow > 0) {
       if (this.sampleRow === 0) {
         this.centerX = lookX;
         this.centerZ = lookZ;
-        this.sampleRange = RANGE;
+        this.sampleRange = half;
       }
       const rows = this.expanded ? 8 : 4;
       for (let r = 0; r < rows && this.sampleRow < GRID; r++, this.sampleRow++) {
         const j = this.sampleRow;
-        const wz = this.centerZ - RANGE + (j / (GRID - 1)) * RANGE * 2;
+        const wz = this.centerZ - this.sampleRange + (j / (GRID - 1)) * this.sampleRange * 2;
         for (let i = 0; i < GRID; i++) {
-          const wx = this.centerX - RANGE + (i / (GRID - 1)) * RANGE * 2;
+          const wx = this.centerX - this.sampleRange + (i / (GRID - 1)) * this.sampleRange * 2;
           this.samples[j * GRID + i] = this.gen.heightAt(wx, wz);
         }
       }
@@ -297,8 +301,10 @@ export class Minimap {
     ctx.translate(c, c);
     ctx.rotate(rot);
 
-    // terrain blobs (sampled around a possibly stale centre — fine here)
-    const cell = (S / GRID) * 1.45;
+    // terrain blobs (sampled around a possibly stale centre — fine here).
+    // Blob size scales with the sampled area so a lead-grown square still
+    // paints gap-free.
+    const cell = (S / GRID) * 1.45 * Math.max(this.sampleRange / RANGE, 1);
     const toMap = (S * 0.5) / RANGE;
     for (let j = 0; j < GRID; j++) {
       const wz = this.centerZ - this.sampleRange + (j / (GRID - 1)) * this.sampleRange * 2;

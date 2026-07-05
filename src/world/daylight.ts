@@ -15,8 +15,9 @@ export interface DaylightPreset {
   sunDir: [number, number, number];
   zenith: number;
   horizon: number;       // horizon band = fog colour (seamless melt)
-  groundGlow: number;    // below-horizon dome ≈ fog (≪1 makes the far shell's
-                         // fogged edge visible as a colour step at altitude)
+  groundGlow: number;    // below-horizon dome colour scale — MUST be 1 (exact
+                         // fog match) or the fog-saturation radius reads as a
+                         // crisp disc rim from high altitude
   discColor: number;     // sun/moon disc
   discBoost: number;     // disc brightness (moon is far dimmer than sun)
   glowColor: [number, number, number]; // haze around the disc
@@ -47,7 +48,7 @@ export const DAYLIGHTS: DaylightPreset[] = [
     sunDir: [0.72, 0.1, -0.42],
     zenith: 0x46589e,
     horizon: 0xeec0a4,
-    groundGlow: 0.96,
+    groundGlow: 1,
     discColor: 0xffd9a8,
     discBoost: 5,
     glowColor: [1.0, 0.5, 0.25],
@@ -74,7 +75,7 @@ export const DAYLIGHTS: DaylightPreset[] = [
     sunDir: [0.42, 0.46, -0.55],
     zenith: 0x2c63b8,
     horizon: 0xc6d3e0,
-    groundGlow: 0.97,
+    groundGlow: 1,
     discColor: 0xfff2cc,
     discBoost: 6,
     glowColor: [1.0, 0.55, 0.22],
@@ -101,7 +102,7 @@ export const DAYLIGHTS: DaylightPreset[] = [
     sunDir: [-0.78, 0.13, 0.25],
     zenith: 0x2b3060,
     horizon: 0xdd8d5c,
-    groundGlow: 0.95,
+    groundGlow: 1,
     discColor: 0xffb36b,
     discBoost: 5,
     glowColor: [1.0, 0.42, 0.18],
@@ -128,7 +129,7 @@ export const DAYLIGHTS: DaylightPreset[] = [
     sunDir: [0.35, 0.55, 0.35],
     zenith: 0x04070f,
     horizon: 0x0e1726,
-    groundGlow: 0.96,
+    groundGlow: 1,
     discColor: 0xeef3ff,
     discBoost: 2.4,
     glowColor: [0.55, 0.65, 0.9],
