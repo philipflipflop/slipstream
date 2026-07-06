@@ -263,6 +263,8 @@ class Game {
         case 'PageDown': e.preventDefault(); this.apAdjust('alt', -1); break;
         case 'Home': e.preventDefault(); this.apAdjust('spd', 1); break;
         case 'End': e.preventDefault(); this.apAdjust('spd', -1); break;
+        case 'Quote': this.apAdjust('vs', 1); break;
+        case 'Semicolon': this.apAdjust('vs', -1); break;
       }
     });
 
@@ -376,12 +378,15 @@ class Game {
     }
   }
 
-  /** Slew an autopilot target bug: hdg ±5°, alt ±500 ft, spd ±10 kt. */
-  private apAdjust(kind: 'hdg' | 'alt' | 'spd', dir: number): void {
+  /** Slew an autopilot target bug: hdg ±5°, alt ±500 ft, spd ±10 kt, V/S ±200 fpm. */
+  private apAdjust(kind: 'hdg' | 'alt' | 'spd' | 'vs', dir: number): void {
     if (!this.autopilot.engaged) return;
     if (kind === 'hdg') this.autopilot.adjustHeading(dir * 5 * Math.PI / 180);
     else if (kind === 'alt') this.autopilot.adjustAltitude(dir * 152.4);
-    else this.autopilot.adjustSpeed(dir * 5.144, this.aircraft.spec.vne * 0.92);
+    else if (kind === 'vs') {
+      const heli = this.aircraft.spec.engine === 'heli';
+      this.autopilot.adjustVs(dir * 1.016, heli ? 7.62 : 25.4); // cap 1,500 / 5,000 fpm
+    } else this.autopilot.adjustSpeed(dir * 5.144, this.aircraft.spec.vne * 0.92);
   }
 
   /** Practice engine failure (helicopter only): X cuts and relights. */
@@ -800,6 +805,7 @@ class Game {
           `${String(Math.round(hdg)).padStart(3, '0')}°`,
           `${Math.round(this.autopilot.targetAlt * M_TO_FT / 50) * 50} FT`,
           `${Math.round(this.autopilot.targetSpd * MS_TO_KT)} KT`,
+          `${Math.round(this.autopilot.targetVs * 196.85 / 100) * 100} FPM`,
         );
       }
     }

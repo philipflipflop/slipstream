@@ -13,6 +13,9 @@ export class Autopilot {
   targetAlt = 0;
   targetHdg = 0;
   targetSpd = 0;
+  /** V/S bug (m/s, magnitude): the climb/descent rate used to fly to the ALT
+   *  bug — a vertical-speed selector, like the VS wheel on a real AP. */
+  targetVs = 5.08;
   private minSpd = 30;
   private thrInt = 0;
   private pitchTrim = 0;
@@ -24,6 +27,7 @@ export class Autopilot {
     this.targetAlt = st.pos.y;
     this.targetHdg = st.heading;
     this.targetSpd = Math.max(st.airspeed, minSpd);
+    this.targetVs = minSpd === 0 ? 4.5 : 5.08; // 1,000 fpm default (900 heli)
     this.thrInt = throttle;
     this.pitchTrim = 0;
   }
@@ -46,6 +50,10 @@ export class Autopilot {
     this.targetSpd = clamp(this.targetSpd + deltaMs, this.minSpd, maxMs);
   }
 
+  adjustVs(deltaMs: number, maxMs: number): void {
+    this.targetVs = clamp(this.targetVs + deltaMs, 1.02, maxMs); // ≥200 fpm
+  }
+
   /** Overwrites pitch/roll/yaw/throttle in `c`. Call once per frame. */
   update(spec: AircraftSpec, st: FlightState, c: ControlInputs, dt: number): void {
     if (!this.engaged) return;
@@ -55,7 +63,7 @@ export class Autopilot {
     // AP can write attitude targets straight through the stick.
     if (spec.engine === 'heli') {
       const altErr = this.targetAlt - st.pos.y;
-      const vsTarget = clamp(altErr * 0.2, -4.5, 4.5);
+      const vsTarget = clamp(altErr * 0.2, -this.targetVs, this.targetVs);
       const vsErr = vsTarget - st.vel.y;
       this.thrInt = clamp(this.thrInt + vsErr * 0.06 * dt, 0, 1);
       c.throttle = clamp(this.thrInt + vsErr * 0.10, 0, 1);
@@ -96,7 +104,7 @@ export class Autopilot {
     // so the AP can never stall the aircraft chasing altitude
     const spdMargin = clamp((st.airspeed - this.targetSpd * 0.75) / (this.targetSpd * 0.25), 0, 1);
     const altErr = this.targetAlt - st.pos.y;
-    let vsTarget = clamp(altErr * 0.15, -7, 5) * spdMargin;
+    let vsTarget = clamp(altErr * 0.15, -this.targetVs * 1.2, this.targetVs) * spdMargin;
     vsTarget -= (1 - spdMargin) * 5;
     const vsErr = vsTarget - st.vel.y;
 
@@ -115,9 +123,15 @@ export class Autopilot {
     c.roll = clamp((bankTargetRight - bankRight) * 1.8 + st.angVel.z * 0.5, -0.6, 0.6);
     c.yaw = 0;
 
-    // --- speed via throttle (PI, brisk enough to support climb demands) ---
+    // --- speed via throttle (PI + climb-power feed-forward) ---
+    // the feed-forward puts power on WITH the climb demand instead of waiting
+    // for airspeed to sag — without it pitch and throttle fight each other:
+    // climb → speed decays → protection washes the climb out → nose drops →
+    // speed recovers → climb resumes, a slow porpoise the pilot reads as
+    // "speed and height fighting"
     const spdErr = this.targetSpd - st.airspeed;
     this.thrInt = clamp(this.thrInt + spdErr * 0.04 * dt, 0, 1);
-    c.throttle = clamp(this.thrInt + spdErr * 0.06, 0, 1);
+    const climbFF = vsTarget * (vsTarget > 0 ? 0.035 : 0.012);
+    c.throttle = clamp(this.thrInt + spdErr * 0.06 + climbFF, 0, 1);
   }
 }

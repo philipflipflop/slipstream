@@ -30,8 +30,8 @@ export class Screens {
   onTod: (tod: TimeOfDay) => void = () => {};
   onSettings: () => void = () => {};
   onAnyClick: () => void = () => {};
-  /** kind: 'hdg' | 'alt' | 'spd'; dir: -1 | 1 */
-  onApAdjust: (kind: 'hdg' | 'alt' | 'spd', dir: number) => void = () => {};
+  /** kind: 'hdg' | 'alt' | 'spd' | 'vs'; dir: -1 | 1 */
+  onApAdjust: (kind: 'hdg' | 'alt' | 'spd' | 'vs', dir: number) => void = () => {};
 
   private save: SaveData;
   private menuEl!: HTMLDivElement;
@@ -44,7 +44,7 @@ export class Screens {
   private pauseBtn!: HTMLButtonElement;
   private rotateHint!: HTMLDivElement;
   private apPanel!: HTMLDivElement;
-  private apVals!: { hdg: HTMLElement; alt: HTMLElement; spd: HTMLElement };
+  private apVals!: { hdg: HTMLElement; alt: HTMLElement; spd: HTMLElement; vs: HTMLElement };
   private toastTimer = 0;
   private isTouch: boolean;
 
@@ -385,6 +385,7 @@ export class Screens {
       <div class="krow"><span>AP heading bug</span><kbd>[ / ]</kbd></div>
       <div class="krow"><span>AP altitude bug</span><kbd>PgUp / PgDn</kbd></div>
       <div class="krow"><span>AP speed bug</span><kbd>Home / End</kbd></div>
+      <div class="krow"><span>AP vertical-speed bug</span><kbd>; / '</kbd></div>
       <div class="krow"><span>Nav chart / flight computer</span><kbd>N</kbd></div>
       <div class="krow"><span>Chart zoom</span><kbd>, / .</kbd></div>
       <div class="krow"><span>Camera</span><kbd>C</kbd></div>
@@ -503,12 +504,13 @@ export class Screens {
   /* ---------------- misc ---------------- */
 
   /** Show/refresh the autopilot target panel (values pre-formatted). */
-  setApPanel(visible: boolean, hdg?: string, alt?: string, spd?: string): void {
+  setApPanel(visible: boolean, hdg?: string, alt?: string, spd?: string, vs?: string): void {
     this.apPanel.classList.toggle('show', visible);
     if (visible) {
       if (hdg !== undefined) this.apVals.hdg.textContent = hdg;
       if (alt !== undefined) this.apVals.alt.textContent = alt;
       if (spd !== undefined) this.apVals.spd.textContent = spd;
+      if (vs !== undefined) this.apVals.vs.textContent = vs;
     }
   }
 
@@ -528,17 +530,22 @@ export class Screens {
           <span class="ap-lbl">SPD</span><button data-d="-1">−</button>
           <span class="ap-val" data-v="spd">0 KT</span><button data-d="1">+</button>
         </div>
+        <div class="ap-row" data-k="vs">
+          <span class="ap-lbl">V/S</span><button data-d="-1">−</button>
+          <span class="ap-val" data-v="vs">1000 FPM</span><button data-d="1">+</button>
+        </div>
       </div>`);
     document.body.appendChild(this.apPanel);
     this.apVals = {
       hdg: this.apPanel.querySelector('[data-v="hdg"]')!,
       alt: this.apPanel.querySelector('[data-v="alt"]')!,
       spd: this.apPanel.querySelector('[data-v="spd"]')!,
+      vs: this.apPanel.querySelector('[data-v="vs"]')!,
     };
 
     // press = one tick; hold = auto-repeat, like a real AP bug knob
     this.apPanel.querySelectorAll<HTMLButtonElement>('button').forEach((b) => {
-      const kind = (b.parentElement as HTMLElement).dataset.k as 'hdg' | 'alt' | 'spd';
+      const kind = (b.parentElement as HTMLElement).dataset.k as 'hdg' | 'alt' | 'spd' | 'vs';
       const dir = Number(b.dataset.d);
       let timer = 0;
       let repeater = 0;

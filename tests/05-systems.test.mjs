@@ -54,6 +54,47 @@ function cruise(spec, v, alt = 800) {
   console.log(`  ✓ autopilot holds alt (Δ${(st.pos.y - 500).toFixed(1)} m), hdg, speed`);
 }
 
+// V/S bug: the selected vertical speed governs the climb to the ALT bug,
+// and the climb-power feed-forward keeps airspeed from sagging (the old
+// AP porpoised: climb → speed decay → washout → nose drop → repeat)
+{
+  const spec = CATALOG.find((s) => s.id === 'meridian');
+  const climb = (vsBug) => {
+    const st = cruise(spec, 150, 800);
+    const ap = new Autopilot();
+    const inp = baseInp();
+    stepFlight(spec, st, inp, dt, flat); // populate st.airspeed before capture
+    ap.engage(st, 0.6);
+    ap.targetAlt = 2100; // 1,300 m to climb — long enough to observe steady VS
+    ap.targetVs = vsBug;
+    let minSpd = Infinity;
+    let t0 = -1;
+    let t1 = -1;
+    for (let t = 0; t < 400; t += dt) {
+      ap.update(spec, st, inp, dt);
+      stepFlight(spec, st, inp, dt, flat);
+      minSpd = Math.min(minSpd, st.airspeed);
+      if (t0 < 0 && st.pos.y > 1000) t0 = t;   // steady-climb window:
+      if (t1 < 0 && st.pos.y > 1800) t1 = t;   // 1000 m → 1800 m
+      if (st.crashed) break;
+    }
+    assert.ok(!st.crashed, 'AP crashed during the climb');
+    assert.ok(t1 > 0, `never reached 1800 m (topped out at ${st.pos.y.toFixed(0)} m)`);
+    return { avgVs: 800 / (t1 - t0), minSpd, endAlt: st.pos.y };
+  };
+
+  const slow = climb(5.08);   // 1,000 fpm bug
+  const fast = climb(12.7);   // 2,500 fpm bug
+  assert.ok(Math.abs(slow.avgVs - 5.08) < 1.1, `VS bug 5.1: climbed at ${slow.avgVs.toFixed(1)} m/s`);
+  assert.ok(Math.abs(fast.avgVs - 12.7) < 2.6, `VS bug 12.7: climbed at ${fast.avgVs.toFixed(1)} m/s`);
+  assert.ok(fast.avgVs > slow.avgVs * 1.8, 'VS bug had no real authority over climb rate');
+  // speed must not sag into the protection band (75% of hold speed) —
+  // that sag/washout cycle was the "speed and height fight" complaint
+  assert.ok(slow.minSpd > 150 * 0.85, `speed sagged to ${slow.minSpd.toFixed(1)} m/s at 1,000 fpm`);
+  assert.ok(fast.minSpd > 150 * 0.8, `speed sagged to ${fast.minSpd.toFixed(1)} m/s at 2,500 fpm`);
+  console.log(`  ✓ V/S bug governs climb (${slow.avgVs.toFixed(1)} vs ${fast.avgVs.toFixed(1)} m/s), speed held (min ${Math.min(slow.minSpd, fast.minSpd).toFixed(0)} m/s)`);
+}
+
 // airbrake bleeds speed measurably faster
 {
   const spec = CATALOG.find((s) => s.id === 'vector');

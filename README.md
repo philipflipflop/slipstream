@@ -67,7 +67,7 @@ times are comparable; `?wind=hdg,kt` forces a specific wind.
 | Wheel brakes / **fire cannon** (airborne, Vector) | `Space` (hold) |
 | Speed brake (jets) | `B` |
 | Autopilot (alt + hdg + speed hold) | `T` — any stick input disengages |
-| Autopilot bugs | on-screen panel, or `[` `]` heading · `PgUp` `PgDn` altitude · `Home` `End` speed |
+| Autopilot bugs | on-screen panel, or `[` `]` heading · `PgUp` `PgDn` altitude · `Home` `End` speed · `;` `'` vertical speed |
 | Camera (chase / cockpit / orbit) | `C` |
 | Look around / zoom | mouse drag / wheel (recentres on release) |
 | HUD full / minimal / off | `H` |
