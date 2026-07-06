@@ -66,7 +66,14 @@ const up = buildChunkPayload(gen, 3, 2, 28, 0, 14, cellSize);
     if (!(c >= 0 && c <= 1)) { ok = false; break; }
   }
   assert.ok(ok, 'baseCols out of colour range');
-  console.log('  ✓ colour-morph starts present and in range');
+  // normal-morph starts: unit length, upward-facing
+  assert.equal(up.baseNrms.length, up.normals.length, 'baseNrms length mismatch');
+  for (let v = 0; v < up.baseNrms.length / 3; v++) {
+    const len = Math.hypot(up.baseNrms[v * 3], up.baseNrms[v * 3 + 1], up.baseNrms[v * 3 + 2]);
+    assert.ok(Math.abs(len - 1) < 1e-4, `baseNrm ${v} not unit (${len})`);
+    assert.ok(up.baseNrms[v * 3 + 1] > 0.05, `baseNrm ${v} points sideways/down`);
+  }
+  console.log('  ✓ colour- and normal-morph starts present and sane');
 }
 {
   const gridN = 28 + 3;

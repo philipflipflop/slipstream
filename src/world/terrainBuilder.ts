@@ -23,6 +23,10 @@ export interface ChunkPayload {
    *  texel — parent LOD or shell), blended to `colors` by the same uMorph so
    *  a fresh tile sharpens gradually instead of snapping to fine paint */
   baseCols: Float32Array;
+  /** per-vertex normal-morph start: normals of the morph-start surface, so
+   *  Lambert shading sharpens with the swell too — a normals snap reads as a
+   *  brightness pop at low sun even when the silhouette never moves */
+  baseNrms: Float32Array;
   index: Uint32Array;
   treeMats: Float32Array;   // conifers; 16 floats per instance (column-major)
   treeTints: Float32Array;  // 3 floats per conifer
@@ -156,6 +160,7 @@ export function buildChunkPayload(
   const colors = new Float32Array(vCount * 3);
   const baseY = new Float32Array(vCount);
   const baseCols = new Float32Array(vCount * 3);
+  const baseNrms = new Float32Array(vCount * 3);
   // colour-morph start texel: the parent LOD's step for an upgrade, the
   // shell cell for a brand-new chunk — matches whatever was on screen
   const baseTexel = prevRes > 0 ? CHUNK_SIZE / prevRes : shellCell;
@@ -200,6 +205,15 @@ export function buildChunkPayload(
       baseCols[v * 3] = colorTmp[0];
       baseCols[v * 3 + 1] = colorTmp[1];
       baseCols[v * 3 + 2] = colorTmp[2];
+
+      // normal of the morph-start surface (central differences of startH —
+      // piecewise-bilinear, so this reproduces the coarse faceting)
+      const bnx = startH(ci - 1, cj) - startH(ci + 1, cj);
+      const bnz = startH(ci, cj - 1) - startH(ci, cj + 1);
+      const bil = 1 / Math.hypot(bnx, ny, bnz);
+      baseNrms[v * 3] = bnx * bil;
+      baseNrms[v * 3 + 1] = ny * bil;
+      baseNrms[v * 3 + 2] = bnz * bil;
       v++;
     }
   }
@@ -223,7 +237,7 @@ export function buildChunkPayload(
   return {
     cx, cz, res,
     scatter: scatterLevel,
-    positions, normals, colors, baseY, baseCols, index,
+    positions, normals, colors, baseY, baseCols, baseNrms, index,
     treeMats: Float32Array.from(sc.treeMats),
     treeTints: Float32Array.from(sc.treeTints),
     leafMats: Float32Array.from(sc.leafMats),
@@ -476,7 +490,7 @@ function clampN(v: number, lo: number, hi: number): number {
 export function payloadTransfers(p: ChunkPayload): ArrayBuffer[] {
   return [
     p.positions.buffer, p.normals.buffer, p.colors.buffer, p.baseY.buffer,
-    p.baseCols.buffer, p.index.buffer,
+    p.baseCols.buffer, p.baseNrms.buffer, p.index.buffer,
     p.treeMats.buffer, p.treeTints.buffer, p.leafMats.buffer, p.leafTints.buffer,
     p.rockMats.buffer, p.rockTints.buffer, p.houseMats.buffer, p.houseTints.buffer,
     p.towerMats.buffer, p.towerTints.buffer, p.glassMats.buffer, p.glassTints.buffer,

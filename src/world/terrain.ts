@@ -695,12 +695,19 @@ export class TerrainManager {
     mat.onBeforeCompile = (sh) => {
       sh.uniforms.uMorph = u;
       sh.vertexShader =
-        'attribute float baseY;\nattribute vec3 baseCol;\nuniform float uMorph;\nvarying vec3 vTWorld;\n' +
+        'attribute float baseY;\nattribute vec3 baseCol;\nattribute vec3 baseNrm;\nuniform float uMorph;\nvarying vec3 vTWorld;\n' +
         sh.vertexShader
           .replace(
             '#include <begin_vertex>',
             '#include <begin_vertex>\n\ttransformed.y = mix(baseY, position.y, uMorph);' +
             '\n\tvTWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;',
+          )
+          // shading sharpens with the swell too: an instant normals snap
+          // reads as a brightness pop at low sun even though the silhouette
+          // is already morphing smoothly
+          .replace(
+            '#include <beginnormal_vertex>',
+            '#include <beginnormal_vertex>\n\tobjectNormal = normalize(mix(baseNrm, objectNormal, uMorph));',
           )
           // the paint sharpens with the same swell: colours start at the
           // replaced surface's coarse-texel palette (shell or parent LOD),
@@ -778,12 +785,13 @@ export class TerrainManager {
     geo.setAttribute('color', new THREE.BufferAttribute(p.colors, 3));
     geo.setAttribute('baseY', new THREE.BufferAttribute(p.baseY, 1));
     geo.setAttribute('baseCol', new THREE.BufferAttribute(p.baseCols, 3));
+    geo.setAttribute('baseNrm', new THREE.BufferAttribute(p.baseNrms, 3));
     geo.setIndex(new THREE.BufferAttribute(p.index, 1));
 
     // nearby chunks swell in ~a second; the outer rings take several — at
     // that range a slow swell reads as nothing at all (this is what kills
     // the residual "tiles hatch at the edge" feel at altitude)
-    const morph = { u: { value: 0 }, t: 0, dur: 1.1 + Math.min(ring, 20) * 0.14 };
+    const morph = { u: { value: 0 }, t: 0, dur: 1.1 + Math.min(ring, 24) * 0.16 };
     this.morphs.push(morph);
     const mat = this.makeChunkMat(morph.u);
 
