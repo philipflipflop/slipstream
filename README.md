@@ -128,8 +128,8 @@ thrust model) — the handling differences fall out of the numbers, not scripts.
   **Web Worker** — payloads arrive as transferable typed arrays, so the main thread never
   hitches while streaming nested-LOD chunks around the aircraft. Every LOD swap
   **geomorphs**: a chunk's vertices start on the exact surface they replace (the coarser
-  chunk, or the horizon shell) and swell to full detail over a second, so terrain never
-  pops. Beneath the chunk ring a
+  chunk, or the horizon shell) and swell to full detail over a second — shape *and*
+  colour, so arriving terrain sharpens rather than pops. Beneath the chunk ring a
   single coarse **horizon shell** (~60 km of the same heightfield, built as a conservative
   lower envelope) carries the terrain to the horizon; the fog opens up with altitude, so
   from 10,000 ft you see fading coastlines instead of the edge of the streamed grid.

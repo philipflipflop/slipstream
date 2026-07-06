@@ -19,6 +19,10 @@ export interface ChunkPayload {
   colors: Float32Array;
   /** per-vertex geomorph start height: the exact surface this chunk replaces */
   baseY: Float32Array;
+  /** per-vertex colour-morph start: the REPLACED surface's palette (coarse
+   *  texel — parent LOD or shell), blended to `colors` by the same uMorph so
+   *  a fresh tile sharpens gradually instead of snapping to fine paint */
+  baseCols: Float32Array;
   index: Uint32Array;
   treeMats: Float32Array;   // conifers; 16 floats per instance (column-major)
   treeTints: Float32Array;  // 3 floats per conifer
@@ -151,6 +155,10 @@ export function buildChunkPayload(
   const normals = new Float32Array(vCount * 3);
   const colors = new Float32Array(vCount * 3);
   const baseY = new Float32Array(vCount);
+  const baseCols = new Float32Array(vCount * 3);
+  // colour-morph start texel: the parent LOD's step for an upgrade, the
+  // shell cell for a brand-new chunk — matches whatever was on screen
+  const baseTexel = prevRes > 0 ? CHUNK_SIZE / prevRes : shellCell;
   const skirtDrop = 14 + step * 0.8;
   const colorTmp: number[] = [0, 0, 0];
 
@@ -187,6 +195,11 @@ export function buildChunkPayload(
       colors[v * 3] = colorTmp[0];
       colors[v * 3 + 1] = colorTmp[1];
       colors[v * 3 + 2] = colorTmp[2];
+
+      gen.colorAt(wx, wz, latH(ci, cj), 1 - ny * il, colorTmp, baseTexel);
+      baseCols[v * 3] = colorTmp[0];
+      baseCols[v * 3 + 1] = colorTmp[1];
+      baseCols[v * 3 + 2] = colorTmp[2];
       v++;
     }
   }
@@ -210,7 +223,7 @@ export function buildChunkPayload(
   return {
     cx, cz, res,
     scatter: scatterLevel,
-    positions, normals, colors, baseY, index,
+    positions, normals, colors, baseY, baseCols, index,
     treeMats: Float32Array.from(sc.treeMats),
     treeTints: Float32Array.from(sc.treeTints),
     leafMats: Float32Array.from(sc.leafMats),
@@ -462,7 +475,8 @@ function clampN(v: number, lo: number, hi: number): number {
 /** The transferable buffers of a payload (for zero-copy postMessage). */
 export function payloadTransfers(p: ChunkPayload): ArrayBuffer[] {
   return [
-    p.positions.buffer, p.normals.buffer, p.colors.buffer, p.baseY.buffer, p.index.buffer,
+    p.positions.buffer, p.normals.buffer, p.colors.buffer, p.baseY.buffer,
+    p.baseCols.buffer, p.index.buffer,
     p.treeMats.buffer, p.treeTints.buffer, p.leafMats.buffer, p.leafTints.buffer,
     p.rockMats.buffer, p.rockTints.buffer, p.houseMats.buffer, p.houseTints.buffer,
     p.towerMats.buffer, p.towerTints.buffer, p.glassMats.buffer, p.glassTints.buffer,

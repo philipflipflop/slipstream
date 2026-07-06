@@ -58,6 +58,17 @@ console.log('  ✓ deterministic across generators');
 // equals the true height — the swap from the coarse chunk is seamless
 const up = buildChunkPayload(gen, 3, 2, 28, 0, 14, cellSize);
 {
+  // colour-morph starts: one per vertex, valid colour range
+  assert.equal(up.baseCols.length, up.colors.length, 'baseCols length mismatch');
+  let ok = true;
+  for (let i = 0; i < up.baseCols.length; i++) {
+    const c = up.baseCols[i];
+    if (!(c >= 0 && c <= 1)) { ok = false; break; }
+  }
+  assert.ok(ok, 'baseCols out of colour range');
+  console.log('  ✓ colour-morph starts present and in range');
+}
+{
   const gridN = 28 + 3;
   let shared = 0;
   for (let j = -1; j <= 29; j++) {

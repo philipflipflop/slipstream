@@ -695,12 +695,20 @@ export class TerrainManager {
     mat.onBeforeCompile = (sh) => {
       sh.uniforms.uMorph = u;
       sh.vertexShader =
-        'attribute float baseY;\nuniform float uMorph;\nvarying vec3 vTWorld;\n' +
-        sh.vertexShader.replace(
-          '#include <begin_vertex>',
-          '#include <begin_vertex>\n\ttransformed.y = mix(baseY, position.y, uMorph);' +
-          '\n\tvTWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;',
-        );
+        'attribute float baseY;\nattribute vec3 baseCol;\nuniform float uMorph;\nvarying vec3 vTWorld;\n' +
+        sh.vertexShader
+          .replace(
+            '#include <begin_vertex>',
+            '#include <begin_vertex>\n\ttransformed.y = mix(baseY, position.y, uMorph);' +
+            '\n\tvTWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;',
+          )
+          // the paint sharpens with the same swell: colours start at the
+          // replaced surface's coarse-texel palette (shell or parent LOD),
+          // so a fresh tile never "snaps" into fine detail
+          .replace(
+            '#include <color_vertex>',
+            '#include <color_vertex>\n\tvColor.rgb = mix(baseCol, vColor.rgb, uMorph);',
+          );
       // close-range albedo detail: value-noise octaves break up the smooth
       // vertex-colour interpolation that reads as "low poly" up close. Each
       // octave fades out BEFORE its wavelength drops below a pixel — value
@@ -769,6 +777,7 @@ export class TerrainManager {
     geo.setAttribute('normal', new THREE.BufferAttribute(p.normals, 3));
     geo.setAttribute('color', new THREE.BufferAttribute(p.colors, 3));
     geo.setAttribute('baseY', new THREE.BufferAttribute(p.baseY, 1));
+    geo.setAttribute('baseCol', new THREE.BufferAttribute(p.baseCols, 3));
     geo.setIndex(new THREE.BufferAttribute(p.index, 1));
 
     // nearby chunks swell in ~a second; the outer rings take several — at

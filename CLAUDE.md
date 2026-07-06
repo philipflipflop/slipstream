@@ -35,6 +35,12 @@ Cloudflare builds with **npm 10.9.2**; local npm is 11. Two rules:
   `terrain.worker.ts` with a synchronous fallback. Chunk LODs nest (56/28/14) and
   every payload carries `baseY` geomorph starts; the far horizon shell shares
   `shellVertexHeight` so fresh chunks rise exactly off the rendered shell.
+  Payloads also carry `baseCols` COLOUR-morph starts (same vertices re-sampled
+  at the replaced surface's texel — parent-LOD step or shell cell), blended by
+  the same `uMorph` in makeChunkMat: arriving tiles sharpen gradually instead
+  of snapping to fine paint. The paint snap was the visible residue of the
+  edge pop after geometry already morphed — keep any new per-vertex detail
+  behind that blend.
 - `src/world/terrain.ts` — streaming, LOD rings (quality-set `fineRing`/`midRing`
   + high-altitude variants), geomorph animation, horizon shell management (shell
   builds only when the chunk queue is idle — keep it that way).
