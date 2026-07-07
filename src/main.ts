@@ -7,7 +7,7 @@
 import * as THREE from 'three';
 import './styles.css';
 
-import { WorldGen, AIRPORTS, WORLDS, WorldTheme } from './world/heightfield';
+import { WorldGen, AIRPORTS, WORLDS, WorldTheme, AirfieldDef } from './world/heightfield';
 import { daylightById, DAYLIGHTS, DaylightPreset, TimeOfDay } from './world/daylight';
 import { TerrainManager, CHUNK_SIZE } from './world/terrain';
 import { Water } from './world/water';
@@ -18,6 +18,9 @@ import { GunneryRange } from './combat/range';
 import { ObstacleField } from './world/obstacles';
 import { setTurbulence, setWind, crash } from './aircraft/flightModel';
 import { Route, bearingTo, distanceTo } from './nav/route';
+import {
+  IlsApproach, tuneIls, solveIls, LOC_FULL_SCALE, GS_FULL_SCALE,
+} from './nav/ils';
 import { Aircraft } from './aircraft/aircraft';
 import { specById } from './aircraft/catalog';
 import { Autopilot } from './aircraft/autopilot';
@@ -93,6 +96,12 @@ class Game {
   // steady wind for this flight (aviation: heading it blows FROM + knots)
   private windFromDeg = 0;
   private windKt = 0;
+
+  // ILS receiver: auto-tunes the best runway end ahead about once a second
+  private ilsTuned: IlsApproach | null = null;
+  private ilsTimer = 0;
+  private ilsFieldScratch: AirfieldDef[] = [];
+  private ilsScratch: IlsApproach[] = [];
 
   private daylight: DaylightPreset;
 
@@ -545,6 +554,8 @@ class Game {
       this.rings.stop();
     }
     this.autopilot.disengage();
+    this.ilsTuned = null;
+    this.ilsTimer = 0;
     this.state = 'flying';
     this.screens.show(null);
     this.hud.visible = true;
@@ -815,6 +826,17 @@ class Game {
 
     this.aircraft.update(this.input.controls, dt, this.heightFn);
 
+    // ILS receiver: retune to the best approach ahead about once a second
+    this.ilsTimer -= dt;
+    if (this.ilsTimer <= 0) {
+      this.ilsTimer = 1;
+      this.gen.airfieldsNear(st.pos.x, st.pos.z, 36000, this.ilsFieldScratch);
+      this.ilsTuned = tuneIls(
+        this.ilsFieldScratch, st.pos.x, st.pos.z, st.pos.y, st.heading,
+        this.ilsTuned, this.ilsScratch,
+      );
+    }
+
     // buildings, trees and rock pinnacles are as solid as the terrain
     this.obstacles.warm(st.pos.x, st.pos.z);
     if (!st.crashed && !st.onGround) {
@@ -1000,6 +1022,22 @@ class Game {
             targets: this.range.total,
           }
         : null,
+      ils: (() => {
+        // guidance shows once airborne (or rolling out after touchdown on
+        // the tuned runway); races keep the HUD clear for the gates
+        if (!this.ilsTuned || race || (st.onGround && st.airspeed < 3)) return null;
+        const d = solveIls(this.ilsTuned, st.pos.x, st.pos.y, st.pos.z);
+        if (d.toGo > 30000 || d.toGo < -this.ilsTuned.length) return null;
+        return {
+          name: d.name,
+          ident: d.ident,
+          dme: d.dme,
+          locDev: d.locDev,
+          gsDev: d.gsDev,
+          locFull: LOC_FULL_SCALE,
+          gsFull: GS_FULL_SCALE,
+        };
+      })(),
       nav: (() => {
         if (race || !this.route.engaged) return null;
         const wp = this.route.target();

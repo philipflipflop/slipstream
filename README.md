@@ -47,6 +47,18 @@ couple of pixels at any range instead of vanishing, and after dark every field
 runs a rotating **white/green airport beacon** you can spot from 15+ km — that's
 how you find a runway at night.
 
+### ILS
+
+Every runway carries a full **instrument landing system** with real approach
+geometry: a localizer measured from an antenna past the stop end (±2.5° full
+scale), a 3.00° glideslope from a station 300 m in from the threshold
+(±0.7° full scale, ~18 m threshold crossing height), and DME. The receiver
+auto-tunes the best runway end ahead of the nose — internationals serve all
+four parallel approaches (27L/27R style) — and the HUD shows classic
+deviation scales: fly toward the diamonds; they turn green when you're
+captured. Pair it with the PAPI lights and you can shoot a stabilised
+approach in any aircraft, day or night.
+
 ### Wind
 
 Free flight rolls a light breeze each takeoff (3–15 kt from a random heading —

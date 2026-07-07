@@ -41,6 +41,10 @@ export interface AirfieldDef {
   length: number;
   width: number;
   major: boolean; // gets hangars, tower, apron buildings
+  /** twin parallel runways (internationals): centre-to-centre spacing, m.
+   *  The runways sit at across ±rwySep/2; the second one uses rwy2Len. */
+  rwySep?: number;
+  rwy2Len?: number;
   /** runway direction, rad clockwise from north (0 = runway 36/18) */
   heading: number;
   cosH: number;   // cached for the hot flatten/paint path

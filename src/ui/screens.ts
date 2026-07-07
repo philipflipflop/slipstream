@@ -405,6 +405,9 @@ export class Screens {
             Pick a time of day in the hangar — at night the runway edge lights and the
             four PAPI boxes beside the threshold guide you home (two white two red =
             on the glide path; all red = too low).
+            Every runway also has an <b>ILS</b>: point roughly at a runway end and the
+            HUD tunes it — fly toward the cyan diamonds (localizer below the horizon,
+            glideslope on the right); they turn green when you're on the beam.
             Flying 101: full throttle, let speed build past the white arc, then ease back.
             Keep the nose where the speed stays healthy — if <b style="color:var(--danger)">STALL</b> flashes,
             push forward and add power. Land into the runway slow, flaps down, gentle sink.

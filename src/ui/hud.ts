@@ -34,6 +34,15 @@ export interface HudData {
     engineOut: boolean;
   };
   gun: null | { ammo: number; firing: boolean; hits: number; targets: number };
+  ils: null | {
+    name: string;
+    ident: string;    // approach designator, e.g. "27L"
+    dme: number;      // m to threshold
+    locDev: number;   // rad, + = right of centreline (fly left)
+    gsDev: number;    // rad, + = above the glide path (fly down)
+    locFull: number;  // full-scale deflections (rad)
+    gsFull: number;
+  };
   nav: null | {
     name: string;
     distance: number;  // m to active waypoint
@@ -126,8 +135,72 @@ export class Hud {
     if (full) this.headingRibbon(d, cx, (compact ? 46 : 30) + this.safeTop(), s, compact);
     this.annunciators(d, cx, cy, s, false);
     if (d.gun) this.gunBlock(d, cx, cy, s);
+    if (d.ils) this.ilsBlock(d, cx, cy, s, compact, full);
     if (d.race) this.raceBlock(d, cx, s, compact);
     else if (d.nav) this.navBlock(d, cx, s, compact);
+  }
+
+  /**
+   * ILS guidance: classic deviation scales — localizer dots under the
+   * attitude sphere, glideslope dots to its right — with the ident + DME
+   * readout above the horizon. Diamonds go green inside half a dot.
+   */
+  private ilsBlock(d: HudData, cx: number, cy: number, s: number, compact: boolean, full: boolean): void {
+    const ils = d.ils!;
+    const ctx = this.ctx;
+    const CYAN = 'rgba(43, 217, 255, 0.92)';
+
+    // ident + range readout, under the annunciator row (clear of the gun
+    // score line on armed aircraft)
+    ctx.textAlign = 'center';
+    ctx.fillStyle = CYAN;
+    ctx.font = `700 ${Math.round(12.5 * s)}px 'Chakra Petch', monospace`;
+    const km = ils.dme >= 1000 ? `${(ils.dme / 1000).toFixed(1)} km` : `${Math.round(ils.dme)} m`;
+    ctx.fillText(`ILS ${ils.ident} · ${ils.name} · ${km}`, cx, cy + (d.gun ? 232 : 214) * s);
+    ctx.font = `600 ${Math.round(13 * s)}px 'Chakra Petch', monospace`;
+    if (!full) return; // minimal HUD keeps the readout, skips the needles
+
+    const dot = (x: number, y: number): void => {
+      ctx.beginPath();
+      ctx.arc(x, y, 2.6 * s, 0, Math.PI * 2);
+      ctx.stroke();
+    };
+    const diamond = (x: number, y: number, captured: boolean): void => {
+      ctx.fillStyle = captured ? this.g(0.95) : CYAN;
+      ctx.beginPath();
+      ctx.moveTo(x, y - 6.5 * s);
+      ctx.lineTo(x + 5.5 * s, y);
+      ctx.lineTo(x, y + 6.5 * s);
+      ctx.lineTo(x - 5.5 * s, y);
+      ctx.closePath();
+      ctx.fill();
+    };
+    ctx.strokeStyle = 'rgba(43, 217, 255, 0.55)';
+
+    // localizer scale (needle mirrors the deviation: fly TOWARD the diamond)
+    const ly = cy + 166 * s;
+    const span = 44 * s; // full-scale deflection in px
+    ctx.beginPath();
+    ctx.moveTo(cx, ly - 6 * s);
+    ctx.lineTo(cx, ly + 6 * s);
+    ctx.stroke();
+    for (const k of [-1, -0.5, 0.5, 1]) dot(cx + k * span, ly);
+    const locK = clamp(-ils.locDev / ils.locFull, -1.15, 1.15);
+    diamond(cx + locK * span, ly, Math.abs(ils.locDev) < ils.locFull * 0.25);
+
+    // glideslope scale (diamond above centre = you are LOW, fly up to it)
+    const gx = cx + (compact ? 150 : 188) * s;
+    ctx.beginPath();
+    ctx.moveTo(gx - 6 * s, cy);
+    ctx.lineTo(gx + 6 * s, cy);
+    ctx.stroke();
+    for (const k of [-1, -0.5, 0.5, 1]) dot(gx, cy + k * span);
+    const gsK = clamp(ils.gsDev / ils.gsFull, -1.15, 1.15);
+    diamond(gx, cy + gsK * span, Math.abs(ils.gsDev) < ils.gsFull * 0.25);
+    ctx.fillStyle = 'rgba(43, 217, 255, 0.6)';
+    ctx.font = `600 ${Math.round(10 * s)}px 'Chakra Petch', monospace`;
+    ctx.fillText('G/S', gx, cy - span - 14 * s);
+    ctx.font = `600 ${Math.round(13 * s)}px 'Chakra Petch', monospace`;
   }
 
   /** Active flight-plan leg: waypoint, range, relative bearing arrow, ETE. */
