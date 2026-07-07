@@ -907,6 +907,149 @@ function buildMeridian(): THREE.Group {
 }
 
 /* ================================================================
+   EUROFIGHTER TYPHOON — canard delta, RAF air-superiority grey
+   True scale: 15.96 m long, 10.95 m span. The canards are the live
+   pitch surface (hinged group named 'elevator', like the real jet).
+   ================================================================ */
+function buildTyphoon(): THREE.Group {
+  const g = new THREE.Group();
+  const grey = std(0x8b939c, 0.5, 0.3);
+  const dark = std(0x565d66, 0.5, 0.3);
+
+  // slim forebody, broad centre-fuselage over the engines
+  const fuse = mesh(fuseGeo([
+    { z: -7.9, r: 0.13, ry: 0.13 },
+    { z: -6.7, r: 0.4, ry: 0.44, y: 0.02 },
+    { z: -4.9, r: 0.58, ry: 0.66, y: 0.06 },
+    { z: -2.4, r: 0.8, ry: 0.72, y: 0 },
+    { z: 1.6, r: 0.96, ry: 0.74, y: 0 },
+    { z: 5.4, r: 0.82, ry: 0.62, y: 0 },
+    { z: 7.9, r: 0.5, ry: 0.42, y: 0 },
+  ]), grey);
+  g.add(fuse);
+
+  // bubble canopy well forward + the boxy chin intake with splitter lip
+  const can = mesh(new THREE.SphereGeometry(0.62, 12, 8), GLASS);
+  can.scale.set(0.78, 0.62, 1.5);
+  can.position.set(0, 0.68, -4.5);
+  g.add(can);
+  const intake = mesh(new THREE.BoxGeometry(1.5, 0.68, 2.4), dark);
+  intake.position.set(0, -0.78, -3.2);
+  g.add(intake);
+  const duct = new THREE.Mesh(new THREE.PlaneGeometry(1.42, 0.6), std(0x17191d, 0.4, 0.85));
+  duct.position.set(0, -0.78, -4.41);
+  duct.rotation.y = Math.PI;
+  g.add(duct);
+
+  // big cropped-delta wing
+  const wing = mesh(wingGeo([
+    { x: -5.47, chord: 1.25, t: 0.07, sweep: 3.05 },
+    { x: -1.35, chord: 6.3, t: 0.3, sweep: 0.55 },
+    { x: 1.35, chord: 6.3, t: 0.3, sweep: 0.55 },
+    { x: 5.47, chord: 1.25, t: 0.07, sweep: 3.05 },
+  ]), std(0x8b939c, 0.5, 0.3, true));
+  wing.position.set(0, -0.12, 2.2);
+  g.add(wing);
+
+  // low-vis roundels on the upper wing (pale blue ring, red centre)
+  for (const sx of [-1, 1]) {
+    const ring = new THREE.Mesh(new THREE.CircleGeometry(0.52, 16), std(0x5a7fa8, 0.55, 0.15));
+    ring.rotation.x = -Math.PI / 2;
+    ring.position.set(3.1 * sx, 0.12, 3.4);
+    g.add(ring);
+    const dot = new THREE.Mesh(new THREE.CircleGeometry(0.2, 12), std(0xa8474e, 0.55, 0.15));
+    dot.rotation.x = -Math.PI / 2;
+    dot.position.set(3.1 * sx, 0.135, 3.4);
+    g.add(dot);
+  }
+
+  // elevons on the delta's trailing edge
+  for (const sx of [-1, 1]) {
+    const surf = mesh(new THREE.BoxGeometry(2.8, 0.07, 0.62), dark);
+    surf.position.set(0, 0, 0.31);
+    g.add(hinged(sx < 0 ? 'aileronL' : 'aileronR', surf, 3.3 * sx, -0.08, 5.35));
+  }
+
+  // foreplanes: BOTH canards live in one hinge group named 'elevator', so
+  // they deflect together with pitch input exactly like the real jet
+  const canards = new THREE.Group();
+  canards.name = 'elevator';
+  canards.position.set(0, 0.3, -4.15);
+  for (const sx of [-1, 1]) {
+    const cGeo = wingGeo(sx < 0
+      ? [{ x: -2.05, chord: 0.55, t: 0.05, sweep: 0.5 }, { x: -0.55, chord: 1.15, t: 0.08 }]
+      : [{ x: 0.55, chord: 1.15, t: 0.08 }, { x: 2.05, chord: 0.55, t: 0.05, sweep: 0.5 }]);
+    canards.add(mesh(cGeo, std(0x8b939c, 0.5, 0.3, true)));
+  }
+  g.add(canards);
+
+  // single tall swept fin + rudder, with a small fin flash
+  const finGeo = wingGeo([
+    { x: 0, chord: 3.3, t: 0.16 },
+    { x: 3.25, chord: 1.05, t: 0.05, sweep: 2.25 },
+  ]);
+  finGeo.rotateZ(Math.PI / 2);
+  const fin = mesh(finGeo, std(0x8b939c, 0.5, 0.3, true));
+  fin.position.set(0, 0.55, 5.7);
+  g.add(fin);
+  for (const [color, dz] of [[0xa8474e, 0], [0x5a7fa8, 0.32]] as Array<[number, number]>) {
+    const flash = mesh(new THREE.BoxGeometry(0.16, 0.85, 0.3), std(color, 0.5, 0.15));
+    flash.position.set(0, 2.75, 6.95 + dz); // riding the swept fin mid-chord
+    flash.rotation.x = -0.55;
+    g.add(flash);
+  }
+  const rudSurf = mesh(new THREE.BoxGeometry(0.07, 2.2, 0.62), dark);
+  rudSurf.position.set(0, 1.0, 0.31);
+  g.add(hinged('rudder', rudSurf, 0, 1.15, 7.0));
+
+  // twin EJ200 nozzles, side by side, with a shared reheat plume group
+  const nozzleMat = std(0x2c2c30, 0.35, 0.9);
+  const turbineMat = std(0x17191d, 0.4, 0.85);
+  for (const sx of [-1, 1]) {
+    const nozzle = mesh(new THREE.CylinderGeometry(0.46, 0.38, 0.9, 12), nozzleMat);
+    nozzle.rotation.x = Math.PI / 2;
+    nozzle.position.set(0.55 * sx, -0.05, 8.1);
+    g.add(nozzle);
+    const face = new THREE.Mesh(new THREE.CircleGeometry(0.36, 12), turbineMat);
+    face.position.set(0.55 * sx, -0.05, 8.46);
+    g.add(face);
+  }
+  const burner = new THREE.Group();
+  burner.name = 'burner';
+  for (const sx of [-1, 1]) {
+    const flame = new THREE.Mesh(
+      new THREE.ConeGeometry(0.36, 3.8, 10, 1, true),
+      new THREE.MeshBasicMaterial({
+        color: 0xff7a2a, transparent: true, opacity: 0.85,
+        blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
+      }),
+    );
+    flame.rotation.x = -Math.PI / 2;
+    flame.position.set(0.55 * sx, -0.05, 1.9);
+    burner.add(flame);
+  }
+  burner.position.set(0, 0, 8.4);
+  burner.visible = false;
+  g.add(burner);
+
+  // tricycle gear
+  const gear = new THREE.Group();
+  gear.name = 'gear';
+  const nw = wheel(0.3, 0.18);
+  nw.position.set(0, -1.55, -4.4);
+  gear.add(nw, strut(0, -0.65, -4.3, 0, -1.5, -4.4, 0.08));
+  for (const sx of [-1, 1]) {
+    const w = wheel(0.4, 0.26);
+    w.position.set(1.6 * sx, -1.45, 1.9);
+    gear.add(w, strut(1.1 * sx, -0.4, 1.7, 1.58 * sx, -1.38, 1.88, 0.09));
+  }
+  g.add(gear);
+
+  navLights(g, 5.5, 4.9, -0.05);
+  return g;
+}
+
+/* ================================================================
    AIRBUS A320neo — narrowbody airliner, flag-carrier livery
    (white over midnight blue, red pinline, crossed tail ribbons)
    Built at TRUE scale: 37.6 m fuselage, 35.8 m span — runway and
@@ -1079,6 +1222,7 @@ export function buildAircraftModel(id: string): THREE.Group {
     case 'jetranger': return buildJetRanger();
     case 'falcon': return buildFalcon();
     case 'vector': return buildVector();
+    case 'typhoon': return buildTyphoon();
     case 'meridian': return buildMeridian();
     case 'a320': return buildA320();
     default: return buildSkylark();

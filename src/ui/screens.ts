@@ -414,7 +414,7 @@ export class Screens {
             Press <kbd>N</kbd> for the flight computer: drag to scroll the chart far
             beyond the horizon, click to plan a route (clicks near a runway snap to
             it), then ENGAGE NAV and the autopilot flies it.
-            In the Vector, hold <kbd>Space</kbd> airborne to fire — ten target balloons
+            In the Vector or Typhoon, hold <kbd>Space</kbd> airborne to fire — ten target balloons
             float east of Meridian Intl.
             <b>Helicopter (Bell 505):</b> throttle is the collective — raise it past
             ~60% to lift off straight up, nose down gently to fly forward, and land

@@ -1,7 +1,7 @@
 # ✈ SLIPSTREAM
 
 An endless-world flight simulator that runs entirely in the browser — desktop and mobile.
-Eight aircraft with genuinely different flight models (including a helicopter and an airliner), an infinite procedurally generated
+Nine aircraft with genuinely different flight models (including a helicopter, an airliner and the Eurofighter Typhoon), an infinite procedurally generated
 archipelago, a glass-cockpit HUD, a time-trial ring course, and a fully procedural
 soundscape. No model files, no textures, no audio assets: everything is generated at runtime.
 
@@ -76,7 +76,7 @@ times are comparable; `?wind=hdg,kt` forces a specific wind.
 | Rudder | `Q` / `E` |
 | Throttle | `Shift` / `Ctrl`, presets `1–9`, `0` = idle |
 | Flaps / Gear | `F` & `V` / `G` |
-| Wheel brakes / **fire cannon** (airborne, Vector) | `Space` (hold) |
+| Wheel brakes / **fire cannon** (airborne, Vector & Typhoon) | `Space` (hold) |
 | Speed brake (jets) | `B` |
 | Autopilot (alt + hdg + speed hold) | `T` — any stick input disengages |
 | Autopilot bugs | on-screen panel, or `[` `]` heading · `PgUp` `PgDn` altitude · `Home` `End` speed · `;` `'` vertical speed |
@@ -108,6 +108,7 @@ speed tape. If `STALL` flashes — nose down, power up.
 | **Bell 505 Jet Ranger X** | Light helicopter with its own flight-model regime: throttle is the collective, cyclic is attitude-command, pedals turn the hover. Translational lift, ground effect, torque, flapback (the nose rises with speed — cruise takes standing forward cyclic), tail-rotor drift in the hover, and vortex ring state if you sink onto your own downwash. Press `X` for a practice **engine failure**: rotor RPM becomes real energy — collective down at once or NR droops and the low-RPM horn sounds; keep speed on and it **autorotates** (~1,700 fpm, 3:1 glide), flare and spend the rotor's last energy on the cushion — with the engine out the skids and seats soak up arrivals to a ~30 kt impact, so a firm auto is a story, not a crash screen. The SAS envelope is no cage either: hold the cyclic on the stop and she'll roll right through — possible, inadvisable, occasionally fatal. Heli HUD shows TRQ and NR; `T` in a hover gives a hover hold. Skid landings anywhere flat. |
 | **Falcon Mk.IV** | WWII warbird. Huge roll rate, bites in the stall, tail-dragger. |
 | **Vector V-25** | Delta-wing fighter. Afterburner at 100% throttle, 900+ kt, internal cannon — pop the target balloons east of Meridian Intl. |
+| **Eurofighter Typhoon** | The real thing, to the book: 51.2 m² canard delta, twin EJ200s (60/90 kN), reheat T/W above 1, ~380 m ground roll, 1,100+ kt dash, and a 9 g **carefree envelope** — the FBW alpha/G limiters mean you can haul the stick to the stop and she takes what the airframe is rated for, no more. Cannon fitted. |
 | **Meridian 700** | 16-tonne executive jet. Stately, fast in cruise, needs planning. |
 | **Airbus A320neo** | 64-tonne narrowbody airliner in flag-carrier colours, built to the real book numbers: 122.6 m² wing, twin LEAP-class engines, rotate ~150 kt, full-flap stall ~110 kt, MMO ≈ 470 kt, +2.5 g transport limits and normal-law **alpha protection** (full aft stick mushes — it will not stall). Fly the profile and grease it on. |
 
@@ -175,7 +176,7 @@ themselves.
 
 - `?autofly=1` — autopilot takes off and climbs (demo / smoke test; telemetry in the tab title)
 - `&ff=60` — fast-forward N seconds of physics before the first frame
-- `&ac=vector` — select aircraft (`skylark`, `islander`, `jetranger`, `falcon`, `vector`, `meridian`, `a320`)
+- `&ac=vector` — select aircraft (`skylark`, `islander`, `jetranger`, `falcon`, `vector`, `typhoon`, `meridian`, `a320`)
 - `&tod=night` — time of day (`dawn`, `day`, `dusk`, `night`)
 - `&wind=240,12` — force wind (heading it blows from, knots); free flight is random otherwise
 - `&mode=race` — start in Ring Rush
