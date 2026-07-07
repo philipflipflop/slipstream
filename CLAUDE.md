@@ -29,8 +29,18 @@ Cloudflare builds with **npm 10.9.2**; local npm is 11. Two rules:
 ## Architecture pointers
 
 - `src/world/heightfield.ts` — analytic heightfield, single source of truth for
-  rendering, collision, scatter, minimap, and airfield placement (3 fixed +
-  procedural strips on a 12 km cell grid). Change terrain in one place only.
+  rendering, collision, scatter, minimap, and airfield placement (5 fixed —
+  three twin-runway INTERNATIONALS ~50 km apart (rwySep/rwy2Len on
+  AirfieldDef; spawn = Meridian Intl's WESTERN runway at across −rwySep/2) —
+  plus procedural strips on a 12 km cell grid, ~⅓ of cells, longest ones
+  major regionals). Change terrain in one place only. `intlBuildings()` is
+  the ONE list of terminal/pier/tower/hangar boxes: airport.ts renders it
+  and obstacles.ts derives rotated-box collision from it — never define
+  airport buildings anywhere else. The international concrete slab +
+  taxiway lines are PAINTED into colorAt at the mesh's own texel (taxi
+  lines fade like the city grid). Kilometre-scale ground overlay planes
+  z-fight against mismatched terrain tones — only runway-sized planes over
+  SAME-TONE terrain paint are safe.
 - `src/world/terrainBuilder.ts` — pure payload builder (no three.js/DOM), runs in
   `terrain.worker.ts` with a synchronous fallback. Chunk LODs nest (56/28/14) and
   every payload carries `baseY` geomorph starts; the far horizon shell shares
@@ -70,7 +80,11 @@ Cloudflare builds with **npm 10.9.2**; local npm is 11. Two rules:
   visibilitychange, or the sim stays silent after Siri/calls/app switches.
 - Ground physics: below 1.5 m/s ground speed, aero yaw moments are zeroed
   (static tire grip) — parked aircraft must not weathervane or slide in
-  wind (pinned in tests/14).
+  wind (pinned in tests/14). The parked-stance PITCH spring fades with
+  weight-on-wheels (1 − L/W): without that, transport wing loadings (A320)
+  can never rotate — the G-limit cap shrinks pitch authority with speed
+  while the spring never weakened, pinning the nose at ~2° forever.
+  Heavies take off with CONF-2 flap and a firm pull (see tests/16).
 - Mobile rendering: touch devices skip the logarithmic depth buffer, so they rely
   on the AGL-scaled near plane (main.ts frame()) + the water sheet's polygon
   offset/raise (`Water` `coarseDepth` flag) to avoid shoreline z-fighting.
@@ -95,7 +109,14 @@ Cloudflare builds with **npm 10.9.2**; local npm is 11. Two rules:
   it fatally. HUD shows TRQ/NR + LOW ROTOR RPM / VORTEX RING cautions; the
   AP has a hover-hold (engage minSpd 0, pedals hold hover heading — bank
   would orbit the spot against torque). Skid-gear crash rules differ from
-  wheels (sink > 5 m/s, roll, slope, run-on > 16 m/s).
+  wheels: sink > 5 m/s powered but 15.4 m/s (~30 kt impact) with the
+  ENGINE OUT — a firm autorotation arrival is survivable by design; roll,
+  slope, run-on > 16 m/s unchanged. The SAS attitude envelope is NOT a
+  cage: the last ~8% of cyclic throw (|stick| > 0.92) washes the attitude
+  hold into a pure rate command so a held full deflection rolls/flips
+  through, and the attitude-error term is capped at 1.1 rad so recovery
+  is a realistic rate, not a rubber band (both pinned in test 12 — keep
+  scripted inputs ≤0.9 deflection unless a roll-through is intended).
 - `src/combat/range.ts` — round↔balloon collision is SWEPT (segment vs
   sphere): at muzzle velocity a round outruns a balloon diameter per frame,
   so an end-of-step point test tunnels. Keep any new projectile/target
@@ -110,9 +131,24 @@ Cloudflare builds with **npm 10.9.2**; local npm is 11. Two rules:
   Landing light lesson: a spotlight grazing a flat runway loses ~94% to
   Lambert's cosine — model it as a collimated beam (decay 0) with a huge
   intensity, aimed a few degrees below boresight.
-- PAPI (airport.ts): four boxes per field, per-frame red/white from the
-  aircraft's actual angle to each box vs [3.5, 3.2, 2.8, 2.5]°; world
-  positions captured after the field pivot via getWorldPosition.
+- PAPI (airport.ts): rows of four at BOTH thresholds of every runway,
+  per-frame red/white from the aircraft's actual angle to each box vs
+  [3.5, 3.2, 2.8, 2.5]° (indexed i % 4); world positions captured after
+  the field pivot via getWorldPosition. Runway designators are real per
+  heading (36/18-style, L/R suffixes at internationals) via runwayIdent —
+  textures cached per number pair.
+- `src/nav/ils.ts` — pure ILS: one approach per runway END (four at
+  internationals). LOC antenna 300 m past the stop end (±2.5° full scale),
+  GS station 300 m in from the threshold on a 3.00° path (±0.7°), DME;
+  auto-tune (main.ts, 1 Hz) captures the best runway ahead with hysteresis.
+  HUD draws fly-toward diamonds; deviation signs: + = right of centreline /
+  above the slope (test 15).
+- `src/world/traffic.ts` — NPC aircraft. Parked: single-geometry planes on
+  intl stands / regional aprons / strip edges, hash-seeded per field —
+  deterministic and NEVER on pavement (test 17 asserts this; keep stands
+  |across| < 560 at internationals). Airborne: 5 cruisers in a 30 km
+  bubble, terrain look-ahead, drained during Ring Rush. No collision, like
+  the rest of the airport furniture.
 - Airfield lights are treated as POINT SOURCES: fog:false materials +
   per-frame rescaling so they hold ~2–3 px at any range (night divisor
   350, cap 60×), plus a white/green beacon + steady glow sprite per field
@@ -161,3 +197,8 @@ Cloudflare builds with **npm 10.9.2**; local npm is 11. Two rules:
   telemetry is in the tab title. Runs are occasionally flaky — retry. Dark
   screenshots legitimately compress below 100 kB — don't use a large
   min-size gate to detect boot-screen captures on night scenes.
+  In containers where virtual-time never advances rAF (screenshot stuck on
+  the boot screen no matter the budget), drive real time with the globally
+  installed Playwright instead: launch chromium with
+  `--use-angle=swiftshader --enable-unsafe-swiftshader`, goto the preview
+  URL, `waitForTimeout(12000+)`, then screenshot.
