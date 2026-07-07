@@ -160,6 +160,7 @@ thrust model) — the handling differences fall out of the numbers, not scripts.
 - `&world=mesa` — select the map (`archipelago`, `mesa`, `metro`)
 - `&hdg=302` — point the takeoff at a given true heading
 - `&nav=1` — open the planning chart after the fast-forward
+- `&morphhold=1` — freeze terrain chunks at their geomorph start (LOD-transition debugging)
 
 ## Deploying
 

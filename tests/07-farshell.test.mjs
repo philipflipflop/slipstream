@@ -75,6 +75,43 @@ const up = buildChunkPayload(gen, 3, 2, 28, 0, 14, cellSize);
   }
   console.log('  ✓ colour- and normal-morph starts present and sane');
 }
+
+// morph-start EXACTNESS: at a vertex that lands on the shell lattice, a
+// fresh chunk's colour/normal starts must equal the shell's own vertex
+// colour/normal (raw-height field, cellSize texel — buildFarPayload's rule).
+// Starts that only approximate what was on screen leave an instant jump in
+// the arrival frame: the residual "pop" that survived three morph passes.
+{
+  const freshEx = buildChunkPayload(gen, 3, 2, 14, 0, 0, cellSize);
+  const gridN = 14 + 3;
+  const step = 900 / 14;
+  let checked = 0;
+  for (let j = 0; j <= 14; j++) {
+    for (let i = 0; i <= 14; i++) {
+      const wx = 3 * 900 + i * step;
+      const wz = 2 * 900 + j * step;
+      if (wx % cellSize !== 0 || wz % cellSize !== 0) continue;
+      const v = (j + 1) * gridN + (i + 1);
+      const nx = gen.heightAt(wx - cellSize, wz) - gen.heightAt(wx + cellSize, wz);
+      const nz = gen.heightAt(wx, wz - cellSize) - gen.heightAt(wx, wz + cellSize);
+      const ny = 2 * cellSize;
+      const il = 1 / Math.hypot(nx, ny, nz);
+      const col = [0, 0, 0];
+      gen.colorAt(wx, wz, gen.heightAt(wx, wz), 1 - ny * il, col, cellSize);
+      for (let ch = 0; ch < 3; ch++) {
+        assert.ok(Math.abs(freshEx.baseCols[v * 3 + ch] - col[ch]) < 1e-5,
+          `baseCol ch${ch} at ${wx},${wz}: ${freshEx.baseCols[v * 3 + ch]} vs shell ${col[ch]}`);
+      }
+      assert.ok(Math.abs(freshEx.baseNrms[v * 3] - nx * il) < 1e-5 &&
+        Math.abs(freshEx.baseNrms[v * 3 + 1] - ny * il) < 1e-5 &&
+        Math.abs(freshEx.baseNrms[v * 3 + 2] - nz * il) < 1e-5,
+        `baseNrm at ${wx},${wz} differs from shell normal`);
+      checked++;
+    }
+  }
+  assert.ok(checked >= 9, `only ${checked} lattice-coincident vertices checked`);
+  console.log(`  ✓ fresh-chunk colour/normal starts equal the shell's exactly (${checked} lattice vertices)`);
+}
 {
   const gridN = 28 + 3;
   let shared = 0;

@@ -165,6 +165,9 @@ class Game {
 
     const params = new URLSearchParams(location.search);
     this.autoFly = params.get('autofly') === '1';
+    // ?morphhold=1 — freeze chunks at geomorph start (debug: any visible tile
+    // seam in a still frame = the pop players would see at tile arrival)
+    this.terrain.morphHold = params.get('morphhold') === '1';
     if (params.get('mode') === 'race') this.save.mode = 'race';
     const aptParam = Number(params.get('apt') ?? '0');
     if (aptParam > 0 && aptParam < AIRPORTS.length) this.spawnField = AIRPORTS[aptParam];

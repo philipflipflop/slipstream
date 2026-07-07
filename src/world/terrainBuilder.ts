@@ -161,11 +161,82 @@ export function buildChunkPayload(
   const baseY = new Float32Array(vCount);
   const baseCols = new Float32Array(vCount * 3);
   const baseNrms = new Float32Array(vCount * 3);
-  // colour-morph start texel: the parent LOD's step for an upgrade, the
-  // shell cell for a brand-new chunk — matches whatever was on screen
-  const baseTexel = prevRes > 0 ? CHUNK_SIZE / prevRes : shellCell;
   const skirtDrop = 14 + step * 0.8;
   const colorTmp: number[] = [0, 0, 0];
+
+  // Morph-start colour/normal fields must reproduce EXACTLY what the replaced
+  // mesh rendered: sample at the REPLACED mesh's own lattice (its heights, its
+  // slopes, its texel) and interpolate with its diagonal split. Re-evaluating
+  // the fields at the fine vertices — even at a coarse texel — starts the
+  // crossfade from an image that was never on screen, and that difference
+  // appears instantly in the arrival frame (the residual "pop").
+  const pStep = prevRes > 0 ? CHUNK_SIZE / prevRes : 0;
+  let pCols: Float32Array | null = null;
+  let pNrms: Float32Array | null = null;
+  if (prevRes > 0) {
+    const pW = prevRes + 1;
+    pCols = new Float32Array(pW * pW * 3);
+    pNrms = new Float32Array(pW * pW * 3);
+    // parent heights: identical world positions exist in the fine lattice
+    // (grids nest); differences at the border can step outside its padding
+    // for multi-level upgrades (k = 4/8), so fall back to the field itself
+    const pH = (pi: number, pj: number): number => {
+      const fi = pi * k;
+      const fj = pj * k;
+      if (fi >= -2 && fi <= res + 2 && fj >= -2 && fj <= res + 2) return latH(fi, fj);
+      return gen.heightAt(x0 + pi * pStep, z0 + pj * pStep);
+    };
+    for (let pj = 0; pj <= prevRes; pj++) {
+      for (let pi = 0; pi <= prevRes; pi++) {
+        const o = (pj * pW + pi) * 3;
+        const nx = pH(pi - 1, pj) - pH(pi + 1, pj);
+        const nz = pH(pi, pj - 1) - pH(pi, pj + 1);
+        const ny = 2 * pStep;
+        const il = 1 / Math.hypot(nx, ny, nz);
+        pNrms[o] = nx * il;
+        pNrms[o + 1] = ny * il;
+        pNrms[o + 2] = nz * il;
+        gen.colorAt(x0 + pi * pStep, z0 + pj * pStep, pH(pi, pj), 1 - ny * il, colorTmp, pStep);
+        pCols[o] = colorTmp[0];
+        pCols[o + 1] = colorTmp[1];
+        pCols[o + 2] = colorTmp[2];
+      }
+    }
+  }
+  // shell colour/normal at shell lattice points, mirroring buildFarPayload
+  // (raw heights drive colours and normals there; the envelope only lowers
+  // positions), cached per lattice point like shellH
+  const rawCache = new Map<string, number>();
+  const rawH = (gx: number, gz: number): number => {
+    const key = `${gx},${gz}`;
+    let h = rawCache.get(key);
+    if (h === undefined) {
+      h = gen.heightAt(gx * shellCell, gz * shellCell);
+      rawCache.set(key, h);
+    }
+    return h;
+  };
+  const shellCNCache = new Map<string, Float32Array>();
+  const shellCN = (gx: number, gz: number): Float32Array => {
+    const key = `${gx},${gz}`;
+    let cn = shellCNCache.get(key);
+    if (cn === undefined) {
+      cn = new Float32Array(6);
+      const nx = rawH(gx - 1, gz) - rawH(gx + 1, gz);
+      const nz = rawH(gx, gz - 1) - rawH(gx, gz + 1);
+      const ny = 2 * shellCell;
+      const il = 1 / Math.hypot(nx, ny, nz);
+      gen.colorAt(gx * shellCell, gz * shellCell, rawH(gx, gz), 1 - ny * il, colorTmp, shellCell);
+      cn[0] = colorTmp[0];
+      cn[1] = colorTmp[1];
+      cn[2] = colorTmp[2];
+      cn[3] = nx * il;
+      cn[4] = ny * il;
+      cn[5] = nz * il;
+      shellCNCache.set(key, cn);
+    }
+    return cn;
+  };
 
   let v = 0;
   for (let j = -1; j <= res + 1; j++) {
@@ -201,19 +272,44 @@ export function buildChunkPayload(
       colors[v * 3 + 1] = colorTmp[1];
       colors[v * 3 + 2] = colorTmp[2];
 
-      gen.colorAt(wx, wz, latH(ci, cj), 1 - ny * il, colorTmp, baseTexel);
-      baseCols[v * 3] = colorTmp[0];
-      baseCols[v * 3 + 1] = colorTmp[1];
-      baseCols[v * 3 + 2] = colorTmp[2];
-
-      // normal of the morph-start surface (central differences of startH —
-      // piecewise-bilinear, so this reproduces the coarse faceting)
-      const bnx = startH(ci - 1, cj) - startH(ci + 1, cj);
-      const bnz = startH(ci, cj - 1) - startH(ci, cj + 1);
-      const bil = 1 / Math.hypot(bnx, ny, bnz);
-      baseNrms[v * 3] = bnx * bil;
-      baseNrms[v * 3 + 1] = ny * bil;
-      baseNrms[v * 3 + 2] = bnz * bil;
+      // morph-start colour + normal: the replaced mesh's own vertex values,
+      // interpolated the way it rendered them (Gouraud across its triangles)
+      if (pCols !== null && pNrms !== null) {
+        const pi = Math.min(Math.floor(ci / k), prevRes - 1);
+        const pj = Math.min(Math.floor(cj / k), prevRes - 1);
+        const tx = ci / k - pi;
+        const tz = cj / k - pj;
+        const pW = prevRes + 1;
+        const a = (pj * pW + pi) * 3;
+        const b2 = (pj * pW + pi + 1) * 3;
+        const c2 = ((pj + 1) * pW + pi) * 3;
+        const d2 = ((pj + 1) * pW + pi + 1) * 3;
+        for (let ch = 0; ch < 3; ch++) {
+          baseCols[v * 3 + ch] = splitLerp(pCols[a + ch], pCols[b2 + ch], pCols[c2 + ch], pCols[d2 + ch], tx, tz);
+          baseNrms[v * 3 + ch] = splitLerp(pNrms[a + ch], pNrms[b2 + ch], pNrms[c2 + ch], pNrms[d2 + ch], tx, tz);
+        }
+      } else {
+        const gx = Math.floor(wx / shellCell);
+        const gz = Math.floor(wz / shellCell);
+        const tx = wx / shellCell - gx;
+        const tz = wz / shellCell - gz;
+        const cnA = shellCN(gx, gz);
+        const cnB = shellCN(gx + 1, gz);
+        const cnC = shellCN(gx, gz + 1);
+        const cnD = shellCN(gx + 1, gz + 1);
+        for (let ch = 0; ch < 3; ch++) {
+          baseCols[v * 3 + ch] = splitLerp(cnA[ch], cnB[ch], cnC[ch], cnD[ch], tx, tz);
+          baseNrms[v * 3 + ch] = splitLerp(cnA[ch + 3], cnB[ch + 3], cnC[ch + 3], cnD[ch + 3], tx, tz);
+        }
+      }
+      const bl = Math.hypot(baseNrms[v * 3], baseNrms[v * 3 + 1], baseNrms[v * 3 + 2]);
+      if (bl > 1e-6) {
+        baseNrms[v * 3] /= bl;
+        baseNrms[v * 3 + 1] /= bl;
+        baseNrms[v * 3 + 2] /= bl;
+      } else {
+        baseNrms[v * 3 + 1] = 1;
+      }
       v++;
     }
   }

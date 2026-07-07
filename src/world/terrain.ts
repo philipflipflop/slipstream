@@ -353,6 +353,12 @@ export class TerrainManager {
     }
   }
 
+  // DEBUG (?morphhold=1): freeze every chunk at its geomorph START. A frozen
+  // frame must be pixel-seamless against the shell/parent surfaces — any
+  // visible tile seam here is exactly the jump players see the frame a tile
+  // arrives, turned into a static image a screenshot can catch.
+  morphHold = false;
+
   // how far out each resolution reaches, in rings; set by quality preset
   ultraRing = -1; // res 112 (8 m steps) — close-up detail; -1 disables
   fineRing = 3;
@@ -399,6 +405,7 @@ export class TerrainManager {
     // advance geomorphs: fresh chunks swell from the surface they replaced
     for (let i = this.morphs.length - 1; i >= 0; i--) {
       const m = this.morphs[i];
+      if (this.morphHold) { m.u.value = 0; continue; }
       m.t = Math.min(m.t + dt / m.dur, 1);
       m.u.value = m.t * m.t * (3 - 2 * m.t);
       if (m.t >= 1) {

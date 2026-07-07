@@ -35,14 +35,16 @@ Cloudflare builds with **npm 10.9.2**; local npm is 11. Two rules:
   `terrain.worker.ts` with a synchronous fallback. Chunk LODs nest (56/28/14) and
   every payload carries `baseY` geomorph starts; the far horizon shell shares
   `shellVertexHeight` so fresh chunks rise exactly off the rendered shell.
-  Payloads also carry `baseCols` COLOUR-morph starts (same vertices re-sampled
-  at the replaced surface's texel — parent-LOD step or shell cell) and
-  `baseNrms` NORMAL-morph starts (central differences of the morph-start
-  surface), all blended by the same `uMorph` in makeChunkMat: arriving tiles
-  sharpen gradually in shape, paint AND shading. The paint/shading snaps were
-  the visible residue of the edge pop after geometry already morphed (a
-  normals snap reads as a brightness pop at low sun) — keep any new
-  per-vertex detail behind that blend.
+  Payloads also carry `baseCols`/`baseNrms` colour- and normal-morph starts,
+  blended by the same `uMorph` in makeChunkMat: arriving tiles sharpen
+  gradually in shape, paint AND shading. THE RULE: a morph start must
+  reproduce EXACTLY what the replaced mesh rendered — sample colour/normal at
+  the REPLACED mesh's own lattice (its heights, its slopes, its texel) and
+  splitLerp between lattice points; re-evaluating the field at the fine
+  vertices (even at a coarse texel) starts the crossfade from an image that
+  was never on screen and the difference pops in the arrival frame. Verify
+  with `?morphhold=1` (freezes every chunk at morph start): a frozen frame
+  must show a seamless coarse landscape — any visible tile seam IS the pop.
 - `src/world/terrain.ts` — streaming, LOD rings (quality-set `fineRing`/`midRing`
   + high-altitude variants), geomorph animation, horizon shell management (shell
   builds only when the chunk queue is idle — keep it that way).
