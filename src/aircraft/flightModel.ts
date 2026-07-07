@@ -601,7 +601,8 @@ export function crash(st: FlightState, reason: string): void {
   st.angVel.set(0, 0, 0);
 }
 
-/** Park the aircraft at the runway threshold, pointing down the strip. */
+/** Park the aircraft at the runway threshold, pointing down the strip.
+ *  At a parallel-runway international this is the MAIN (western) runway. */
 export function spawnOnRunway(
   spec: AircraftSpec,
   st: FlightState,
@@ -610,8 +611,9 @@ export function spawnOnRunway(
 ): void {
   // threshold = centre minus (half length − 150 m) along the runway heading
   const d = field.length / 2 - 150;
-  const x = field.x - field.sinH * d;
-  const z = field.z + field.cosH * d;
+  const across = field.rwySep ? -field.rwySep / 2 : 0;
+  const x = field.x - field.sinH * d + field.cosH * across;
+  const z = field.z + field.cosH * d + field.sinH * across;
   st.pos.set(x, 0, z);
   st.pos.y = heightAt(x, z) + spec.gearHeight;
   st.quat.setFromEuler(new THREE.Euler(spec.groundPitch, -field.heading, 0, 'YXZ'));

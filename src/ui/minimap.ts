@@ -322,17 +322,26 @@ export class Minimap {
       }
     }
 
-    // runway strips, oriented to their true headings
+    // runway strips, oriented to their true headings (internationals show
+    // their parallel pair)
     for (const ap of this.fields) {
       const mx = (ap.x - vx) * toMap;
       const mz = (ap.z - vz) * toMap;
       if (Math.hypot(mx, mz) > c - 8) continue;
-      const len = Math.max(ap.length * toMap, 9);
       ctx.save();
       ctx.translate(mx, mz);
       ctx.rotate(ap.heading);
       ctx.fillStyle = '#e8eef7';
-      ctx.fillRect(-1.7, -len / 2, 3.4, len);
+      if (ap.rwySep) {
+        const off = Math.max((ap.rwySep / 2) * toMap, 2.6);
+        const len1 = Math.max(ap.length * toMap, 9);
+        const len2 = Math.max((ap.rwy2Len ?? ap.length) * toMap, 9);
+        ctx.fillRect(-off - 1.7, -len1 / 2, 3.4, len1);
+        ctx.fillRect(off - 1.7, -len2 / 2, 3.4, len2);
+      } else {
+        const len = Math.max(ap.length * toMap, 9);
+        ctx.fillRect(-1.7, -len / 2, 3.4, len);
+      }
       ctx.restore();
     }
 
@@ -407,12 +416,15 @@ export class Minimap {
         mx = ux * maxR;
         mz = uz * maxR;
       }
-      const color = ap.major ? '#ffb340' : '#7dffa8';
+      // three tiers, clearly told apart: internationals amber (and bigger,
+      // with a double runway bar), regional majors white, strips green
+      const color = ap.intl ? '#ffb340' : ap.major ? '#e8eef7' : '#7dffa8';
+      const R = ap.intl ? 8 : 6;
 
       if (offMap) {
         ctx.fillStyle = color;
         ctx.beginPath();
-        ctx.moveTo(mx + ux * 9, mz + uz * 9);
+        ctx.moveTo(mx + ux * (R + 3), mz + uz * (R + 3));
         ctx.lineTo(mx - uz * 4.5, mz + ux * 4.5);
         ctx.lineTo(mx + uz * 4.5, mz - ux * 4.5);
         ctx.closePath();
@@ -421,10 +433,10 @@ export class Minimap {
       // beacon disc with a runway-direction bar through it
       ctx.fillStyle = 'rgba(7, 13, 24, 0.9)';
       ctx.beginPath();
-      ctx.arc(mx, mz, 6, 0, Math.PI * 2);
+      ctx.arc(mx, mz, R, 0, Math.PI * 2);
       ctx.fill();
       ctx.strokeStyle = color;
-      ctx.lineWidth = 1.4;
+      ctx.lineWidth = ap.intl ? 2 : 1.4;
       ctx.stroke();
       // the bar shows which way the runway runs even from the rim
       ctx.save();
@@ -433,18 +445,31 @@ export class Minimap {
       ctx.strokeStyle = color;
       ctx.lineWidth = 2;
       ctx.beginPath();
-      ctx.moveTo(0, -9);
-      ctx.lineTo(0, 9);
+      if (ap.intl) {
+        ctx.moveTo(-2.4, -R - 3);
+        ctx.lineTo(-2.4, R + 3);
+        ctx.moveTo(2.4, -R - 3);
+        ctx.lineTo(2.4, R + 3);
+      } else {
+        ctx.moveTo(0, -R - 3);
+        ctx.lineTo(0, R + 3);
+      }
       ctx.stroke();
       ctx.restore();
       ctx.fillStyle = color;
-      ctx.font = `700 8px 'Chakra Petch', monospace`;
+      ctx.font = `700 ${ap.intl ? 9 : 8}px 'Chakra Petch', monospace`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.save();
       ctx.translate(mx, mz);
       ctx.rotate(-rot); // keep the letter upright
       ctx.fillText(ap.code, 0, 0.5);
+      // the expanded chart names the internationals outright
+      if (this.expanded && ap.intl && !offMap) {
+        ctx.font = `700 9px 'Chakra Petch', monospace`;
+        ctx.textAlign = 'left';
+        ctx.fillText(ap.name, R + 5, 0.5);
+      }
       ctx.restore();
     }
 

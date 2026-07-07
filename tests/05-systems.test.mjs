@@ -134,10 +134,17 @@ function cruise(spec, v, alt = 800) {
   for (const ap of AIRPORTS) {
     const h = gen.heightAt(ap.x, ap.z);
     assert.ok(Math.abs(h - ap.elev) < 0.5, `${ap.name}: terrain ${h.toFixed(1)} m vs declared ${ap.elev} m`);
-    const hEnd = gen.heightAt(ap.x, ap.z + ap.length / 2 - 40);
+    // main runway centreline (internationals fly a parallel pair around the
+    // terminal apron, so the field CENTRE is concrete, not runway)
+    const mainX = ap.x - (ap.rwySep ? ap.rwySep / 2 : 0);
+    const hEnd = gen.heightAt(mainX, ap.z + ap.length / 2 - 40);
     assert.ok(Math.abs(hEnd - ap.elev) < 0.5, `${ap.name}: runway end not flat (${hEnd.toFixed(1)} m)`);
     assert.ok(ap.elev > 0.5, `${ap.name}: underwater`);
-    assert.ok(gen.isOnRunway(ap.x, ap.z), `${ap.name}: centre not paved`);
+    assert.ok(gen.isOnRunway(mainX, ap.z), `${ap.name}: main runway not paved`);
+    if (ap.rwySep) {
+      assert.ok(gen.isOnRunway(ap.x + ap.rwySep / 2, ap.z), `${ap.name}: second runway not paved`);
+      assert.ok(!gen.isOnRunway(ap.x, ap.z), `${ap.name}: terminal apron reads as runway`);
+    }
     console.log(`  ✓ ${ap.name} exists, flat at ${ap.elev} m, paved`);
   }
 }

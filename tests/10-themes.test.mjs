@@ -10,11 +10,12 @@ const themes = ['archipelago', 'mesa', 'metro'];
 for (const theme of themes) {
   const gen = new WorldGen(undefined, theme);
   const home = AIRPORTS[0];
-  const h = gen.heightAt(home.x, home.z);
+  const mainX = home.x - (home.rwySep ? home.rwySep / 2 : 0);
+  const h = gen.heightAt(mainX, home.z);
   assert.ok(Math.abs(h - home.elev) < 0.5, `${theme}: home field not flat (${h.toFixed(1)})`);
-  const hThr = gen.heightAt(home.x, home.z + home.length / 2 - 60);
+  const hThr = gen.heightAt(mainX, home.z + home.length / 2 - 60);
   assert.ok(Math.abs(hThr - home.elev) < 0.5, `${theme}: threshold not flat`);
-  assert.ok(gen.isOnRunway(home.x, home.z), `${theme}: home centre not paved`);
+  assert.ok(gen.isOnRunway(mainX, home.z), `${theme}: home main runway not paved`);
   console.log(`  ✓ ${theme}: home field flat at ${h.toFixed(1)} m, paved`);
 }
 

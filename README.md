@@ -107,7 +107,7 @@ speed tape. If `STALL` flashes — nose down, power up.
 | **Islander BN2T** | Turbine utility twin, tuned to the real BN2T's book numbers: ~330 m ground roll, ~1,000 fpm climb, ~170 kt max cruise, 45–52 kt stalls. |
 | **Bell 505 Jet Ranger X** | Light helicopter with its own flight-model regime: throttle is the collective, cyclic is attitude-command, pedals turn the hover. Translational lift, ground effect, torque, flapback (the nose rises with speed — cruise takes standing forward cyclic), tail-rotor drift in the hover, and vortex ring state if you sink onto your own downwash. Press `X` for a practice **engine failure**: rotor RPM becomes real energy — collective down at once or NR droops and the low-RPM horn sounds; keep speed on and it **autorotates** (~1,700 fpm, 3:1 glide), flare and spend the rotor's last energy on the cushion. Heli HUD shows TRQ and NR; `T` in a hover gives a hover hold. Skid landings anywhere flat. |
 | **Falcon Mk.IV** | WWII warbird. Huge roll rate, bites in the stall, tail-dragger. |
-| **Vector V-25** | Delta-wing fighter. Afterburner at 100% throttle, 900+ kt, internal cannon — pop the target balloons east of Meridian Field. |
+| **Vector V-25** | Delta-wing fighter. Afterburner at 100% throttle, 900+ kt, internal cannon — pop the target balloons east of Meridian Intl. |
 | **Meridian 700** | 16-tonne executive jet. Stately, fast in cruise, needs planning. |
 | **Airbus A320neo** | 64-tonne narrowbody airliner in flag-carrier colours, built to the real book numbers: 122.6 m² wing, twin LEAP-class engines, rotate ~150 kt, full-flap stall ~110 kt, MMO ≈ 470 kt, +2.5 g transport limits and normal-law **alpha protection** (full aft stick mushes — it will not stall). Fly the profile and grease it on. |
 
@@ -117,12 +117,17 @@ thrust model) — the handling differences fall out of the numbers, not scripts.
 ### Modes
 
 - **Free Flight** — explore. The world streams in around you forever: coasts, forests,
-  settlements, snow-capped ranges. The home cluster has three airfields — **Meridian
-  Field** (spawn, 2.4 km runway), **Northgate Strip** and **Highmoor Field** — and
-  beyond them, procedural strips appear every ~15–25 km of land, deterministically
-  seeded so they're always in the same place — each with its own runway heading. The
-  minimap marks every runway as an oriented strip (so you can line up an approach from
-  miles out) and always points the way home. Press `N` for the **flight computer**: a
+  settlements, snow-capped ranges. Three **international airports** anchor the map a
+  realistic ~50 km apart — **Meridian Intl** (spawn), **Westgate Intl** and **Osprey
+  Intl** — each built like Heathrow: twin parallel runways (3.5–3.9 km, 1.4 km apart,
+  27L/27R-style designators painted on), parallel taxiways with connectors, a central
+  terminal spine with pier fingers (solid — don't fly into them), cargo hangars and an
+  87 m control tower. Around them sit the smaller fields — **Northgate Strip**,
+  **Highmoor Field** — and procedural strips every ~25–40 km of land, deterministically
+  seeded so they're always in the same place, the longest of them full regional fields
+  with hangars and a tower. The minimap marks every runway as an oriented strip (so you
+  can line up an approach from miles out), paints the internationals amber with their
+  parallel pairs, and always points the way home. Press `N` for the **flight computer**: a
   zoomable, scrollable north-up chart — drag to pan far beyond the streamed horizon
   (it draws from the analytic heightfield, so distant terrain and airfields cost no
   3D rendering), click to drop waypoints (clicks near a runway snap to it),
@@ -168,7 +173,7 @@ thrust model) — the handling differences fall out of the numbers, not scripts.
 - `&wind=240,12` — force wind (heading it blows from, knots); free flight is random otherwise
 - `&mode=race` — start in Ring Rush
 - `&touch=1` — force the touch UI on desktop
-- `&apt=1` — spawn at another fixed airfield (1 = Northgate, 2 = Highmoor)
+- `&apt=1` — spawn at another fixed airfield (1 = Northgate, 2 = Highmoor, 3 = Westgate Intl, 4 = Osprey Intl)
 - `&ap=1` — engage the autopilot after the fast-forward
 - `&world=mesa` — select the map (`archipelago`, `mesa`, `metro`)
 - `&hdg=302` — point the takeoff at a given true heading

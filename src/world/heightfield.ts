@@ -41,8 +41,12 @@ export interface AirfieldDef {
   length: number;
   width: number;
   major: boolean; // gets hangars, tower, apron buildings
+  /** Heathrow-class international: twin parallel runways, central terminal
+   *  spine, taxiways — the full intlBuildings layout */
+  intl?: boolean;
   /** twin parallel runways (internationals): centre-to-centre spacing, m.
-   *  The runways sit at across ±rwySep/2; the second one uses rwy2Len. */
+   *  The MAIN runway (length) sits at across −rwySep/2 (west for heading 0),
+   *  the second (rwy2Len) at +rwySep/2. */
   rwySep?: number;
   rwy2Len?: number;
   /** runway direction, rad clockwise from north (0 = runway 36/18) */
@@ -51,12 +55,65 @@ export interface AirfieldDef {
   sinH: number;
 }
 
-/** The home cluster runs north–south; procedural strips point anywhere. */
+/**
+ * The fixed airports. Three Heathrow-class INTERNATIONALS (twin parallel
+ * runways ~1.4 km apart, central terminal spine, taxiways) sit a realistic
+ * 45-60 km from each other — spawn is Meridian Intl — plus two small
+ * fields from the original home cluster. All run north–south; procedural
+ * strips point anywhere.
+ */
 export const AIRPORTS: AirfieldDef[] = [
-  { name: 'MERIDIAN FIELD', code: 'H', x: 0, z: 0, elev: AIRPORT_ELEV, length: 2400, width: 36, major: true, heading: 0, cosH: 1, sinH: 0 },
+  { name: 'MERIDIAN INTL', code: 'M', x: 0, z: 0, elev: AIRPORT_ELEV, length: 3900, width: 45, major: true, intl: true, rwySep: 1400, rwy2Len: 3660, heading: 0, cosH: 1, sinH: 0 },
   { name: 'NORTHGATE STRIP', code: 'N', x: -2800, z: -16200, elev: 7, length: 1150, width: 26, major: false, heading: 0, cosH: 1, sinH: 0 },
-  { name: 'HIGHMOOR FIELD', code: 'M', x: 14200, z: -8800, elev: 150, length: 1500, width: 30, major: false, heading: 0, cosH: 1, sinH: 0 },
+  { name: 'HIGHMOOR FIELD', code: 'H', x: 14200, z: -8800, elev: 150, length: 1500, width: 30, major: true, heading: 0, cosH: 1, sinH: 0 },
+  { name: 'WESTGATE INTL', code: 'W', x: -42000, z: -24000, elev: 14, length: 3700, width: 45, major: true, intl: true, rwySep: 1400, rwy2Len: 3500, heading: 0, cosH: 1, sinH: 0 },
+  { name: 'OSPREY INTL', code: 'O', x: 36000, z: 34000, elev: 10, length: 3800, width: 45, major: true, intl: true, rwySep: 1400, rwy2Len: 3600, heading: 0, cosH: 1, sinH: 0 },
 ];
+
+/**
+ * International-airport building layout in the runway frame (along+ =
+ * toward the northern end for heading 0, across+ = east). ONE source of
+ * truth: airport.ts renders these boxes and obstacles.ts derives their
+ * collision volumes, so terminals are exactly as solid as they look.
+ */
+export interface AptBuilding {
+  along: number;  // centre, m along the runway axis
+  across: number; // centre, m across it
+  la: number;     // half-extent along
+  wa: number;     // half-extent across
+  h: number;      // height above the apron, m
+  kind: 'terminal' | 'pier' | 'tower' | 'hangar';
+}
+
+const INTL_BUILDINGS: AptBuilding[] = (() => {
+  const B: AptBuilding[] = [];
+  // three terminals down the central spine, each with two pier fingers
+  for (const ta of [-1050, 0, 1050]) {
+    B.push({ along: ta, across: 0, la: 200, wa: 58, h: 26, kind: 'terminal' });
+    B.push({ along: ta + 30, across: -170, la: 27, wa: 115, h: 13, kind: 'pier' });
+    B.push({ along: ta + 30, across: 170, la: 27, wa: 115, h: 13, kind: 'pier' });
+  }
+  B.push({ along: 480, across: 275, la: 11, wa: 11, h: 87, kind: 'tower' });
+  // maintenance/cargo hangars anchor the southern end of the spine
+  B.push({ along: -1620, across: -160, la: 55, wa: 48, h: 19, kind: 'hangar' });
+  B.push({ along: -1620, across: 130, la: 55, wa: 48, h: 19, kind: 'hangar' });
+  return B;
+})();
+
+/** Buildings of an international airport (empty for anything else). */
+export function intlBuildings(ap: AirfieldDef): AptBuilding[] {
+  return ap.intl ? INTL_BUILDINGS : [];
+}
+
+/** Runway-frame → world for airport layout points. */
+export function airfieldWorld(
+  ap: AirfieldDef, along: number, across: number,
+): { x: number; z: number } {
+  return {
+    x: ap.x + across * ap.cosH + along * ap.sinH,
+    z: ap.z + across * ap.sinH - along * ap.cosH,
+  };
+}
 
 /** Main field dimensions (back-compat for spawn + ring course). */
 export const RUNWAY_LENGTH = AIRPORTS[0].length;
@@ -193,15 +250,17 @@ export class WorldGen {
     return e;
   }
 
-  /** Continental boost guaranteeing dry ground around every fixed field. */
+  /** Continental boost guaranteeing dry ground around every fixed field
+   *  (internationals carry a ~5 km footprint, so their boost reaches wider). */
   private spawnBoost(x: number, z: number): number {
     let c = smoothstep(9000, 2000, Math.hypot(x, z)) * 0.55;
     for (let i = 1; i < AIRPORTS.length; i++) {
       const ap = AIRPORTS[i];
+      const R = ap.intl ? 8600 : 5200;
       const dax = x - ap.x;
       const daz = z - ap.z;
-      if (Math.abs(dax) < 5200 && Math.abs(daz) < 5200) {
-        c += smoothstep(5200, 1400, Math.hypot(dax, daz)) * 0.5;
+      if (Math.abs(dax) < R && Math.abs(daz) < R) {
+        c += smoothstep(R, R * 0.27, Math.hypot(dax, daz)) * 0.5;
       }
     }
     return c;
@@ -275,18 +334,19 @@ export class WorldGen {
   }
 
   private makeField(cx: number, cz: number): AirfieldDef | null {
-    // roughly half the cells host a candidate; terrain rejects (water,
-    // mountains) thin that out further → strips every ~15-25 km of land
-    if (hash2(cx * 3 + 11, cz * 5 - 17) > 0.52) return null;
+    // about a third of the cells host a candidate; terrain rejects (water,
+    // mountains) thin that out further → strips every ~25-40 km of land, a
+    // realistic GA density now that the internationals anchor the map
+    if (hash2(cx * 3 + 11, cz * 5 - 17) > 0.34) return null;
 
     const jx = (hash2(cx * 7 + 1, cz * 7 + 3) - 0.5) * 6000;
     const jz = (hash2(cx * 13 + 5, cz * 11 + 9) - 0.5) * 6000;
     const ax = cx * CELL + CELL / 2 + jx;
     const az = cz * CELL + CELL / 2 + jz;
 
-    // stay clear of the hand-placed home cluster
+    // stay clear of the hand-placed fields (wider berth around internationals)
     for (const ap of AIRPORTS) {
-      if (Math.hypot(ax - ap.x, az - ap.z) < 9000) return null;
+      if (Math.hypot(ax - ap.x, az - ap.z) < (ap.intl ? 14000 : 9000)) return null;
     }
 
     // each strip gets its own runway direction (25° steps, ±75° off north)
@@ -301,16 +361,19 @@ export class WorldGen {
     if (Math.abs(this.baseHeightAt(ax - sinH * 800, az + cosH * 800) - elev) > 35) return null;
 
     const h3 = hash2(cx * 17 - 3, cz * 19 + 7);
-    const name = `${FIELD_NAMES[Math.floor(hash2(cx + 31, cz - 47) * FIELD_NAMES.length)]} STRIP`;
+    const length = 1100 + Math.floor(h3 * 3) * 280;
+    // the longest strips are proper regional fields: hangars, tower, apron
+    const major = length > 1600;
+    const name = `${FIELD_NAMES[Math.floor(hash2(cx + 31, cz - 47) * FIELD_NAMES.length)]} ${major ? 'REGIONAL' : 'STRIP'}`;
     return {
       name,
       code: name[0],
       x: ax,
       z: az,
       elev,
-      length: 1100 + Math.floor(h3 * 3) * 280,
-      width: 26,
-      major: false,
+      length,
+      width: major ? 30 : 26,
+      major,
       heading,
       cosH,
       sinH,
@@ -411,7 +474,7 @@ export class WorldGen {
     return false;
   }
 
-  /** True if (x,z) is on any paved runway strip. */
+  /** True if (x,z) is on any paved runway strip (both of a parallel pair). */
   isOnRunway(x: number, z: number): boolean {
     const n = this.gatherFields(x, z);
     for (let i = 0; i < n; i++) {
@@ -420,7 +483,15 @@ export class WorldGen {
       const daz = z - ap.z;
       const along = dax * ap.sinH - daz * ap.cosH;
       const across = dax * ap.cosH + daz * ap.sinH;
-      if (
+      if (ap.rwySep) {
+        const half = ap.rwySep / 2;
+        if (
+          (Math.abs(across + half) < ap.width * 0.5 + 6 &&
+            Math.abs(along) < ap.length * 0.5 + 30) ||
+          (Math.abs(across - half) < ap.width * 0.5 + 6 &&
+            Math.abs(along) < (ap.rwy2Len ?? ap.length) * 0.5 + 30)
+        ) return true;
+      } else if (
         Math.abs(across) < ap.width * 0.5 + 6 &&
         Math.abs(along) < ap.length * 0.5 + 30
       ) return true;
@@ -527,11 +598,43 @@ export class WorldGen {
         const daz = z - ap.z;
         const along = dax * ap.sinH - daz * ap.cosH;
         const across = dax * ap.cosH + daz * ap.sinH;
-        if (
-          Math.abs(across) < ap.width * 0.5 + 6 &&
-          Math.abs(along) < ap.length * 0.5 + 30
-        ) {
+        // runway asphalt — both strips of a parallel pair
+        const halfSep = ap.rwySep ? ap.rwySep / 2 : 0;
+        const onMain = Math.abs(across + halfSep) < ap.width * 0.5 + 6 &&
+          Math.abs(along) < ap.length * 0.5 + 30;
+        const onSecond = !!ap.rwySep &&
+          Math.abs(across - halfSep) < ap.width * 0.5 + 6 &&
+          Math.abs(along) < (ap.rwy2Len ?? ap.length) * 0.5 + 30;
+        if ((ap.rwySep ? onMain || onSecond : onMain)) {
           r = 0.16; g = 0.17; b = 0.19;
+          break;
+        }
+        // internationals: the whole central slab between the parallels is
+        // concrete (wide enough to survive every LOD's texel), with the
+        // taxiway system painted darker INTO the terrain — same-texel paint
+        // never z-fights the way overlay planes over mismatched tones do.
+        // The taxi lines fade to the slab tone when the mesh can't resolve
+        // them (coarse LODs, far shell), exactly like the city street grid.
+        if (ap.intl && Math.abs(across) < 700 && Math.abs(along) < 1950) {
+          const ac = Math.abs(across);
+          const aAl = Math.abs(along);
+          const a = smoothstep(700, 640, ac) * smoothstep(1950, 1800, aAl);
+          let cr = 0.4, cg = 0.41, cb = 0.43; // apron/slab concrete
+          const gk = texel > 0 ? 1 - smoothstep(10, 26, texel) : 1;
+          if (gk > 0 && a > 0) {
+            // parallel taxiways inside each runway + connector stubs
+            const conn = ap.length / 2 - 240;
+            const onPara = Math.abs(ac - 600) < 15 && aAl < conn + 15;
+            const onConn = ac > 560 &&
+              (aAl < 13 || Math.abs(aAl - 650) < 13 ||
+                Math.abs(aAl - 1300) < 13 || Math.abs(aAl - conn) < 13);
+            if (onPara || onConn) {
+              cr = lerp(cr, 0.19, gk);
+              cg = lerp(cg, 0.2, gk);
+              cb = lerp(cb, 0.22, gk);
+            }
+          }
+          r = lerp(r, cr, a); g = lerp(g, cg, a); b = lerp(b, cb, a);
           break;
         }
         const fr = Math.hypot(across, along * 0.45);

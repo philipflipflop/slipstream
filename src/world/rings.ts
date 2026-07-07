@@ -3,7 +3,7 @@
  * laid out over the terrain with safe clearance.
  */
 import * as THREE from 'three';
-import { WorldGen, RUNWAY_LENGTH } from './heightfield';
+import { WorldGen, AIRPORTS } from './heightfield';
 
 export const RING_COUNT = 14;
 const RING_RADIUS = 30;
@@ -26,9 +26,12 @@ export class RingCourse {
   constructor(scene: THREE.Scene, gen: WorldGen) {
     const torus = new THREE.TorusGeometry(RING_RADIUS, 2.4, 10, 36);
 
-    // carve a curving path north from the runway
-    let x = 0;
-    let z = -RUNWAY_LENGTH / 2 - 700;
+    // carve a curving path north from the spawn runway (the western one
+    // of the international's parallel pair)
+    const home = AIRPORTS[0];
+    const across = home.rwySep ? -home.rwySep / 2 : 0;
+    let x = home.x + home.cosH * across;
+    let z = home.z + home.sinH * across - home.length / 2 - 700;
     let heading = 0; // radians, 0 = flying toward -Z
     let y = 140;
     for (let i = 0; i < RING_COUNT; i++) {

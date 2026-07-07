@@ -1,8 +1,12 @@
 /**
  * Airfield furniture, built on demand for whichever airfields (hand-placed
- * or procedural) are near the player: painted runway, edge lighting, PAPI
- * and a windsock everywhere; the major home field also gets hangars, a
- * control tower and an apron. Far fields are disposed again.
+ * or procedural) are near the player: painted runway(s), edge lighting,
+ * PAPI at both thresholds and a windsock everywhere; regional majors get
+ * hangars, a tower and an apron; INTERNATIONALS get the full Heathrow
+ * treatment — twin parallel runways with proper designators (27L/27R
+ * style), parallel taxiways with connectors, a central terminal spine with
+ * pier fingers (solid — collision comes from the same intlBuildings list),
+ * cargo hangars and an 87 m control tower. Far fields are disposed again.
  *
  * Airfield lights follow the real-world rule that lights are POINT sources
  * seen at range: the meshes are rescaled per frame so they never shrink
@@ -11,52 +15,20 @@
  * many kilometres out, which is how you find the field in the dark.
  */
 import * as THREE from 'three';
-import { WorldGen, AirfieldDef } from './heightfield';
+import { WorldGen, AirfieldDef, intlBuildings } from './heightfield';
+import { runwayIdent } from '../nav/ils';
 import { clamp } from '../core/math';
 
 const BUILD_RADIUS = 20000;
 const DROP_RADIUS = 24000;
-
-function runwayTexture(): THREE.CanvasTexture {
-  const c = document.createElement('canvas');
-  c.width = 256;
-  c.height = 2048;
-  const ctx = c.getContext('2d')!;
-
-  ctx.fillStyle = '#2a2c30';
-  ctx.fillRect(0, 0, 256, 2048);
-  for (let i = 0; i < 220; i++) {
-    ctx.fillStyle = `rgba(${20 + Math.random() * 40},${20 + Math.random() * 40},${22 + Math.random() * 40},0.16)`;
-    ctx.fillRect(Math.random() * 256, Math.random() * 2048, 2 + Math.random() * 8, 14 + Math.random() * 80);
-  }
-  ctx.fillStyle = '#e8e4da';
-  for (const yBase of [18, 2048 - 58]) {
-    for (let i = 0; i < 8; i++) ctx.fillRect(14 + i * 30, yBase, 18, 40);
-  }
-  for (let y = 160; y < 1900; y += 96) ctx.fillRect(122, y, 12, 52);
-  ctx.fillRect(4, 0, 5, 2048);
-  ctx.fillRect(247, 0, 5, 2048);
-  ctx.font = 'bold 84px sans-serif';
-  ctx.textAlign = 'center';
-  ctx.fillText('36', 128, 188);
-  ctx.save();
-  ctx.translate(128, 1900);
-  ctx.rotate(Math.PI);
-  ctx.fillText('18', 0, 0);
-  ctx.restore();
-
-  const tex = new THREE.CanvasTexture(c);
-  tex.colorSpace = THREE.SRGBColorSpace;
-  tex.anisotropy = 4;
-  return tex;
-}
 
 interface BuiltField {
   def: AirfieldDef;
   group: THREE.Group;
   sockPivot: THREE.Group;
   beacon: THREE.Mesh | null;
-  /** PAPI boxes (southern approach) + their world positions, closest first */
+  /** PAPI boxes in rows of four (closest to the runway first), both
+   *  thresholds of every runway; angle thresholds index PAPI_DEG[i % 4] */
   papi: Array<{ mesh: THREE.Mesh; world: THREE.Vector3 }>;
   /** runway edge lights: instanced mesh + local and world positions */
   edge: { mesh: THREE.InstancedMesh; local: Float32Array; world: Float32Array };
@@ -73,22 +45,62 @@ const _v = new THREE.Vector3();
 
 export class Airport {
   private built = new Map<string, BuiltField>();
-  private tex: THREE.CanvasTexture;
-  private rwMat: THREE.MeshLambertMaterial;
+  private rwMats = new Map<string, THREE.MeshLambertMaterial>();
   private scanTimer = 0;
   private queryScratch: AirfieldDef[] = [];
   private windPointYaw = Math.PI; // world yaw the sock POINTS (downwind)
   private windKt = 0;
 
-  constructor(private scene: THREE.Scene, private gen: WorldGen, private nightOps = false) {
-    this.tex = runwayTexture();
-    this.rwMat = new THREE.MeshLambertMaterial({ map: this.tex });
-  }
+  constructor(private scene: THREE.Scene, private gen: WorldGen, private nightOps = false) {}
 
   /** Wind for the windsocks: aviation convention, heading the wind is FROM. */
   setWind(fromHeading: number, kt: number): void {
     this.windPointYaw = fromHeading + Math.PI;
     this.windKt = kt;
+  }
+
+  /** Runway surface material with true designators painted on each end. */
+  private runwayMat(n1: string, n2: string): THREE.MeshLambertMaterial {
+    const key = `${n1}/${n2}`;
+    let mat = this.rwMats.get(key);
+    if (mat) return mat;
+
+    const c = document.createElement('canvas');
+    c.width = 256;
+    c.height = 2048;
+    const ctx = c.getContext('2d')!;
+
+    ctx.fillStyle = '#2a2c30';
+    ctx.fillRect(0, 0, 256, 2048);
+    for (let i = 0; i < 220; i++) {
+      ctx.fillStyle = `rgba(${20 + Math.random() * 40},${20 + Math.random() * 40},${22 + Math.random() * 40},0.16)`;
+      ctx.fillRect(Math.random() * 256, Math.random() * 2048, 2 + Math.random() * 8, 14 + Math.random() * 80);
+    }
+    ctx.fillStyle = '#e8e4da';
+    for (const yBase of [18, 2048 - 58]) {
+      for (let i = 0; i < 8; i++) ctx.fillRect(14 + i * 30, yBase, 18, 40);
+    }
+    for (let y = 160; y < 1900; y += 96) ctx.fillRect(122, y, 12, 52);
+    ctx.fillRect(4, 0, 5, 2048);
+    ctx.fillRect(247, 0, 5, 2048);
+    // designators: canvas TOP maps to the runway's NORTHERN end, so the
+    // southern-approach number (n1) sits at the bottom, glyph tops pointing
+    // north — upright to the pilot on that approach, like real paint
+    ctx.font = 'bold 78px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(n1, 128, 1955);
+    ctx.save();
+    ctx.translate(128, 145);
+    ctx.rotate(Math.PI);
+    ctx.fillText(n2, 0, 0);
+    ctx.restore();
+
+    const tex = new THREE.CanvasTexture(c);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.anisotropy = 4;
+    mat = new THREE.MeshLambertMaterial({ map: tex });
+    this.rwMats.set(key, mat);
+    return mat;
   }
 
   update(time: number, px: number, pz: number, py = 0): void {
@@ -145,7 +157,7 @@ export class Airport {
       mesh.instanceMatrix.needsUpdate = true;
 
       // PAPI: each box compares the aircraft's angle above its own position
-      // against its slope threshold — white above, red below, so the row
+      // against its slope threshold — white above, red below, so each row
       // reads the classic "two white two red, you're all right"
       for (let i = 0; i < f.papi.length; i++) {
         const b = f.papi[i];
@@ -153,7 +165,7 @@ export class Airport {
         if (dist > 12000) continue; // too far to resolve — skip the math
         const angle = Math.atan2(py - b.world.y, Math.max(dist, 1)) * (180 / Math.PI);
         (b.mesh.material as THREE.MeshBasicMaterial).color.setHex(
-          angle > PAPI_DEG[i] ? 0xfff4e0 : 0xff2418,
+          angle > PAPI_DEG[i % 4] ? 0xfff4e0 : 0xff2418,
         );
         b.mesh.scale.setScalar(clamp(dist / (this.nightOps ? 550 : 1100), 1, this.nightOps ? 22 : 3));
       }
@@ -185,35 +197,68 @@ export class Airport {
     const g = new THREE.Group();
     const E = ap.elev;
 
-    const rw = new THREE.Mesh(new THREE.PlaneGeometry(ap.width, ap.length), this.rwMat);
-    rw.rotation.x = -Math.PI / 2;
-    rw.position.set(ap.x, E + 0.06, ap.z);
-    rw.receiveShadow = true;
-    g.add(rw);
+    // one entry per runway: internationals fly a parallel pair (main/west
+    // first — that's the spawn runway), everything else a single strip
+    const runways = ap.rwySep
+      ? [
+          { off: -ap.rwySep / 2, len: ap.length, s1: 'L', s2: 'R' },
+          { off: ap.rwySep / 2, len: ap.rwy2Len ?? ap.length, s1: 'R', s2: 'L' },
+        ]
+      : [{ off: 0, len: ap.length, s1: '', s2: '' }];
 
-    // edge lights (fog-immune point sources, rescaled per frame)
+    const papi: Array<{ mesh: THREE.Mesh; world: THREE.Vector3 }> = [];
+    const papiGeo = new THREE.BoxGeometry(1.8, 0.9, 0.9);
+    const localPts: number[] = [];
+
+    for (const rw of runways) {
+      const n1 = runwayIdent(ap.heading) + rw.s1;
+      const n2 = runwayIdent(ap.heading + Math.PI) + rw.s2;
+      const rwMesh = new THREE.Mesh(new THREE.PlaneGeometry(ap.width, rw.len), this.runwayMat(n1, n2));
+      rwMesh.rotation.x = -Math.PI / 2;
+      rwMesh.position.set(ap.x + rw.off, E + 0.06, ap.z);
+      rwMesh.receiveShadow = true;
+      g.add(rwMesh);
+
+      // edge light positions (fog-immune point sources, rescaled per frame)
+      const n = Math.floor(rw.len / 60);
+      for (let i = 0; i < n; i++) {
+        const z = ap.z - rw.len / 2 + 30 + i * 60;
+        localPts.push(ap.x + rw.off - ap.width / 2 - 2.5, E + 0.5, z);
+        localPts.push(ap.x + rw.off + ap.width / 2 + 2.5, E + 0.5, z);
+      }
+
+      // PAPI at BOTH thresholds, on the approaching pilot's left
+      for (const end of [1, -1]) {
+        for (let i = 0; i < 4; i++) {
+          const box = new THREE.Mesh(papiGeo, new THREE.MeshBasicMaterial({ color: 0xfff4e0, fog: false }));
+          box.position.set(
+            ap.x + rw.off - end * (ap.width / 2 + 16 + i * 9),
+            E + 0.8,
+            ap.z + end * (rw.len / 2 - 260),
+          );
+          g.add(box);
+          papi.push({ mesh: box, world: new THREE.Vector3() });
+        }
+      }
+    }
+
     const lightGeo = new THREE.SphereGeometry(0.42, 6, 5);
     const edgeMat = new THREE.MeshBasicMaterial({ color: 0xffdd88, fog: false });
-    const n = Math.floor(ap.length / 60);
-    const lights = new THREE.InstancedMesh(lightGeo, edgeMat, n * 2);
-    const local = new Float32Array(n * 2 * 3);
-    for (let i = 0; i < n; i++) {
-      const z = ap.z - ap.length / 2 + 30 + i * 60;
-      local.set([ap.x - ap.width / 2 - 2.5, E + 0.5, z], i * 6);
-      local.set([ap.x + ap.width / 2 + 2.5, E + 0.5, z], i * 6 + 3);
-    }
-    for (let i = 0; i < n * 2; i++) {
+    const local = Float32Array.from(localPts);
+    const lightCount = local.length / 3;
+    const lights = new THREE.InstancedMesh(lightGeo, edgeMat, lightCount);
+    for (let i = 0; i < lightCount; i++) {
       _m.makeTranslation(local[i * 3], local[i * 3 + 1], local[i * 3 + 2]);
       lights.setMatrixAt(i, _m);
     }
     // instanced bounds are the 0.42 m base sphere — never let that cull a
-    // 2.4 km string of lights
+    // multi-kilometre string of lights
     lights.frustumCulled = false;
     g.add(lights);
 
-    // windsock on a pivot near the southern threshold (wind points it)
-    const sockX = ap.x - ap.width / 2 - 14;
-    const sockZ = ap.z + ap.length / 2 - 80;
+    // windsock on a pivot near the southern threshold of the main runway
+    const sockX = ap.x + runways[0].off - ap.width / 2 - 14;
+    const sockZ = ap.z + runways[0].len / 2 - 80;
     const pole = new THREE.Mesh(
       new THREE.CylinderGeometry(0.18, 0.18, 9, 6),
       new THREE.MeshLambertMaterial({ color: 0xd8dde2 }),
@@ -232,28 +277,17 @@ export class Airport {
     g.add(sockPivot);
 
     let beacon: THREE.Mesh | null = null;
-    if (ap.major) {
-      beacon = this.buildMajorExtras(g, ap);
-    }
-
-    // PAPI row on the left of the southern touchdown zone (runway 36 side)
-    const papi: Array<{ mesh: THREE.Mesh; world: THREE.Vector3 }> = [];
-    const papiGeo = new THREE.BoxGeometry(1.8, 0.9, 0.9);
-    for (let i = 0; i < 4; i++) {
-      const box = new THREE.Mesh(papiGeo, new THREE.MeshBasicMaterial({ color: 0xfff4e0, fog: false }));
-      box.position.set(ap.x - ap.width / 2 - 16 - i * 9, E + 0.8, ap.z + ap.length / 2 - 260);
-      g.add(box);
-      papi.push({ mesh: box, world: new THREE.Vector3() });
-    }
+    if (ap.intl) beacon = this.buildIntlExtras(g, ap);
+    else if (ap.major) beacon = this.buildMajorExtras(g, ap);
 
     // airport beacon: alternating white/green flash, the "find me" light.
     // Night presets only — by day it reads as visual noise.
     let aeroBeacon: BuiltField['aeroBeacon'] = null;
     if (this.nightOps) {
-      const bx = ap.major ? ap.x + 120 : sockX;
-      const by = ap.major ? E + 35 : E + 10.2;
-      const bz = ap.major ? ap.z + 30 : sockZ;
-      if (!ap.major) {
+      const bx = ap.intl ? ap.x + 275 : ap.major ? ap.x + 120 : sockX;
+      const by = ap.intl ? E + 92 : ap.major ? E + 35 : E + 10.2;
+      const bz = ap.intl ? ap.z - 480 : ap.major ? ap.z + 30 : sockZ;
+      if (!ap.major && !ap.intl) {
         const mast = new THREE.Mesh(
           new THREE.CylinderGeometry(0.12, 0.12, 2.6, 5),
           new THREE.MeshLambertMaterial({ color: 0x9aa0a6 }),
@@ -306,6 +340,7 @@ export class Airport {
     });
   }
 
+  /** Regional major fields: small apron, two GA hangars, a low tower. */
   private buildMajorExtras(g: THREE.Group, ap: AirfieldDef): THREE.Mesh {
     const E = ap.elev;
     const ax = ap.x + 110;
@@ -362,5 +397,84 @@ export class Airport {
     beacon.position.set(ap.x + 120, E + 33, ap.z + 30);
     g.add(beacon);
     return beacon;
+  }
+
+  /**
+   * International extras: central apron, parallel taxiways + connectors,
+   * and the terminal spine from intlBuildings — the SAME list obstacles.ts
+   * turns into collision boxes, so the buildings are exactly as solid as
+   * they look. Returns the tower's red obstruction beacon.
+   */
+  private buildIntlExtras(g: THREE.Group, ap: AirfieldDef): THREE.Mesh {
+    const E = ap.elev;
+    // NOTE: the concrete slab and taxiway system are painted into the
+    // TERRAIN vertex colours (heightfield colorAt) — kilometre-scale
+    // overlay planes z-fight against mismatched terrain tones, and paint
+    // at the mesh's own texel can't
+
+    const wallMat = new THREE.MeshLambertMaterial({ color: 0x9ba3ac });
+    const hangarMat = new THREE.MeshLambertMaterial({ color: 0x788089 });
+    const doorMat = new THREE.MeshLambertMaterial({ color: 0x4d565e });
+    const roofMat = new THREE.MeshLambertMaterial({ color: 0x53585e });
+    const glassMat = new THREE.MeshStandardMaterial({
+      color: 0x22303e, roughness: 0.25, metalness: 0.55,
+    });
+    if (this.nightOps) {
+      // lit concourses after dark — the terminal reads from final approach
+      glassMat.emissive = new THREE.Color(0xffd9a0);
+      glassMat.emissiveIntensity = 0.55;
+    }
+
+    let towerBeacon: THREE.Mesh | null = null;
+    for (const b of intlBuildings(ap)) {
+      const bx = ap.x + b.across;
+      const bz = ap.z - b.along;
+      if (b.kind === 'tower') {
+        const shaft = new THREE.Mesh(new THREE.CylinderGeometry(4.5, 6.5, b.h - 9, 10), wallMat);
+        shaft.position.set(bx, E + (b.h - 9) / 2, bz);
+        shaft.castShadow = true;
+        g.add(shaft);
+        const cab = new THREE.Mesh(new THREE.CylinderGeometry(8, 6.4, 9, 10), glassMat);
+        cab.position.set(bx, E + b.h - 4.5, bz);
+        cab.castShadow = true;
+        g.add(cab);
+        towerBeacon = new THREE.Mesh(
+          new THREE.SphereGeometry(1.1, 8, 6),
+          new THREE.MeshBasicMaterial({ color: 0xff4040 }),
+        );
+        towerBeacon.position.set(bx, E + b.h + 3, bz);
+        g.add(towerBeacon);
+        continue;
+      }
+      const body = new THREE.Mesh(
+        new THREE.BoxGeometry(b.wa * 2, b.h, b.la * 2),
+        b.kind === 'hangar' ? hangarMat : wallMat,
+      );
+      body.position.set(bx, E + b.h / 2, bz);
+      body.castShadow = true;
+      body.receiveShadow = true;
+      g.add(body);
+      if (b.kind === 'hangar') {
+        const door = new THREE.Mesh(new THREE.PlaneGeometry(b.wa * 1.7, b.h * 0.7), doorMat);
+        door.position.set(bx, E + b.h * 0.35, bz - b.la - 0.15);
+        door.rotation.y = Math.PI; // faces the terminals to the north
+        g.add(door);
+      } else {
+        // glazing band wrapping the upper storey + a flat roof cap
+        const band = new THREE.Mesh(
+          new THREE.BoxGeometry(b.wa * 2 + 0.6, b.h * 0.32, b.la * 2 + 0.6),
+          glassMat,
+        );
+        band.position.set(bx, E + b.h * 0.62, bz);
+        g.add(band);
+        const roof = new THREE.Mesh(
+          new THREE.BoxGeometry(b.wa * 1.92, 1.2, b.la * 1.92),
+          roofMat,
+        );
+        roof.position.set(bx, E + b.h + 0.6, bz);
+        g.add(roof);
+      }
+    }
+    return towerBeacon!;
   }
 }

@@ -5,25 +5,33 @@
  * so what you see is exactly what you hit, with zero placement duplication.
  * Pure module (no three.js/DOM): runs in the Node test harness.
  */
-import { WorldGen } from './heightfield';
+import { WorldGen, AirfieldDef, intlBuildings, airfieldWorld } from './heightfield';
 import { buildScatter, CHUNK_SIZE, ScatterLists } from './terrainBuilder';
 
 interface Solid {
-  box: boolean;  // axis-aligned box (hx/hz half-extents) vs vertical cylinder (hx radius)
+  box: boolean;  // box (hx/hz half-extents) vs vertical cylinder (hx radius)
   x: number;
   z: number;
   top: number;   // absolute height of the solid's top, metres
   hx: number;
   hz: number;
   reason: string;
+  /** rotated box (airport buildings): cos/sin of the field heading — the
+   *  test runs in the runway frame (hx = across half, hz = along half) */
+  cs?: number;
+  sn?: number;
 }
 
 const BUILDING = 'FLEW INTO A BUILDING';
 const TREE = 'FLEW INTO THE TREES';
 const ROCK = 'STRUCK A ROCK PINNACLE';
+const TERMINAL = 'CRASHED INTO THE TERMINAL';
+const TOWER = 'HIT THE CONTROL TOWER';
+const HANGAR = 'FLEW INTO A HANGAR';
 
 export class ObstacleField {
   private cache = new Map<string, Solid[]>();
+  private fieldScratch: AirfieldDef[] = [];
 
   constructor(private gen: WorldGen) {}
 
@@ -37,9 +45,42 @@ export class ObstacleField {
         if (oldest !== undefined) this.cache.delete(oldest);
       }
       list = solidsFrom(buildScatter(this.gen, cx, cz, 2));
+      this.addAirportSolids(cx, cz, list);
       this.cache.set(key, list);
     }
     return list;
+  }
+
+  /** International-terminal buildings are as solid as the city towers.
+   *  A building registers in EVERY chunk its bounding box touches, because
+   *  hit() only scans a ±60 m margin of chunks around the point. */
+  private addAirportSolids(cx: number, cz: number, out: Solid[]): void {
+    const x0 = cx * CHUNK_SIZE;
+    const z0 = cz * CHUNK_SIZE;
+    const fields = this.gen.airfieldsNear(
+      x0 + CHUNK_SIZE / 2, z0 + CHUNK_SIZE / 2, 4200, this.fieldScratch,
+    );
+    for (const ap of fields) {
+      for (const b of intlBuildings(ap)) {
+        const c = airfieldWorld(ap, b.along, b.across);
+        // world-axis bounds of the rotated footprint
+        const ex = b.wa * Math.abs(ap.cosH) + b.la * Math.abs(ap.sinH);
+        const ez = b.wa * Math.abs(ap.sinH) + b.la * Math.abs(ap.cosH);
+        if (c.x + ex < x0 || c.x - ex > x0 + CHUNK_SIZE) continue;
+        if (c.z + ez < z0 || c.z - ez > z0 + CHUNK_SIZE) continue;
+        out.push({
+          box: true,
+          x: c.x,
+          z: c.z,
+          top: ap.elev + b.h,
+          hx: b.wa,
+          hz: b.la,
+          cs: ap.cosH,
+          sn: ap.sinH,
+          reason: b.kind === 'tower' ? TOWER : b.kind === 'hangar' ? HANGAR : TERMINAL,
+        });
+      }
+    }
   }
 
   /** Pre-bake the 3×3 chunks around (x,z), at most one build per call, so
@@ -73,7 +114,12 @@ export class ObstacleField {
           const dx = x - s.x;
           const dz = z - s.z;
           if (s.box) {
-            if (Math.abs(dx) < s.hx + r && Math.abs(dz) < s.hz + r) return s.reason;
+            if (s.cs !== undefined) {
+              // rotated box: test in the owning runway's frame
+              const al = dx * s.sn! - dz * s.cs!;
+              const ac = dx * s.cs! + dz * s.sn!;
+              if (Math.abs(ac) < s.hx + r && Math.abs(al) < s.hz + r) return s.reason;
+            } else if (Math.abs(dx) < s.hx + r && Math.abs(dz) < s.hz + r) return s.reason;
           } else {
             const rr = s.hx + r;
             if (dx * dx + dz * dz < rr * rr) return s.reason;
