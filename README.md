@@ -1,7 +1,7 @@
 # ✈ SLIPSTREAM
 
 An endless-world flight simulator that runs entirely in the browser — desktop and mobile.
-Six aircraft with genuinely different flight models (including a helicopter), an infinite procedurally generated
+Eight aircraft with genuinely different flight models (including a helicopter and an airliner), an infinite procedurally generated
 archipelago, a glass-cockpit HUD, a time-trial ring course, and a fully procedural
 soundscape. No model files, no textures, no audio assets: everything is generated at runtime.
 
@@ -97,6 +97,7 @@ speed tape. If `STALL` flashes — nose down, power up.
 | **Falcon Mk.IV** | WWII warbird. Huge roll rate, bites in the stall, tail-dragger. |
 | **Vector V-25** | Delta-wing fighter. Afterburner at 100% throttle, 900+ kt, internal cannon — pop the target balloons east of Meridian Field. |
 | **Meridian 700** | 16-tonne executive jet. Stately, fast in cruise, needs planning. |
+| **Airbus A320neo** | 64-tonne narrowbody airliner in flag-carrier colours, built to the real book numbers: 122.6 m² wing, twin LEAP-class engines, rotate ~150 kt, full-flap stall ~110 kt, MMO ≈ 470 kt, +2.5 g transport limits and normal-law **alpha protection** (full aft stick mushes — it will not stall). Fly the profile and grease it on. |
 
 Each one is parameterised physically (mass, wing area, lift slope, stall angle, drag,
 thrust model) — the handling differences fall out of the numbers, not scripts.
@@ -150,7 +151,7 @@ thrust model) — the handling differences fall out of the numbers, not scripts.
 
 - `?autofly=1` — autopilot takes off and climbs (demo / smoke test; telemetry in the tab title)
 - `&ff=60` — fast-forward N seconds of physics before the first frame
-- `&ac=vector` — select aircraft (`skylark`, `islander`, `jetranger`, `falcon`, `vector`, `meridian`)
+- `&ac=vector` — select aircraft (`skylark`, `islander`, `jetranger`, `falcon`, `vector`, `meridian`, `a320`)
 - `&tod=night` — time of day (`dawn`, `day`, `dusk`, `night`)
 - `&wind=240,12` — force wind (heading it blows from, knots); free flight is random otherwise
 - `&mode=race` — start in Ring Rush

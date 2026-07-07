@@ -10,7 +10,9 @@ const KT = 1.943844;
 for (const spec of CATALOG) {
   const st = createState();
   spawnOnRunway(spec, st, heightAt);
-  const inp = { pitch: 0, roll: 0, yaw: 0, throttle: 1, flaps: 0.33, gearDown: true, brakes: false };
+  // airliner-class wing loadings take off with a deeper flap setting (CONF 2)
+  const toFlaps = spec.mass / spec.wingArea > 400 ? 0.66 : 0.33;
+  const inp = { pitch: 0, roll: 0, yaw: 0, throttle: 1, flaps: toFlaps, gearDown: true, brakes: false };
   const vr = Math.sqrt((2 * spec.mass * 9.81) / (1.225 * spec.wingArea * 1.2)) * 0.85;
 
   let liftoffT = -1;
@@ -22,7 +24,10 @@ for (const spec of CATALOG) {
       inp.flaps = 0;
       inp.pitch = st.pos.y > 8 + 40 && st.airspeed < spec.vne * 0.85 ? -0.6 : 0;
     } else {
-      inp.pitch = st.airspeed > vr && st.pitchAngle < 0.16 ? 0.35 : 0;
+      // heavier wing loadings need a proper airline-style rotation, not a
+      // light-aircraft tug on the yoke
+      const pull = Math.min(0.85, 0.3 + spec.mass / (spec.wingArea * 1500));
+      inp.pitch = st.airspeed > vr && st.pitchAngle < 0.16 ? pull : 0;
       if (liftoffT > 0) {
         inp.gearDown = false;
         inp.flaps = 0;

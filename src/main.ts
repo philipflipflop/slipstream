@@ -908,10 +908,16 @@ class Game {
       c.pitch = radar > 30 && st.airspeed < 40 ? -0.5 : 0;
       c.roll = 0;
     } else {
-      const rotateSpeed = Math.sqrt((2 * this.aircraft.spec.mass * 9.81) /
-        (1.225 * this.aircraft.spec.wingArea * 1.1)) * 0.85;
-      c.pitch = st.airspeed > rotateSpeed && st.pitchAngle < 0.14 ? 0.3 : 0;
+      const spec = this.aircraft.spec;
+      const rotateSpeed = Math.sqrt((2 * spec.mass * 9.81) /
+        (1.225 * spec.wingArea * 1.1)) * 0.85;
+      // transport wing loadings need takeoff flap and a proper rotation
+      const heavy = spec.mass / spec.wingArea > 400;
+      if (st.onGround && heavy) c.flaps = 2 / 3;
+      const pull = Math.min(0.85, 0.3 + spec.mass / (spec.wingArea * 1500));
+      c.pitch = st.airspeed > rotateSpeed && st.pitchAngle < 0.14 ? pull : 0;
       c.roll = 0;
+      if (!st.onGround && radar > 150) c.flaps = 0;
     }
     if (!st.onGround && radar > 50) c.gearDown = false;
     const apDbg = (this.airport as unknown as { built: Map<string, { aeroBeacon: unknown }> }).built;

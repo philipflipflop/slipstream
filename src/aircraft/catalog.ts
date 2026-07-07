@@ -220,6 +220,49 @@ export const CATALOG: AircraftSpec[] = [
     chaseHeight: 11,
     cockpit: { x: 0, y: 2.4, z: -12.4 },
   },
+  {
+    id: 'a320',
+    name: 'AIRBUS A320neo',
+    reg: 'G-TTNA',
+    role: 'Narrowbody Airliner',
+    blurb:
+      'A hundred and eighty seats of quiet efficiency in flag-carrier colours. Fly the profile — stabilised by a thousand feet, on the numbers, on the centreline — and she rewards you with the smoothest touchdown in the game.',
+    engine: 'jet',
+    // Real A320neo book numbers: 122.6 m² wing, 35.8 m span (AR 10.3 with
+    // sharklets), 2× CFM LEAP-1A at 120.6 kN, MMO M0.82 (~470 kt TAS),
+    // Vs full flap ~110 kt at mid weight, transport-category +2.5 g limit.
+    // Mass is a typical mid-load operating weight, not MTOW.
+    stats: { speed: 0.72, agility: 0.16, handling: 0.62, climb: 0.58 },
+    topSpeedKt: 470,
+    mass: 64000,
+    wingArea: 122.6,
+    aspect: 10.3,
+    cl0: 0.24,
+    clSlope: 5.7,
+    stallAoA: 0.26,
+    cd0: 0.022,
+    maxThrust: 241000,
+    // high for a jet: stands in for the un-modelled transonic drag rise, so
+    // max level speed settles right at MMO (~470-480 kt) instead of far past it
+    propFalloff: 0.6,
+    pitchRate: 0.85,
+    rollRate: 1.15,
+    yawRate: 0.65,
+    stability: 1.4,
+    gLimit: 2.5,
+    airbrakeCd: 0.08,
+    fbw: true, // normal law: alpha protection — full aft stick mushes, never breaks
+    flapsCl: 0.95,
+    flapsCd: 0.07,
+    gearCd: 0.018,
+    retractableGear: true,
+    gearHeight: 3.5,
+    groundPitch: 0,
+    vne: 245,
+    chaseDist: 55,
+    chaseHeight: 12.5,
+    cockpit: { x: 0, y: 1.15, z: -15.1 },
+  },
 ];
 
 export const specById = (id: string): AircraftSpec =>

@@ -906,6 +906,172 @@ function buildMeridian(): THREE.Group {
   return g;
 }
 
+/* ================================================================
+   AIRBUS A320neo — narrowbody airliner, flag-carrier livery
+   (white over midnight blue, red pinline, crossed tail ribbons)
+   Built at TRUE scale: 37.6 m fuselage, 35.8 m span — runway and
+   aircraft proportions line up like the real thing.
+   ================================================================ */
+function buildA320(): THREE.Group {
+  const g = new THREE.Group();
+  const white = std(0xf2f4f6, 0.28, 0.1);
+  const greyWing = std(0xc4c9cf, 0.35, 0.4);
+  const navy = std(0x10265e, 0.35, 0.2);
+  const red = std(0xd0202a, 0.4, 0.15);
+
+  // 3.95 m-wide circular-section fuselage, drooped nose, upswept tailcone
+  const fuse = mesh(fuseGeo([
+    { z: -18.7, r: 0.22, ry: 0.24, y: -0.35 },
+    { z: -17.2, r: 1.15, ry: 1.28, y: -0.12 },
+    { z: -14.6, r: 1.86, ry: 1.96, y: 0 },
+    { z: -10, r: 1.98, ry: 2.06, y: 0 },
+    { z: 6, r: 1.98, ry: 2.06, y: 0 },
+    { z: 11.5, r: 1.55, ry: 1.72, y: 0.35 },
+    { z: 16, r: 0.72, ry: 0.9, y: 0.95 },
+    { z: 18.7, r: 0.16, ry: 0.3, y: 1.35 },
+  ], 14), white);
+  g.add(fuse);
+
+  // midnight-blue belly band with a red pinline along its top edge (ends
+  // before the tailcone taper so the box stays buried in the hull)
+  const belly = mesh(new THREE.BoxGeometry(3.6, 1.15, 23.2), navy);
+  belly.position.set(0, -1.62, -2.3);
+  g.add(belly);
+  const pinline = mesh(new THREE.BoxGeometry(3.64, 0.09, 23.2), red);
+  pinline.position.set(0, -1.02, -2.3);
+  g.add(pinline);
+  // red speedmark swoosh on each side of the nose
+  for (const sx of [-1, 1]) {
+    const swoosh = mesh(new THREE.BoxGeometry(0.06, 0.42, 2.4), red);
+    swoosh.position.set(1.86 * sx, 0.1, -13.2);
+    swoosh.rotation.x = 0.22;
+    g.add(swoosh);
+  }
+
+  // cockpit glazing + cabin window strip
+  const shield = mesh(new THREE.SphereGeometry(1.5, 12, 8), GLASS);
+  shield.scale.set(1.15, 0.42, 1.0);
+  shield.position.set(0, 0.88, -14.9);
+  g.add(shield);
+  const winStrip = mesh(new THREE.BoxGeometry(3.98, 0.22, 23.5), std(0x10161f, 0.2, 0.7));
+  winStrip.position.set(0, 0.62, -0.9);
+  g.add(winStrip);
+
+  // low swept wing (25° sweep, 5° dihedral), grey upper surface
+  const wing = mesh(wingGeo([
+    { x: -17.9, chord: 1.55, t: 0.12, sweep: 7.6, rise: 1.62 },
+    { x: -5.2, chord: 4.5, t: 0.5, sweep: 1.6, rise: 0.3 },
+    { x: -1.95, chord: 6.6, t: 0.72, rise: 0.06 },
+    { x: 1.95, chord: 6.6, t: 0.72, rise: 0.06 },
+    { x: 5.2, chord: 4.5, t: 0.5, sweep: 1.6, rise: 0.3 },
+    { x: 17.9, chord: 1.55, t: 0.12, sweep: 7.6, rise: 1.62 },
+  ]), std(0xc4c9cf, 0.35, 0.4, true));
+  wing.position.set(0, -1.5, 1.2);
+  g.add(wing);
+
+  // sharklets, canted just off vertical, navy with a red trailing edge
+  for (const sx of [-1, 1]) {
+    const shGeo = wingGeo([
+      { x: 0, chord: 1.35, t: 0.07 },
+      { x: 2.35, chord: 0.6, t: 0.04, sweep: 0.85 },
+    ]);
+    shGeo.rotateZ(Math.PI / 2);
+    shGeo.rotateZ(sx * -0.22);
+    const sh = mesh(shGeo, std(0x10265e, 0.35, 0.2, true));
+    sh.position.set(17.85 * sx, 0.16, 8.55);
+    g.add(sh);
+  }
+
+  for (const sx of [-1, 1]) {
+    const surf = mesh(new THREE.BoxGeometry(4.6, 0.09, 0.75), greyWing);
+    surf.position.set(0, 0, 0.37);
+    g.add(hinged(sx < 0 ? 'aileronL' : 'aileronR', surf, 12.6 * sx, -0.55, 7.0));
+  }
+
+  // wing-slung LEAP nacelles: fat cowls, spinner-grey fan face, pylons
+  const fanMat = std(0x1b1e24, 0.35, 0.85);
+  for (const sx of [-1, 1]) {
+    const pod = mesh(fuseGeo([
+      { z: -2.2, r: 0.98 },
+      { z: -1.3, r: 1.12 },
+      { z: 0.9, r: 0.98 },
+      { z: 2.1, r: 0.52 },
+    ], 12), white);
+    pod.position.set(5.75 * sx, -2.12, -1.6);
+    g.add(pod);
+    const lip = mesh(new THREE.TorusGeometry(0.99, 0.1, 8, 20), std(0xb8bdc4, 0.3, 0.8));
+    lip.position.set(5.75 * sx, -2.12, -3.82);
+    g.add(lip);
+    const fan = new THREE.Mesh(new THREE.CircleGeometry(0.92, 20), fanMat);
+    fan.position.set(5.75 * sx, -2.12, -3.8);
+    fan.rotation.y = Math.PI;
+    g.add(fan);
+    const cone = mesh(new THREE.ConeGeometry(0.3, 0.9, 10), std(0x3a3530, 0.45, 0.9));
+    cone.rotation.x = -Math.PI / 2;
+    cone.position.set(5.75 * sx, -2.12, 0.9);
+    g.add(cone);
+    const nozzle = new THREE.Mesh(new THREE.CircleGeometry(0.5, 14), fanMat);
+    nozzle.position.set(5.75 * sx, -2.12, 0.55);
+    g.add(nozzle);
+    const pylon = mesh(new THREE.BoxGeometry(0.5, 0.95, 3.0), white);
+    pylon.position.set(5.75 * sx, -1.15, -0.4);
+    g.add(pylon);
+  }
+
+  // fin: navy, with the crossed red/white tail ribbons
+  const finGeo = wingGeo([
+    { x: 0, chord: 5.6, t: 0.5 },
+    { x: 6.0, chord: 1.75, t: 0.09, sweep: 3.9 },
+  ]);
+  finGeo.rotateZ(Math.PI / 2);
+  const fin = mesh(finGeo, std(0x10265e, 0.35, 0.2, true));
+  fin.position.set(0, 1.35, 15.2);
+  g.add(fin);
+  for (const [color, dz] of [[0xd0202a, -0.5], [0xf2f4f6, 0.45]] as Array<[number, number]>) {
+    const ribbon = mesh(new THREE.BoxGeometry(0.56, 4.6, 1.05), std(color, 0.4, 0.15));
+    ribbon.position.set(0, 3.9, 15.9 + dz);
+    ribbon.rotation.x = -0.62; // sweeps up and back like the flying flag
+    g.add(ribbon);
+  }
+  const rudSurf = mesh(new THREE.BoxGeometry(0.09, 4.4, 1.2), navy);
+  rudSurf.position.set(0, 1.6, 0.55);
+  g.add(hinged('rudder', rudSurf, 0, 2.6, 17.6));
+
+  // low-set swept tailplane
+  const hstab = mesh(wingGeo([
+    { x: -6.25, chord: 1.2, t: 0.1, sweep: 2.9, rise: 0.35 },
+    { x: 0, chord: 3.1, t: 0.28 },
+    { x: 6.25, chord: 1.2, t: 0.1, sweep: 2.9, rise: 0.35 },
+  ]), std(0xf2f4f6, 0.28, 0.1, true));
+  hstab.position.set(0, 0.7, 15.9);
+  g.add(hstab);
+  const elevSurf = mesh(new THREE.BoxGeometry(11.4, 0.08, 0.66), white);
+  elevSurf.position.set(0, 0, 0.33);
+  g.add(hinged('elevator', elevSurf, 0, 0.78, 17.75));
+
+  // tricycle gear: twin nosewheels + twin-wheel main bogies
+  const gear = new THREE.Group();
+  gear.name = 'gear';
+  for (const dx of [-0.28, 0.28]) {
+    const nw = wheel(0.5, 0.32);
+    nw.position.set(dx, -3.0, -13.6);
+    gear.add(nw);
+  }
+  gear.add(strut(0, -1.4, -13.4, 0, -2.95, -13.6, 0.13));
+  for (const sx of [-1, 1]) {
+    for (const dz of [-0.62, 0.62]) {
+      const w = wheel(0.62, 0.42);
+      w.position.set(3.8 * sx, -2.9, 1.7 + dz);
+      gear.add(w);
+    }
+    gear.add(strut(3.0 * sx, -1.3, 1.5, 3.78 * sx, -2.8, 1.7, 0.15));
+  }
+  g.add(gear);
+
+  navLights(g, 17.95, 8.6, 0.2);
+  return g;
+}
+
 export function buildAircraftModel(id: string): THREE.Group {
   switch (id) {
     case 'skylark': return buildSkylark();
@@ -914,6 +1080,7 @@ export function buildAircraftModel(id: string): THREE.Group {
     case 'falcon': return buildFalcon();
     case 'vector': return buildVector();
     case 'meridian': return buildMeridian();
+    case 'a320': return buildA320();
     default: return buildSkylark();
   }
 }

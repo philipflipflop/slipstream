@@ -152,6 +152,7 @@ export function stepFlight(
 
   // --- lift / drag / side force ---
   let stalled = false;
+  let liftFrac = 0; // L/W — how much of the weight the wings carry
   if (V > 1) {
     _wDir.copy(_vLocal).normalize();
 
@@ -180,6 +181,7 @@ export function stepFlight(
     const L = qbar * S * cl * (1 + 0.07 * ge * ge);
     const D = qbar * S * cd;
     const Y = qbar * S * -1.1 * slip; // sideforce opposes slip
+    liftFrac = L / (spec.mass * GRAV);
 
     _force.addScaledVector(_liftDir, L);
     _force.addScaledVector(_wDir, -D);
@@ -339,11 +341,19 @@ export function stepFlight(
       st.vel.z = THREE.MathUtils.lerp(st.vel.z, _fwd.z * gs * sign, k);
     }
 
-    // ground springs the attitude toward its parked stance
+    // ground springs the attitude toward its parked stance. The PITCH
+    // spring fades as the wings pick up the weight (weight-on-wheels):
+    // near rotation speed the gear is barely loaded and the elevator can
+    // raise the nose — without this, transport wing loadings (A320) pin at
+    // a degree or two of pitch and never rotate, because the G-limit cap
+    // already shrinks pitch authority with speed while the parked-stance
+    // spring never weakens. Tail-draggers get their tail-rise with speed
+    // from the same physics.
     const roll = _euler.z;
     const pitch = _euler.x;
+    const wow = clamp(1 - liftFrac, 0.12, 1);
     aaZ += (0 - roll) * 9 - av.z * 6;
-    aaX += (spec.groundPitch - pitch) * 5.5 - av.x * 3.2;
+    aaX += (spec.groundPitch - pitch) * 5.5 * wow - av.x * 3.2;
     st.gForce = 1;
   } else {
     st.onGround = false;
