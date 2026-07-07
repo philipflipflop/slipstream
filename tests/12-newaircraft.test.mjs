@@ -393,6 +393,77 @@ assert.equal(jr.engine, 'heli');
   console.log(`  ✓ AP hover hold: ${st.pos.y.toFixed(0)} m, ${gs.toFixed(1)} m/s residual drift, ${wander.toFixed(0)} m wander`);
 }
 
+// AUTOROTATION CRASHWORTHINESS: with the engine out, the skids and seat
+// structure soak up a hard arrival — survivable to ~30 kt (15.4 m/s) of
+// sink, where the powered limit stays 5 m/s. Harder than 30 kt still kills.
+{
+  const drop = (sink, engineCut, coll = 0.3) => {
+    const st = createState();
+    spawnOnRunway(jr, st, flat);
+    st.pos.y = 8 + jr.gearHeight + 0.4;
+    st.vel.set(0, -sink, -6);
+    st.onGround = false;
+    const inp = mkInp({ throttle: coll, engineCut });
+    for (let t = 0; t < 1.5 && !st.onGround && !st.crashed; t += dt) {
+      stepFlight(jr, st, inp, dt, flat);
+    }
+    return st;
+  };
+  const firmAuto = drop(12, true);
+  assert.ok(firmAuto.onGround && !firmAuto.crashed,
+    `12 m/s engine-out arrival should be survivable (${firmAuto.crashReason})`);
+  const overAuto = drop(17, true);
+  assert.ok(overAuto.crashed, '17 m/s (>30 kt) arrival should still be a crash');
+  const firmPowered = drop(8, false);
+  assert.ok(firmPowered.crashed, '8 m/s POWERED arrival should still be a crash');
+  console.log('  ✓ autorotation arrivals survivable to ~30 kt sink; powered limit unchanged');
+}
+
+// ROLL-THROUGH: the SAS envelope is not a cage — the last few percent of
+// stick throw commands pure rate, so a held full-lateral cyclic rolls the
+// ship past vertical and beyond…
+{
+  const st = createState();
+  spawnOnRunway(jr, st, flat);
+  st.pos.y = 800;
+  st.onGround = false;
+  const inp = mkInp({ roll: 1 });
+  let maxBank = 0;
+  for (let t = 0; t < 3.5; t += dt) {
+    inp.throttle = 0.62;
+    stepFlight(jr, st, inp, dt, flat);
+    maxBank = Math.max(maxBank, Math.abs(st.rollAngle));
+    if (st.crashed) break;
+  }
+  assert.ok(maxBank > 2.1,
+    `full lateral cyclic should roll past vertical (max bank ${(maxBank * 57.3).toFixed(0)}°)`);
+  console.log(`  ✓ held full cyclic rolls through (reached ${(maxBank * 57.3).toFixed(0)}° bank)`);
+}
+
+// …while ordinary deflections keep the SAS attitude-command feel: a firm
+// 3/4 stick settles near its commanded bank and recovers level on release
+{
+  const st = createState();
+  spawnOnRunway(jr, st, flat);
+  st.pos.y = 800;
+  st.vel.set(0, 0, -25);
+  st.onGround = false;
+  const inp = mkInp({ roll: 0.75, throttle: 0.65 });
+  let maxBank = 0;
+  for (let t = 0; t < 4; t += dt) {
+    stepFlight(jr, st, inp, dt, flat);
+    maxBank = Math.max(maxBank, Math.abs(st.rollAngle));
+  }
+  assert.ok(!st.crashed, 'SAS bank hold crashed');
+  assert.ok(maxBank < 1.1, `3/4 stick rolled through (${(maxBank * 57.3).toFixed(0)}°)`);
+  assert.ok(Math.abs(st.rollAngle) > 0.4, `3/4 stick bank too shallow (${(st.rollAngle * 57.3).toFixed(0)}°)`);
+  inp.roll = 0;
+  for (let t = 0; t < 3; t += dt) stepFlight(jr, st, inp, dt, flat);
+  assert.ok(Math.abs(st.rollAngle) < 0.15,
+    `did not recover level on release (${(st.rollAngle * 57.3).toFixed(0)}°)`);
+  console.log(`  ✓ SAS feel intact: 3/4 stick holds ${(maxBank * 57.3).toFixed(0)}° max, recovers level on release`);
+}
+
 // autopilot (swapped loops): holds altitude on collective, speed on attitude
 {
   const st = createState();

@@ -423,8 +423,10 @@ export class Screens {
             recover). Press <kbd>X</kbd> to practice an engine failure: collective
             DOWN immediately to keep rotor RPM (watch NR on the HUD — the low-RPM
             horn means the rotor is dying), glide at ~60 kt, flare at the bottom
-            and cushion with the last of the rotor's energy. <kbd>T</kbd> in a
-            hover gives a hover hold.
+            and cushion with the last of the rotor's energy — engine-out, the skids
+            soak up even a hard arrival (to about a 30-kt impact), so commit to the
+            flare. Full cyclic held on the stop will roll her right over: possible,
+            not advisable. <kbd>T</kbd> in a hover gives a hover hold.
           </p>
           <div class="row"><button class="btn primary close">Got It</button></div>
         </div>

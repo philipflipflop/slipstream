@@ -7,7 +7,7 @@
  */
 import * as THREE from 'three';
 import type { AircraftSpec } from './types';
-import { clamp } from '../core/math';
+import { clamp, wrapAngle } from '../core/math';
 import { WATER_LEVEL, AIRPORTS, AirfieldDef } from '../world/heightfield';
 
 export interface ControlInputs {
@@ -489,10 +489,25 @@ function stepHeli(
   // full deflection reaches ±40° pitch / ±54° bank — enough for steep
   // turns and aggressive quick-stops without losing the SAS-stable feel
   // (testers called the old ±26°/±34° envelope "on rails")
+  //
+  // …but the SAS is not a cage: the last ~8% of stick throw washes the
+  // attitude hold out into a pure RATE command, so holding the stick on
+  // the stop rolls (or flips) the ship straight through — you CAN roll a
+  // helicopter; you usually shouldn't. The attitude error is capped too,
+  // so a knocked-over ship recovers at a realistic cyclic rate instead of
+  // rubber-banding elastically upright.
+  const overP = clamp((Math.abs(inp.pitch) - 0.92) / 0.08, 0, 1);
+  const overR = clamp((Math.abs(inp.roll) - 0.92) / 0.08, 0, 1);
   const targetPitch = inp.pitch * 0.7;   // + = nose up
   const targetRoll = -inp.roll * 0.95;   // euler.z, − = bank right
-  let aaX = ((targetPitch - _euler.x) * 4.5 * spec.pitchRate - av.x * 3.8) * auth;
-  let aaZ = ((targetRoll - _euler.z) * 4.0 * spec.rollRate - av.z * 4.2) * auth;
+  let aaX = (
+    (clamp(wrapAngle(targetPitch - _euler.x), -1.1, 1.1) * 4.5 * spec.pitchRate - av.x * 3.8) * (1 - overP) +
+    (inp.pitch * spec.pitchRate * 2.0 - av.x * 2.2) * overP
+  ) * auth;
+  let aaZ = (
+    (clamp(wrapAngle(targetRoll - _euler.z), -1.1, 1.1) * 4.0 * spec.rollRate - av.z * 4.2) * (1 - overR) +
+    (-inp.roll * spec.rollRate * 2.0 - av.z * 2.2) * overR
+  ) * auth;
 
   // flapback: the advancing blade lifts harder as speed builds, tilting the
   // disc aft — the nose wants up with speed and holding cruise takes a
@@ -536,7 +551,12 @@ function stepHeli(
       crash(st, V > 20 ? 'HIT THE WATER AT SPEED' : 'DITCHED IN THE SEA');
       return;
     }
-    if (sinkRate > 5) {
+    // skid crush + collapsing seats soak up a far harder arrival in a real
+    // autorotation — anything up to a ~30 kt (15.4 m/s) impact is survivable
+    // with the engine out, against the 5 m/s powered limit. Botch the flare
+    // worse than that and it is still a wreck: vertical autos stay deadly.
+    const sinkLimit = engineOut ? 15.4 : 5;
+    if (sinkRate > sinkLimit) {
       crash(st, 'STRUCTURAL FAILURE — HARD LANDING');
       return;
     }
