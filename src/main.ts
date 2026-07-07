@@ -14,6 +14,7 @@ import { Water } from './world/water';
 import { Sky } from './world/sky';
 import { Airport } from './world/airport';
 import { RingCourse, RING_COUNT } from './world/rings';
+import { Traffic } from './world/traffic';
 import { GunneryRange } from './combat/range';
 import { ObstacleField } from './world/obstacles';
 import { setTurbulence, setWind, crash } from './aircraft/flightModel';
@@ -52,6 +53,7 @@ class Game {
   private sky: Sky;
   private airport: Airport;
   private rings: RingCourse;
+  private traffic: Traffic;
   private range: GunneryRange;
   private obstacles!: ObstacleField;
   private route = new Route();
@@ -147,6 +149,7 @@ class Game {
     this.water = new Water(this.scene, this.sky.fogColor, this.sky.sunDir, this.coarseDepth, this.daylight);
     this.airport = new Airport(this.scene, this.gen, this.daylight.landingLight);
     this.rings = new RingCourse(this.scene, this.gen);
+    this.traffic = new Traffic(this.scene, this.gen);
     this.obstacles = new ObstacleField(this.gen);
     this.range = new GunneryRange(this.scene, this.gen);
     this.range.onHit = (hits, total) => this.screens.toast(`TARGET DOWN — ${hits}/${total}`);
@@ -669,6 +672,9 @@ class Game {
     this.water.update(this.simTime, this.flightCam.camera.position);
     this.sky.update(st.pos, fog.far, dt);
     this.airport.update(this.simTime, st.pos.x, st.pos.z, st.pos.y);
+    // NPC traffic: parked aircraft everywhere; the airborne layer stays out
+    // of Ring Rush so the course reads clean
+    this.traffic.update(dt, st.pos.x, st.pos.z, this.simTime, !this.rings.active);
 
     // coarse-depth fallback (touch + low, no log buffer): step the near
     // plane out with altitude to reclaim precision. Discrete bands with

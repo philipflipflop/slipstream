@@ -135,6 +135,13 @@ thrust model) — the handling differences fall out of the numbers, not scripts.
   flies the plan, sequencing each fix.
 - **Ring Rush** — 14 gates against the clock. Best time per aircraft is saved locally.
 
+The sky and the ramps are alive: **NPC aircraft** park nose-in on the
+international terminal stands and on regional aprons and strip edges (never
+blocking a runway — deterministic per field, like everything else), while a
+handful of AI airliners and light singles cruise terrain-aware tracks through
+your patch of sky with nav lights and strobes blinking. Races keep the air to
+themselves.
+
 ## Engineering notes
 
 - **Terrain** is an analytic heightfield (domain-warped FBM + ridged multifractal,
