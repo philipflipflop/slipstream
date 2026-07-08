@@ -149,6 +149,39 @@ function cruise(spec, v, alt = 800) {
   }
 }
 
+// fast jets actually TURN under the autopilot: a fighter at cruise banks
+// well past the light-aircraft cap and completes 90° in well under a
+// minute; the airliner holds an airline-standard ~30° and still makes way
+{
+  const turn = (id, v) => {
+    const spec = CATALOG.find((s) => s.id === id);
+    const st = cruise(spec, v, 2000);
+    const ap = new Autopilot();
+    const inp = baseInp();
+    stepFlight(spec, st, inp, dt, flat);
+    ap.engage(st, 0.7);
+    ap.targetHdg = Math.PI / 2;
+    ap.targetSpd = v;
+    let maxBank = 0;
+    let tDone = -1; // time through 75° — the P-law close-out tail is normal
+    for (let t = 0; t < 120; t += dt) {
+      ap.update(spec, st, inp, dt);
+      stepFlight(spec, st, inp, dt, flat);
+      maxBank = Math.max(maxBank, Math.abs(st.rollAngle));
+      if (tDone < 0 && st.heading > 1.309) { tDone = t; break; }
+    }
+    assert.ok(!st.crashed, `${id} crashed in the AP turn`);
+    return { maxBank, tDone };
+  };
+  const ty = turn('typhoon', 250);
+  assert.ok(ty.tDone > 0 && ty.tDone < 55, `typhoon AP turn too slow (75° in ${ty.tDone < 0 ? '>120' : ty.tDone.toFixed(0)} s)`);
+  assert.ok(ty.maxBank > 0.7, `typhoon AP bank too shallow (${(ty.maxBank * 57.3).toFixed(0)}°)`);
+  const ab = turn('a320', 220);
+  assert.ok(ab.tDone > 0 && ab.tDone < 100, `A320 AP turn too slow (75° in ${ab.tDone < 0 ? '>120' : ab.tDone.toFixed(0)} s)`);
+  assert.ok(ab.maxBank > 0.4 && ab.maxBank < 0.62, `A320 AP bank outside airline norms (${(ab.maxBank * 57.3).toFixed(0)}°)`);
+  console.log(`  ✓ AP turns: typhoon through 75° in ${ty.tDone.toFixed(0)} s at ${(ty.maxBank * 57.3).toFixed(0)}° bank, A320 in ${ab.tDone.toFixed(0)} s at ${(ab.maxBank * 57.3).toFixed(0)}°`);
+}
+
 // fbw fighter refuses to deep-stall from a full pull at low speed
 {
   const spec = CATALOG.find((s) => s.id === 'vector');

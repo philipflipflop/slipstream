@@ -381,6 +381,7 @@ export class Screens {
       <div class="krow"><span>Wheel brakes / fire cannon (airborne)</span><kbd>Space</kbd></div>
       <div class="krow"><span>Speed brake</span><kbd>B</kbd></div>
       <div class="krow"><span>Engine cut / relight (helicopter)</span><kbd>X</kbd></div>
+      <div class="krow"><span>ILS receiver auto/off</span><kbd>I</kbd></div>
       <div class="krow"><span>Autopilot / hover hold</span><kbd>T</kbd></div>
       <div class="krow"><span>AP heading bug</span><kbd>[ / ]</kbd></div>
       <div class="krow"><span>AP altitude bug</span><kbd>PgUp / PgDn</kbd></div>
@@ -406,8 +407,12 @@ export class Screens {
             four PAPI boxes beside the threshold guide you home (two white two red =
             on the glide path; all red = too low).
             Every runway also has an <b>ILS</b>: point roughly at a runway end and the
-            HUD tunes it — fly toward the cyan diamonds (localizer below the horizon,
-            glideslope on the right); they turn green when you're on the beam.
+            receiver tunes it (a toast calls the approach) — then it HOLDS that station
+            like a real nav radio until you fly out of range or line up on another
+            runway, so the needles peg rather than vanish when you turn away. Fly
+            toward the cyan diamonds (localizer below the horizon, glideslope on the
+            right); they turn green when you're on the beam. <kbd>I</kbd> switches the
+            receiver off/auto.
             Flying 101: full throttle, let speed build past the white arc, then ease back.
             Keep the nose where the speed stays healthy — if <b style="color:var(--danger)">STALL</b> flashes,
             push forward and add power. Land into the runway slow, flaps down, gentle sink.

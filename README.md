@@ -54,9 +54,12 @@ geometry: a localizer measured from an antenna past the stop end (±2.5° full
 scale), a 3.00° glideslope from a station 300 m in from the threshold
 (±0.7° full scale, ~18 m threshold crossing height), and DME. The receiver
 auto-tunes the best runway end ahead of the nose — internationals serve all
-four parallel approaches (27L/27R style) — and the HUD shows classic
-deviation scales: fly toward the diamonds; they turn green when you're
-captured. Pair it with the PAPI lights and you can shoot a stabilised
+four parallel approaches (27L/27R style) — announces the capture with a
+toast, then **holds the station like a real tuned nav radio** until you fly
+out of range or line up on a different runway (needles peg off-beam instead
+of the display popping in and out; `I` switches the receiver off/auto). The
+HUD shows classic deviation scales: fly toward the diamonds; they turn
+green when you're captured. Pair it with the PAPI lights and you can shoot a stabilised
 approach in any aircraft, day or night.
 
 ### Wind
@@ -85,6 +88,7 @@ times are comparable; `?wind=hdg,kt` forces a specific wind.
 | HUD full / minimal / off | `H` |
 | Minimap on/off | `M` |
 | Nav chart / flight computer | `N` (zoom `,` `.`) |
+| ILS receiver auto / off | `I` |
 | Pause | `Esc` or `P` |
 | Restart flight | `R` |
 
@@ -118,12 +122,14 @@ thrust model) — the handling differences fall out of the numbers, not scripts.
 ### Modes
 
 - **Free Flight** — explore. The world streams in around you forever: coasts, forests,
-  settlements, snow-capped ranges. Three **international airports** anchor the map a
-  realistic ~50 km apart — **Meridian Intl** (spawn), **Westgate Intl** and **Osprey
-  Intl** — each built like Heathrow: twin parallel runways (3.5–3.9 km, 1.4 km apart,
-  27L/27R-style designators painted on), parallel taxiways with connectors, a central
-  terminal spine with pier fingers (solid — don't fly into them), cargo hangars and an
-  87 m control tower. Around them sit the smaller fields — **Northgate Strip**,
+  settlements, snow-capped ranges. Three **international airports** anchor the map at
+  a European ~100 km spacing — **Meridian Intl** (spawn), **Westgate Intl** and
+  **Osprey Intl** — each built like Heathrow: twin parallel runways (3.5–3.9 km,
+  1.4 km apart, 27L/27R-style designators painted on; land on whichever you line up —
+  the ILS tunes per runway), parallel taxiways with connectors, a central terminal
+  spine with pier fingers (solid — don't fly into them), 24 marked gate stands with
+  jet bridges, baggage tugs and fuel bowsers working the aprons, floodlight masts,
+  cargo hangars and an 87 m control tower. Around them sit the smaller fields — **Northgate Strip**,
   **Highmoor Field** — and procedural strips every ~25–40 km of land, deterministically
   seeded so they're always in the same place, the longest of them full regional fields
   with hangars and a tower. The minimap marks every runway as an oriented strip (so you

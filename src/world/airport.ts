@@ -15,7 +15,7 @@
  * many kilometres out, which is how you find the field in the dark.
  */
 import * as THREE from 'three';
-import { WorldGen, AirfieldDef, intlBuildings } from './heightfield';
+import { WorldGen, AirfieldDef, intlBuildings, INTL_STANDS } from './heightfield';
 import { runwayIdent } from '../nav/ils';
 import { clamp } from '../core/math';
 
@@ -415,7 +415,9 @@ export class Airport {
     const wallMat = new THREE.MeshLambertMaterial({ color: 0x9ba3ac });
     const hangarMat = new THREE.MeshLambertMaterial({ color: 0x788089 });
     const doorMat = new THREE.MeshLambertMaterial({ color: 0x4d565e });
-    const roofMat = new THREE.MeshLambertMaterial({ color: 0x53585e });
+    const roofMat = new THREE.MeshLambertMaterial({ color: 0x6b7178 });
+    const plinthMat = new THREE.MeshLambertMaterial({ color: 0x6f767e });
+    const plantMat = new THREE.MeshLambertMaterial({ color: 0x565c63 });
     const glassMat = new THREE.MeshStandardMaterial({
       color: 0x22303e, roughness: 0.25, metalness: 0.55,
     });
@@ -451,8 +453,10 @@ export class Airport {
         b.kind === 'hangar' ? hangarMat : wallMat,
       );
       body.position.set(bx, E + b.h / 2, bz);
+      // cast but don't receive — big flat roofs self-shadow into crawling
+      // acne as the sun's shadow box chases the player (city towers follow
+      // the same rule)
       body.castShadow = true;
-      body.receiveShadow = true;
       g.add(body);
       if (b.kind === 'hangar') {
         const door = new THREE.Mesh(new THREE.PlaneGeometry(b.wa * 1.7, b.h * 0.7), doorMat);
@@ -460,19 +464,72 @@ export class Airport {
         door.rotation.y = Math.PI; // faces the terminals to the north
         g.add(door);
       } else {
-        // glazing band wrapping the upper storey + a flat roof cap
+        // glazing band wrapping the upper storey + a darker plinth storey
+        // at street level + a flat roof cap with rooftop plant
         const band = new THREE.Mesh(
           new THREE.BoxGeometry(b.wa * 2 + 0.6, b.h * 0.32, b.la * 2 + 0.6),
           glassMat,
         );
         band.position.set(bx, E + b.h * 0.62, bz);
         g.add(band);
+        const plinth = new THREE.Mesh(
+          new THREE.BoxGeometry(b.wa * 2 + 0.5, b.h * 0.16, b.la * 2 + 0.5),
+          plinthMat,
+        );
+        plinth.position.set(bx, E + b.h * 0.09, bz);
+        g.add(plinth);
+        // roof cap sits SUNK into the body: a bottom face exactly coplanar
+        // with the building's top plane z-fights into full-surface shimmer
         const roof = new THREE.Mesh(
           new THREE.BoxGeometry(b.wa * 1.92, 1.2, b.la * 1.92),
           roofMat,
         );
-        roof.position.set(bx, E + b.h + 0.6, bz);
+        roof.position.set(bx, E + b.h + 0.25, bz);
         g.add(roof);
+        if (b.kind === 'terminal') {
+          for (const pa of [-0.45, 0.35]) {
+            const plant = new THREE.Mesh(new THREE.BoxGeometry(b.wa * 0.55, 2.4, 14), plantMat);
+            plant.position.set(bx + b.wa * 0.3, E + b.h + 1.8, bz + b.la * 2 * pa);
+            plant.castShadow = true;
+            g.add(plant);
+          }
+        }
+      }
+    }
+
+    // jet bridges: one per gate stand, pier wall to aircraft nose — the
+    // stands come from the SAME list the parked NPCs use, so bridges meet
+    // noses. Each is a raised corridor on a support leg.
+    const bridgeMat = new THREE.MeshLambertMaterial({ color: 0x7b838c });
+    for (const s of INTL_STANDS) {
+      const noseDir = s.yaw === 0 ? 1 : -1; // toward the owning pier
+      const b0 = s.along + noseDir * 30;    // pier face
+      const b1 = s.along + noseDir * 15;    // nose position
+      const bridge = new THREE.Mesh(
+        new THREE.BoxGeometry(2.6, 2.3, Math.abs(b1 - b0) + 2),
+        bridgeMat,
+      );
+      bridge.position.set(ap.x + s.across, E + 4.4, ap.z - (b0 + b1) / 2);
+      bridge.castShadow = true;
+      g.add(bridge);
+      const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.35, 0.35, 3.3, 6), bridgeMat);
+      leg.position.set(ap.x + s.across, E + 1.65, ap.z - b1);
+      g.add(leg);
+    }
+
+    // apron floodlight masts down both service lanes (lit heads after dark)
+    const mastMat = new THREE.MeshLambertMaterial({ color: 0x8d949b });
+    const headMat = this.nightOps
+      ? new THREE.MeshBasicMaterial({ color: 0xfff2cc })
+      : new THREE.MeshLambertMaterial({ color: 0x40464d });
+    for (const sx of [-1, 1]) {
+      for (const za of [-1500, -900, -300, 300, 900, 1500]) {
+        const mast = new THREE.Mesh(new THREE.CylinderGeometry(0.28, 0.4, 24, 6), mastMat);
+        mast.position.set(ap.x + sx * 540, E + 12, ap.z + za);
+        g.add(mast);
+        const head = new THREE.Mesh(new THREE.BoxGeometry(2.6, 0.8, 1.2), headMat);
+        head.position.set(ap.x + sx * 540, E + 24.2, ap.z + za);
+        g.add(head);
       }
     }
     return towerBeacon!;

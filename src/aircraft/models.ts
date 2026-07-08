@@ -916,15 +916,16 @@ function buildTyphoon(): THREE.Group {
   const grey = std(0x8b939c, 0.5, 0.3);
   const dark = std(0x565d66, 0.5, 0.3);
 
-  // slim forebody, broad centre-fuselage over the engines
+  // slim forebody widening into a broad twin-engine deck: the aft end
+  // stays wide enough that both EJ200 nozzles emerge flush from the hull
   const fuse = mesh(fuseGeo([
     { z: -7.9, r: 0.13, ry: 0.13 },
     { z: -6.7, r: 0.4, ry: 0.44, y: 0.02 },
     { z: -4.9, r: 0.58, ry: 0.66, y: 0.06 },
     { z: -2.4, r: 0.8, ry: 0.72, y: 0 },
-    { z: 1.6, r: 0.96, ry: 0.74, y: 0 },
-    { z: 5.4, r: 0.82, ry: 0.62, y: 0 },
-    { z: 7.9, r: 0.5, ry: 0.42, y: 0 },
+    { z: 1.6, r: 1.0, ry: 0.74, y: 0 },
+    { z: 5.4, r: 1.08, ry: 0.64, y: 0 },
+    { z: 7.9, r: 1.02, ry: 0.5, y: 0 },
   ]), grey);
   g.add(fuse);
 
@@ -1002,33 +1003,46 @@ function buildTyphoon(): THREE.Group {
   rudSurf.position.set(0, 1.0, 0.31);
   g.add(hinged('rudder', rudSurf, 0, 1.15, 7.0));
 
-  // twin EJ200 nozzles, side by side, with a shared reheat plume group
+  // twin EJ200 nozzles emerging flush from the aft deck, petals slightly
+  // converged, turbine faces recessed inside
   const nozzleMat = std(0x2c2c30, 0.35, 0.9);
   const turbineMat = std(0x17191d, 0.4, 0.85);
   for (const sx of [-1, 1]) {
-    const nozzle = mesh(new THREE.CylinderGeometry(0.46, 0.38, 0.9, 12), nozzleMat);
+    const nozzle = mesh(new THREE.CylinderGeometry(0.44, 0.35, 1.1, 12), nozzleMat);
     nozzle.rotation.x = Math.PI / 2;
-    nozzle.position.set(0.55 * sx, -0.05, 8.1);
+    nozzle.position.set(0.52 * sx, -0.02, 8.15);
     g.add(nozzle);
-    const face = new THREE.Mesh(new THREE.CircleGeometry(0.36, 12), turbineMat);
-    face.position.set(0.55 * sx, -0.05, 8.46);
+    const face = new THREE.Mesh(new THREE.CircleGeometry(0.31, 12), turbineMat);
+    face.position.set(0.52 * sx, -0.02, 8.58);
     g.add(face);
   }
+  // reheat: a white-hot core inside each orange plume, sized to the nozzle
+  // exits so the flames read as coming FROM the engines
   const burner = new THREE.Group();
   burner.name = 'burner';
   for (const sx of [-1, 1]) {
     const flame = new THREE.Mesh(
-      new THREE.ConeGeometry(0.36, 3.8, 10, 1, true),
+      new THREE.ConeGeometry(0.33, 3.1, 10, 1, true),
       new THREE.MeshBasicMaterial({
-        color: 0xff7a2a, transparent: true, opacity: 0.85,
+        color: 0xff7a2a, transparent: true, opacity: 0.8,
         blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
       }),
     );
     flame.rotation.x = -Math.PI / 2;
-    flame.position.set(0.55 * sx, -0.05, 1.9);
+    flame.position.set(0.52 * sx, -0.02, 1.25);
     burner.add(flame);
+    const core = new THREE.Mesh(
+      new THREE.ConeGeometry(0.17, 1.7, 8, 1, true),
+      new THREE.MeshBasicMaterial({
+        color: 0xffe9b8, transparent: true, opacity: 0.9,
+        blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
+      }),
+    );
+    core.rotation.x = -Math.PI / 2;
+    core.position.set(0.52 * sx, -0.02, 0.55);
+    burner.add(core);
   }
-  burner.position.set(0, 0, 8.4);
+  burner.position.set(0, 0, 8.75);
   burner.visible = false;
   g.add(burner);
 
@@ -1075,14 +1089,18 @@ function buildA320(): THREE.Group {
   ], 14), white);
   g.add(fuse);
 
-  // midnight-blue belly band with a red pinline along its top edge (ends
-  // before the tailcone taper so the box stays buried in the hull)
-  const belly = mesh(new THREE.BoxGeometry(3.6, 1.15, 23.2), navy);
-  belly.position.set(0, -1.62, -2.3);
-  g.add(belly);
-  const pinline = mesh(new THREE.BoxGeometry(3.64, 0.09, 23.2), red);
-  pinline.position.set(0, -1.02, -2.3);
-  g.add(pinline);
+  // midnight-blue lower fuselage: a rounded keel SHELL that hugs the hull
+  // (slightly fatter, centred lower), so the livery boundary is a curved
+  // waterline following the fuselage — no slab-sided box
+  const keel = mesh(fuseGeo([
+    { z: -15.6, r: 0.85, ry: 0.5, y: -1.15 },
+    { z: -14.0, r: 1.72, ry: 1.05, y: -0.98 },
+    { z: -10, r: 2.03, ry: 1.28, y: -0.88 },
+    { z: 6, r: 2.03, ry: 1.28, y: -0.88 },
+    { z: 10.5, r: 1.52, ry: 0.95, y: -0.62 },
+    { z: 12.6, r: 0.85, ry: 0.5, y: -0.45 },
+  ], 14), navy);
+  g.add(keel);
   // red speedmark swoosh on each side of the nose
   for (const sx of [-1, 1]) {
     const swoosh = mesh(new THREE.BoxGeometry(0.06, 0.42, 2.4), red);
@@ -1091,13 +1109,15 @@ function buildA320(): THREE.Group {
     g.add(swoosh);
   }
 
-  // cockpit glazing + cabin window strip
-  const shield = mesh(new THREE.SphereGeometry(1.5, 12, 8), GLASS);
-  shield.scale.set(1.15, 0.42, 1.0);
-  shield.position.set(0, 0.88, -14.9);
+  // cockpit glazing: one glass crown proud of the hull the whole way round
+  // (a narrow shape only pokes out as separate blobs at the sides)
+  const shield = mesh(new THREE.SphereGeometry(1.0, 14, 9), GLASS);
+  shield.scale.set(2.0, 0.5, 1.05);
+  shield.position.set(0, 1.04, -13.6);
   g.add(shield);
-  const winStrip = mesh(new THREE.BoxGeometry(3.98, 0.22, 23.5), std(0x10161f, 0.2, 0.7));
-  winStrip.position.set(0, 0.62, -0.9);
+  // cabin window band, just proud of the hull at its own height
+  const winStrip = mesh(new THREE.BoxGeometry(3.82, 0.2, 23.0), std(0x10161f, 0.2, 0.7));
+  winStrip.position.set(0, 0.62, -1.1);
   g.add(winStrip);
 
   // low swept wing (25° sweep, 5° dihedral), grey upper surface
@@ -1131,7 +1151,9 @@ function buildA320(): THREE.Group {
     g.add(hinged(sx < 0 ? 'aileronL' : 'aileronR', surf, 12.6 * sx, -0.55, 7.0));
   }
 
-  // wing-slung LEAP nacelles: fat cowls, spinner-grey fan face, pylons
+  // wing-slung LEAP nacelles: fat cowls, spinner-grey fan face, pylons.
+  // The fan disc sits clearly IN FRONT of the cowl's front cap and covers
+  // it — a disc coplanar with the cap z-fights into a fuzzy shimmer.
   const fanMat = std(0x1b1e24, 0.35, 0.85);
   for (const sx of [-1, 1]) {
     const pod = mesh(fuseGeo([
@@ -1143,10 +1165,10 @@ function buildA320(): THREE.Group {
     pod.position.set(5.75 * sx, -2.12, -1.6);
     g.add(pod);
     const lip = mesh(new THREE.TorusGeometry(0.99, 0.1, 8, 20), std(0xb8bdc4, 0.3, 0.8));
-    lip.position.set(5.75 * sx, -2.12, -3.82);
+    lip.position.set(5.75 * sx, -2.12, -3.88);
     g.add(lip);
-    const fan = new THREE.Mesh(new THREE.CircleGeometry(0.92, 20), fanMat);
-    fan.position.set(5.75 * sx, -2.12, -3.8);
+    const fan = new THREE.Mesh(new THREE.CircleGeometry(1.0, 20), fanMat);
+    fan.position.set(5.75 * sx, -2.12, -3.86);
     fan.rotation.y = Math.PI;
     g.add(fan);
     const cone = mesh(new THREE.ConeGeometry(0.3, 0.9, 10), std(0x3a3530, 0.45, 0.9));
@@ -1161,20 +1183,30 @@ function buildA320(): THREE.Group {
     g.add(pylon);
   }
 
-  // fin: navy, with the crossed red/white tail ribbons
-  const finGeo = wingGeo([
-    { x: 0, chord: 5.6, t: 0.5 },
-    { x: 6.0, chord: 1.75, t: 0.09, sweep: 3.9 },
-  ]);
-  finGeo.rotateZ(Math.PI / 2);
-  const fin = mesh(finGeo, std(0x10265e, 0.35, 0.2, true));
-  fin.position.set(0, 1.35, 15.2);
-  g.add(fin);
-  for (const [color, dz] of [[0xd0202a, -0.5], [0xf2f4f6, 0.45]] as Array<[number, number]>) {
-    const ribbon = mesh(new THREE.BoxGeometry(0.56, 4.6, 1.05), std(color, 0.4, 0.15));
-    ribbon.position.set(0, 3.9, 15.9 + dz);
-    ribbon.rotation.x = -0.62; // sweeps up and back like the flying flag
-    g.add(ribbon);
+  // fin: built as stacked segments so the flag ribbon is IN the fin — navy
+  // base, red and white diagonal-reading bands, navy cap. Every band's
+  // chord and sweep follow the fin's own taper exactly, nothing overhangs.
+  {
+    const finH = 6.0;
+    const at = (h: number) => ({
+      x: h,
+      chord: 5.6 + (1.75 - 5.6) * (h / finH),
+      t: 0.5 + (0.09 - 0.5) * (h / finH),
+      sweep: 3.9 * (h / finH),
+    });
+    const bands: Array<[number, number, number]> = [
+      [0, 2.1, 0x10265e],    // navy base
+      [2.1, 3.0, 0xd0202a],  // red band
+      [3.0, 3.9, 0xf2f4f6],  // white band
+      [3.9, finH, 0x10265e], // navy cap
+    ];
+    for (const [h0, h1, color] of bands) {
+      const seg = wingGeo([at(h0), at(h1)]);
+      seg.rotateZ(Math.PI / 2);
+      const m = mesh(seg, std(color, 0.35, 0.2, true));
+      m.position.set(0, 1.35, 15.2);
+      g.add(m);
+    }
   }
   const rudSurf = mesh(new THREE.BoxGeometry(0.09, 4.4, 1.2), navy);
   rudSurf.position.set(0, 1.6, 0.55);

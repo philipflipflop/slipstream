@@ -126,9 +126,12 @@ export function solveIls(app: IlsApproach, x: number, y: number, z: number): Ils
 }
 
 /**
- * Auto-tune: pick the approach the aircraft is best set up for — inbound-ish
- * heading, inside the course sector, in range. `current` gets a sticky
- * bonus so the receiver doesn't flick between ends mid-approach.
+ * Auto-tune, modelled on a real tuned nav radio: ACQUIRING a station takes
+ * an inbound-ish heading inside the course sector, but once tuned the
+ * receiver HOLDS the station while it stays in range — turn away and the
+ * needles peg rather than the display popping in and out. It only lets go
+ * beyond receiver range, or when a different approach is clearly the one
+ * being flown.
  */
 export function tuneIls(
   fields: AirfieldDef[],
@@ -142,6 +145,13 @@ export function tuneIls(
   scratch.length = 0;
   for (const f of fields) approachesOf(f, scratch);
 
+  // the held station survives anything but leaving receiver range
+  let held: IlsApproach | null = null;
+  if (current) {
+    const d = solveIls(current, x, y, z);
+    if (d.dme < MAX_TUNE_RANGE * 1.15) held = current;
+  }
+
   let best: IlsApproach | null = null;
   let bestScore = Infinity;
   for (const app of scratch) {
@@ -152,14 +162,15 @@ export function tuneIls(
     if (hdgOff > 70 / RAD2DEG) continue;                       // not inbound
     let score = Math.abs(d.locDev) * 40 + hdgOff * 6 + d.dme / 8000;
     if (
-      current &&
-      app.fieldName === current.fieldName &&
-      app.ident === current.ident
-    ) score -= 1.1; // hysteresis: hold the tuned approach
+      held &&
+      app.fieldName === held.fieldName &&
+      app.ident === held.ident
+    ) score -= 1.1; // hysteresis: prefer the held approach when comparable
     if (score < bestScore) {
       bestScore = score;
       best = app;
     }
   }
-  return best;
+  // nothing newly acquirable: keep what we have
+  return best ?? held;
 }

@@ -11,7 +11,7 @@
  * collision, same as the airport hangars.
  */
 import * as THREE from 'three';
-import { WorldGen, AirfieldDef, intlBuildings, airfieldWorld } from './heightfield';
+import { WorldGen, AirfieldDef, INTL_STANDS } from './heightfield';
 import { clamp, hash2, makeRng } from '../core/math';
 
 type NpcKind = 'airliner' | 'ga';
@@ -113,10 +113,43 @@ function airlinerGeo(livery: number): THREE.BufferGeometry {
     leg.translate(gx, (cy - 1.4) / 2 + 0.7, gz);
     parts.push(paint(leg, 0x63686e));
     const wheel = new THREE.BoxGeometry(0.9, 1.0, 1.0);
-    wheel.translate(gx, 0.5, gz);
+    wheel.translate(gx, 0.44, gz); // bottom face buried — never coplanar with the apron
     parts.push(paint(wheel, 0x1a1c1f));
   }
 
+  const g = merge(parts);
+  geoCache.set(key, g);
+  return g;
+}
+
+/** Ground service vehicle: baggage tug or fuel bowser. Forward is -Z. */
+function vehicleGeo(kind: 'tug' | 'fuel'): THREE.BufferGeometry {
+  const key = `veh${kind}`;
+  const hit = geoCache.get(key);
+  if (hit) return hit;
+  const parts: THREE.BufferGeometry[] = [];
+  if (kind === 'tug') {
+    const cab = new THREE.BoxGeometry(1.5, 1.5, 1.9);
+    cab.translate(0, 1.05, -1.4);
+    parts.push(paint(cab, 0xd8a018));
+    const bed = new THREE.BoxGeometry(1.5, 0.7, 2.6);
+    bed.translate(0, 0.65, 0.9);
+    parts.push(paint(bed, 0x3a4148));
+  } else {
+    const cab = new THREE.BoxGeometry(2.2, 2.0, 2.0);
+    cab.translate(0, 1.3, -2.4);
+    parts.push(paint(cab, 0xf2f4f6));
+    const tank = new THREE.CylinderGeometry(1.05, 1.05, 4.6, 10);
+    tank.rotateX(Math.PI / 2);
+    tank.translate(0, 1.35, 0.9);
+    parts.push(paint(tank, 0xc23b32));
+  }
+  // simple axle blocks
+  for (const gz of kind === 'tug' ? [-1.3, 1.1] : [-2.2, 1.8]) {
+    const axle = new THREE.BoxGeometry(kind === 'tug' ? 1.6 : 2.3, 0.55, 0.6);
+    axle.translate(0, 0.26, gz);
+    parts.push(paint(axle, 0x1a1c1f));
+  }
   const g = merge(parts);
   geoCache.set(key, g);
   return g;
@@ -155,7 +188,7 @@ function gaGeo(livery: number): THREE.BufferGeometry {
     leg.translate(gx, (cy - 0.3) / 2 + 0.25, gz);
     parts.push(paint(leg, 0x63686e));
     const wheel = new THREE.BoxGeometry(0.32, 0.5, 0.5);
-    wheel.translate(gx, 0.25, gz);
+    wheel.translate(gx, 0.21, gz); // bottom face buried below the pavement
     parts.push(paint(wheel, 0x1a1c1f));
   }
 
@@ -180,7 +213,12 @@ export class Traffic {
   /** flying traffic count (0 disables the airborne layer, e.g. races) */
   private static readonly FLYING = 5;
 
-  private parked = new Map<string, THREE.Group>();
+  private parked = new Map<string, {
+    group: THREE.Group;
+    /** apron service vehicles doing slow laps of the stand row */
+    movers: Array<{ m: THREE.Object3D; along: number; side: number; dir: number }>;
+    def: AirfieldDef;
+  }>();
   private flying: FlyingNpc[] = [];
   private mat: THREE.MeshLambertMaterial;
   private scanTimer = 0;
@@ -226,6 +264,17 @@ export class Traffic {
       }
     }
 
+    // ---- apron service vehicles: slow laps along the stand rows ----
+    for (const rec of this.parked.values()) {
+      for (const v of rec.movers) {
+        v.along += v.dir * 7 * dt;
+        if (Math.abs(v.along) > 1500) v.dir = -v.dir;
+        // local heading-0 frame (the group pivot carries the field heading)
+        v.m.position.set(rec.def.x + v.side * 460, rec.def.elev, rec.def.z - v.along);
+        v.m.rotation.y = v.dir > 0 ? Math.PI : 0;
+      }
+    }
+
     // ---- parked layer: scan for nearby fields twice a second ----
     this.scanTimer -= 1;
     if (this.scanTimer > 0) return;
@@ -235,10 +284,10 @@ export class Traffic {
       const key = `${def.x},${def.z}`;
       if (!this.parked.has(key)) this.buildParked(def, key);
     }
-    for (const [key, group] of this.parked) {
+    for (const [key, rec] of this.parked) {
       const [fx, fz] = key.split(',').map(Number);
       if (Math.hypot(fx - px, fz - pz) > DROP_RADIUS) {
-        this.scene.remove(group);
+        this.scene.remove(rec.group);
         this.parked.delete(key);
       }
     }
@@ -246,17 +295,21 @@ export class Traffic {
 
   /* ------------------------------------------------ flying ---- */
 
-  private mkNpcModel(kind: NpcKind, livery: number): THREE.Group {
+  /** withShadow only for PARKED aircraft. A flying NPC crossing the sun's
+   *  ±420 m player-chasing shadow box pops a sweeping shadow in and out of
+   *  existence — over shorelines (water receives no shadows) it reads as
+   *  edge flicker on the water. Airborne NPCs cast nothing. */
+  private mkNpcModel(kind: NpcKind, livery: number, withShadow: boolean): THREE.Group {
     const g = new THREE.Group();
     const mesh = new THREE.Mesh(kind === 'airliner' ? airlinerGeo(livery) : gaGeo(livery), this.mat);
-    mesh.castShadow = true;
+    mesh.castShadow = withShadow;
     g.add(mesh);
     return g;
   }
 
   private spawnFlyer(px: number, pz: number, slot: number): void {
     const kind: NpcKind = slot % 3 === 2 ? 'ga' : 'airliner';
-    const group = this.mkNpcModel(kind, slot);
+    const group = this.mkNpcModel(kind, slot, false);
     const glow = new THREE.SphereGeometry(kind === 'airliner' ? 0.5 : 0.3, 6, 5);
     const beacon = new THREE.Mesh(glow, new THREE.MeshBasicMaterial({ color: 0xff2222 }));
     beacon.position.set(0, kind === 'airliner' ? 5.2 : 2.6, 2);
@@ -302,29 +355,51 @@ export class Traffic {
 
   private buildParked(ap: AirfieldDef, key: string): void {
     const g = new THREE.Group();
+    const movers: Array<{ m: THREE.Object3D; along: number; side: number; dir: number }> = [];
     const seed = (a: number, b: number) => hash2(Math.round(ap.x) + a, Math.round(ap.z) + b);
 
     // place one NPC in the field's local (heading-0) frame; the group pivot
     // below rotates the whole set to the true field heading
     const put = (kind: NpcKind, livery: number, along: number, across: number, yaw: number): void => {
-      const m = this.mkNpcModel(kind, livery);
+      const m = this.mkNpcModel(kind, livery, true);
       m.position.set(ap.x + across, ap.elev, ap.z - along);
       m.rotation.y = yaw;
       g.add(m);
     };
 
     if (ap.intl) {
-      // nose-in stands flanking each terminal pier — comfortably off the
-      // taxiways (piers end at |across| 285; stands sit at 330)
-      const terms = [-1050, 0, 1050];
+      // nose-in airliners on the shared gate-stand list (~65% occupancy) —
+      // the jet bridges and stand paint come from the SAME list, so every
+      // parked aircraft sits on a marked gate under its bridge
       let n = 0;
-      for (let t = 0; t < terms.length; t++) {
-        for (const side of [-1, 1]) {
-          for (const dz of [-120, 120]) {
-            if (seed(t * 7 + side * 3, dz) < 0.3) continue; // ~70% stand occupancy
-            put('airliner', n++, terms[t] + 30 + dz, side * 330, side * Math.PI / 2);
-          }
+      for (let i = 0; i < INTL_STANDS.length; i++) {
+        if (seed(i * 13 + 5, i * 7 - 3) < 0.35) continue;
+        const s = INTL_STANDS[i];
+        put('airliner', n++, s.along, s.across, s.yaw);
+      }
+      // ground crew: static tugs/bowsers at the pier roots + two doing
+      // slow laps of the apron service lane
+      for (const [i, pc] of [-1020, 30, 1080].entries()) {
+        if (seed(i * 3 + 1, 8) > 0.35) {
+          const tug = new THREE.Mesh(vehicleGeo('tug'), this.mat);
+          tug.castShadow = true;
+          tug.position.set(ap.x + (seed(i, 2) > 0.5 ? 70 : -70), ap.elev, ap.z - pc - 60);
+          tug.rotation.y = seed(i, 4) * Math.PI * 2;
+          g.add(tug);
         }
+        if (seed(i * 5 + 2, 6) > 0.55) {
+          const fuel = new THREE.Mesh(vehicleGeo('fuel'), this.mat);
+          fuel.castShadow = true;
+          fuel.position.set(ap.x + (seed(i, 9) > 0.5 ? 380 : -380), ap.elev, ap.z - pc + 90);
+          fuel.rotation.y = Math.PI / 2;
+          g.add(fuel);
+        }
+      }
+      for (const side of [-1, 1]) {
+        const m = new THREE.Mesh(vehicleGeo(side < 0 ? 'tug' : 'fuel'), this.mat);
+        m.castShadow = true;
+        g.add(m);
+        movers.push({ m, along: side * seed(3, side) * 900, side, dir: side });
       }
     } else if (ap.major) {
       // a couple of singles on the GA apron east of the runway
@@ -335,17 +410,16 @@ export class Traffic {
       put('ga', Math.floor(seed(9, 4) * 4), -(ap.length / 2 - 150), -(ap.width / 2 + 26), 1.2 + seed(7, 6) * 1.6);
     }
 
+    let root: THREE.Group = g;
     if (g.children.length > 0 && ap.heading !== 0) {
       const pivot = new THREE.Group();
       pivot.position.set(ap.x, 0, ap.z);
       pivot.rotation.y = -ap.heading;
       g.position.set(-ap.x, 0, -ap.z);
       pivot.add(g);
-      this.scene.add(pivot);
-      this.parked.set(key, pivot);
-      return;
+      root = pivot;
     }
-    this.scene.add(g);
-    this.parked.set(key, g);
+    this.scene.add(root);
+    this.parked.set(key, { group: root, movers, def: ap });
   }
 }

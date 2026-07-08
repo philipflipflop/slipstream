@@ -140,15 +140,27 @@ Cloudflare builds with **npm 10.9.2**; local npm is 11. Two rules:
 - `src/nav/ils.ts` — pure ILS: one approach per runway END (four at
   internationals). LOC antenna 300 m past the stop end (±2.5° full scale),
   GS station 300 m in from the threshold on a 3.00° path (±0.7°), DME;
-  auto-tune (main.ts, 1 Hz) captures the best runway ahead with hysteresis.
-  HUD draws fly-toward diamonds; deviation signs: + = right of centreline /
-  above the slope (test 15).
-- `src/world/traffic.ts` — NPC aircraft. Parked: single-geometry planes on
-  intl stands / regional aprons / strip edges, hash-seeded per field —
-  deterministic and NEVER on pavement (test 17 asserts this; keep stands
-  |across| < 560 at internationals). Airborne: 5 cruisers in a 30 km
-  bubble, terrain look-ahead, drained during Ring Rush. No collision, like
-  the rest of the airport furniture.
+  auto-tune (main.ts, 1 Hz) ACQUIRES the best runway ahead but then HOLDS
+  the station like a real tuned radio until out of range — needles peg
+  off-beam instead of the display popping (test 15). `I` toggles the
+  receiver off/auto. HUD draws fly-toward diamonds; deviation signs:
+  + = right of centreline / above the slope.
+- `src/world/traffic.ts` — NPC aircraft + airport ground vehicles. Parked:
+  single-geometry planes nose-in on `INTL_STANDS` (heightfield.ts — the ONE
+  stand list shared with the jet bridges and stand paint, so gates, bridges
+  and aircraft always line up), regional aprons, strip edges; hash-seeded,
+  deterministic, NEVER on pavement (test 17). Airborne: 5 cruisers in a
+  30 km bubble, terrain look-ahead, drained during Ring Rush; airborne NPCs
+  must NOT castShadow — a flier crossing the sun's ±420 m player-chasing
+  shadow box sweeps a popping shadow over shorelines ("water edge
+  flicker"). No collision, like the rest of the airport furniture.
+- Autopilot bank caps scale by airframe class (gLimit ≥ 7 → ~54°, ≤ 3 →
+  airline ~30°, else 24°): a fixed light-aircraft cap turns fast jets into
+  0.5°/s barges that "don't turn" (pinned in test 05).
+- Airport z-fight rules: roof caps sink INTO building bodies (a bottom
+  face coplanar with the body top shimmers), NPC wheels bury their bottom
+  faces below the pavement, big flat airport buildings cast but don't
+  receive shadows (acne crawls as the shadow box chases the player).
 - Airfield lights are treated as POINT SOURCES: fog:false materials +
   per-frame rescaling so they hold ~2–3 px at any range (night divisor
   350, cap 60×), plus a white/green beacon + steady glow sprite per field

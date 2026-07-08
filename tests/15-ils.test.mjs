@@ -126,6 +126,26 @@ console.log('  ✓ runway designators (36 / 18 / 09)');
   console.log('  ✓ parallel internationals: 36L/36R/18L/18R, per-runway capture');
 }
 
+// a tuned receiver HOLDS its station like a real nav radio: turning
+// outbound or drifting off the beam pegs the needles instead of dropping
+// the display — only leaving receiver range lets go
+{
+  const f = mkField();
+  const apps = [];
+  approachesOf(f, apps);
+  const a36 = apps.find((a) => a.ident === '36');
+  // turned 120° away mid-approach: still tuned
+  const away = tuneIls([f], 0, 9000, 500, 2.1, a36);
+  assert.equal(away?.ident, '36', 'receiver dropped the station on a turn away');
+  // parked far abeam, outside the beam: still tuned while in range
+  const abeam = tuneIls([f], 15000, 2000, 500, 0, a36);
+  assert.equal(abeam?.ident, '36', 'receiver dropped the station off-beam');
+  // beyond receiver range: lets go
+  const gone = tuneIls([f], 0, 45000, 500, Math.PI, a36);
+  assert.equal(gone, null, 'receiver held a station beyond range');
+  console.log('  ✓ tuned station holds off-beam/outbound, drops only out of range');
+}
+
 // hysteresis: once tuned, small wobbles don't flick the receiver
 {
   const f = mkField({ length: 3900, rwySep: 1400 });

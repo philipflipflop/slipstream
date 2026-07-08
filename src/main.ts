@@ -100,7 +100,9 @@ class Game {
   private windKt = 0;
 
   // ILS receiver: auto-tunes the best runway end ahead about once a second
+  // and then HOLDS the station like a real tuned radio; I toggles it off
   private ilsTuned: IlsApproach | null = null;
+  private ilsOn = true;
   private ilsTimer = 0;
   private ilsFieldScratch: AirfieldDef[] = [];
   private ilsScratch: IlsApproach[] = [];
@@ -322,6 +324,13 @@ class Game {
       if (this.state !== 'flying') return;
       const mode = this.hud.cycleMode();
       this.screens.toast(mode === 'full' ? 'HUD FULL' : mode === 'min' ? 'HUD MINIMAL' : 'HUD OFF');
+    });
+    this.input.on('ils', () => {
+      if (this.state !== 'flying') return;
+      this.ilsOn = !this.ilsOn;
+      if (!this.ilsOn) this.ilsTuned = null;
+      this.ilsTimer = 0;
+      this.screens.toast(this.ilsOn ? 'ILS AUTO — TUNES THE RUNWAY AHEAD' : 'ILS OFF', 2200);
     });
     this.input.on('map', () => {
       if (this.state !== 'flying') return;
@@ -834,13 +843,20 @@ class Game {
 
     // ILS receiver: retune to the best approach ahead about once a second
     this.ilsTimer -= dt;
-    if (this.ilsTimer <= 0) {
+    if (this.ilsTimer <= 0 && this.ilsOn) {
       this.ilsTimer = 1;
+      const hadIls = this.ilsTuned;
       this.gen.airfieldsNear(st.pos.x, st.pos.z, 36000, this.ilsFieldScratch);
       this.ilsTuned = tuneIls(
         this.ilsFieldScratch, st.pos.x, st.pos.z, st.pos.y, st.heading,
         this.ilsTuned, this.ilsScratch,
       );
+      if (this.ilsTuned && (
+        !hadIls || hadIls.ident !== this.ilsTuned.ident ||
+        hadIls.fieldName !== this.ilsTuned.fieldName
+      )) {
+        this.screens.toast(`ILS ${this.ilsTuned.ident} ${this.ilsTuned.fieldName} TUNED`, 2000);
+      }
     }
 
     // buildings, trees and rock pinnacles are as solid as the terrain
@@ -1029,14 +1045,14 @@ class Game {
           }
         : null,
       ils: (() => {
-        // guidance shows once airborne (or rolling out after touchdown on
-        // the tuned runway); races keep the HUD clear for the gates
+        // shown whenever a station is tuned (needles peg off-beam rather
+        // than the display popping in and out); races keep the HUD clear
         if (!this.ilsTuned || race || (st.onGround && st.airspeed < 3)) return null;
         const d = solveIls(this.ilsTuned, st.pos.x, st.pos.y, st.pos.z);
-        if (d.toGo > 30000 || d.toGo < -this.ilsTuned.length) return null;
         return {
           name: d.name,
           ident: d.ident,
+          course: d.course,
           dme: d.dme,
           locDev: d.locDev,
           gsDev: d.gsDev,

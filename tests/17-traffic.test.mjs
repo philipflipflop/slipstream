@@ -46,7 +46,8 @@ const dt = 1 / 60;
     const t = new Traffic(new THREE.Scene(), gen);
     t.update(dt, 0, 0, 0, false);
     const pos = [];
-    for (const g of t.parked.values()) {
+    for (const rec of t.parked.values()) {
+      const g = rec.group;
       g.updateMatrixWorld(true);
       g.traverse((o) => {
         if (o.isMesh) {

@@ -116,9 +116,14 @@ export class Autopilot {
     c.pitch = clamp(rawPitch, -0.55, 0.55);
 
     // --- heading via bank target ---
-    // heading is clockwise-positive; bank right = negative euler roll
+    // heading is clockwise-positive; bank right = negative euler roll.
+    // Bank authority scales with the airframe class: a fixed light-aircraft
+    // 24° cap turned fast jets into 0.5°/s barges ("the AP doesn't turn").
+    // Transports get the airline-standard ~30°, high-G fighters lean to
+    // ~54° — at fighter cruise that's a proper 3°/s commanded turn.
+    const bankCap = spec.gLimit >= 7 ? 0.95 : spec.gLimit <= 3 ? 0.52 : 0.42;
     const hdgErr = wrapAngle(this.targetHdg - st.heading);
-    const bankTargetRight = clamp(hdgErr * 1.6, -0.42, 0.42);
+    const bankTargetRight = clamp(hdgErr * 2.2, -bankCap, bankCap);
     const bankRight = -st.rollAngle;
     c.roll = clamp((bankTargetRight - bankRight) * 1.8 + st.angVel.z * 0.5, -0.6, 0.6);
     c.yaw = 0;

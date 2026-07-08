@@ -66,9 +66,39 @@ export const AIRPORTS: AirfieldDef[] = [
   { name: 'MERIDIAN INTL', code: 'M', x: 0, z: 0, elev: AIRPORT_ELEV, length: 3900, width: 45, major: true, intl: true, rwySep: 1400, rwy2Len: 3660, heading: 0, cosH: 1, sinH: 0 },
   { name: 'NORTHGATE STRIP', code: 'N', x: -2800, z: -16200, elev: 7, length: 1150, width: 26, major: false, heading: 0, cosH: 1, sinH: 0 },
   { name: 'HIGHMOOR FIELD', code: 'H', x: 14200, z: -8800, elev: 150, length: 1500, width: 30, major: true, heading: 0, cosH: 1, sinH: 0 },
-  { name: 'WESTGATE INTL', code: 'W', x: -42000, z: -24000, elev: 14, length: 3700, width: 45, major: true, intl: true, rwySep: 1400, rwy2Len: 3500, heading: 0, cosH: 1, sinH: 0 },
-  { name: 'OSPREY INTL', code: 'O', x: 36000, z: 34000, elev: 10, length: 3800, width: 45, major: true, intl: true, rwySep: 1400, rwy2Len: 3600, heading: 0, cosH: 1, sinH: 0 },
+  { name: 'WESTGATE INTL', code: 'W', x: -88000, z: -52000, elev: 14, length: 3700, width: 45, major: true, intl: true, rwySep: 1400, rwy2Len: 3500, heading: 0, cosH: 1, sinH: 0 },
+  { name: 'OSPREY INTL', code: 'O', x: 76000, z: 68000, elev: 10, length: 3800, width: 45, major: true, intl: true, rwySep: 1400, rwy2Len: 3600, heading: 0, cosH: 1, sinH: 0 },
 ];
+
+/** Aircraft stand at an international: runway-frame position + the yaw the
+ *  parked aircraft faces (nose-in against its pier finger). */
+export interface IntlStand {
+  along: number;
+  across: number;
+  yaw: number; // 0 = nose north (south face of a pier), π = nose south
+}
+
+/** All 24 gate stands of the standard international layout: two per pier
+ *  face on each of the six pier fingers. ONE list — the parked NPC planes
+ *  (traffic.ts), the jet bridges (airport.ts) and the stand paint (colorAt)
+ *  all read it, so gates, bridges and aircraft always line up. */
+export const INTL_STANDS: IntlStand[] = (() => {
+  const out: IntlStand[] = [];
+  for (const pc of [-1020, 30, 1080]) {        // pier centres, along
+    for (const sideA of [-1, 1]) {             // west / east pier
+      for (const f of [150, 260]) {            // two gates per face
+        for (const sn of [-1, 1]) {            // south / north face
+          out.push({
+            along: pc + sn * 57,
+            across: sideA * f,
+            yaw: sn > 0 ? Math.PI : 0,         // nose-in toward the pier
+          });
+        }
+      }
+    }
+  }
+  return out;
+})();
 
 /**
  * International-airport building layout in the runway frame (along+ =
@@ -628,10 +658,24 @@ export class WorldGen {
             const onConn = ac > 560 &&
               (aAl < 13 || Math.abs(aAl - 650) < 13 ||
                 Math.abs(aAl - 1300) < 13 || Math.abs(aAl - conn) < 13);
+            // nose-in stand boxes along the pier faces, a shade darker
+            let onStand = false;
+            if (ac > 118 && ac < 292) {
+              for (const s of INTL_STANDS) {
+                if (Math.abs(along - s.along) < 24 && Math.abs(across - s.across) < 17) {
+                  onStand = true;
+                  break;
+                }
+              }
+            }
             if (onPara || onConn) {
               cr = lerp(cr, 0.19, gk);
               cg = lerp(cg, 0.2, gk);
               cb = lerp(cb, 0.22, gk);
+            } else if (onStand) {
+              cr = lerp(cr, 0.31, gk);
+              cg = lerp(cg, 0.32, gk);
+              cb = lerp(cb, 0.34, gk);
             }
           }
           r = lerp(r, cr, a); g = lerp(g, cg, a); b = lerp(b, cb, a);

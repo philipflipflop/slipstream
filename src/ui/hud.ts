@@ -37,6 +37,7 @@ export interface HudData {
   ils: null | {
     name: string;
     ident: string;    // approach designator, e.g. "27L"
+    course: number;   // approach course, rad
     dme: number;      // m to threshold
     locDev: number;   // rad, + = right of centreline (fly left)
     gsDev: number;    // rad, + = above the glide path (fly down)
@@ -156,7 +157,8 @@ export class Hud {
     ctx.fillStyle = CYAN;
     ctx.font = `700 ${Math.round(12.5 * s)}px 'Chakra Petch', monospace`;
     const km = ils.dme >= 1000 ? `${(ils.dme / 1000).toFixed(1)} km` : `${Math.round(ils.dme)} m`;
-    ctx.fillText(`ILS ${ils.ident} · ${ils.name} · ${km}`, cx, cy + (d.gun ? 232 : 214) * s);
+    const crs = String(Math.round(((ils.course * RAD2DEG) % 360 + 360) % 360)).padStart(3, '0');
+    ctx.fillText(`ILS ${ils.ident} · ${ils.name} · CRS ${crs}° · ${km}`, cx, cy + (d.gun ? 232 : 214) * s);
     ctx.font = `600 ${Math.round(13 * s)}px 'Chakra Petch', monospace`;
     if (!full) return; // minimal HUD keeps the readout, skips the needles
 

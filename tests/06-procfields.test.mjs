@@ -67,7 +67,8 @@ console.log('  ✓ all strips flat, paved along their own headings, on land');
   for (let i = 0; i < intl.length; i++) {
     for (let j = i + 1; j < intl.length; j++) {
       const d = Math.hypot(intl[i].x - intl[j].x, intl[i].z - intl[j].z);
-      assert.ok(d > 35000 && d < 130000,
+      // European-scale spacing between MAJOR internationals: ~100-250 km
+      assert.ok(d > 80000 && d < 260000,
         `${intl[i].name} ↔ ${intl[j].name} spacing unrealistic (${(d / 1000).toFixed(0)} km)`);
     }
   }
