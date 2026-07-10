@@ -536,6 +536,30 @@ export class WorldGen {
     return out;
   }
 
+  /** Every INTERNATIONAL (fixed + procedural hub) within `radius` of
+   *  (x, z), nearest first — the planning chart uses a few-hundred-km
+   *  radius so the nearest hubs are always findable even when they sit
+   *  far outside the terrain query range. Supercell lookups are cached,
+   *  so wide scans are cheap after the first pass. */
+  hubsNear(x: number, z: number, radius: number, out: AirfieldDef[] = []): AirfieldDef[] {
+    out.length = 0;
+    for (const ap of AIRPORTS) {
+      if (ap.intl && Math.hypot(x - ap.x, z - ap.z) < radius) out.push(ap);
+    }
+    const ir = Math.ceil(radius / INTL_CELL);
+    const icx = Math.floor(x / INTL_CELL);
+    const icz = Math.floor(z / INTL_CELL);
+    for (let dz = -ir; dz <= ir; dz++) {
+      for (let dx = -ir; dx <= ir; dx++) {
+        const f = this.intlForCell(icx + dx, icz + dz);
+        if (f && Math.hypot(x - f.x, z - f.z) < radius) out.push(f);
+      }
+    }
+    out.sort((a, b) =>
+      Math.hypot(x - a.x, z - a.z) - Math.hypot(x - b.x, z - b.z));
+    return out;
+  }
+
   /**
    * Fill the scratch list with every airfield whose flatten/paint influence
    * could reach (x,z): the fixed trio plus the 3×3 surrounding grid cells.

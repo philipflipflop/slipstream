@@ -1109,32 +1109,62 @@ function buildA320(): THREE.Group {
     g.add(swoosh);
   }
 
-  // cockpit glazing: four windshield panes WRAPPED onto the nose as arcs
-  // of a cone that follows the hull's own taper, sitting 5 cm proud. The
-  // white hull shows through the gaps between arcs as pillar frames, so
-  // it reads as real panelled glass — an ellipsoid blob here only pokes
-  // out as two separate lumps at the sides of the nose.
+  // cockpit glazing: a curved glass band SAMPLED FROM THE HULL SURFACE
+  // itself on the nose's forward slope (offset 4 cm out), so the
+  // windscreen sits exactly on the curve between radome and roof — where
+  // a real A320's glass lives — with crisp top/bottom edges. White
+  // pillar slabs over the band split it into the four panes. Flat slabs
+  // and wrapped tube arcs both fail here: slabs emerge from the convex
+  // hull as organic blobs, tube arcs read as a strip around the crown.
   {
-    // hull radius at the band's front/rear stations (see fuse stations)
-    const rFront = 1.82 + 0.05;
-    const rRear = 1.90 + 0.05;
-    // panes per side: [start, end] angle from the crown, radians
-    const panes: Array<[number, number]> = [
-      [0.06, 0.50],  // centre pair, split by the middle post
-      [0.56, 1.02],  // raked side panes
-    ];
-    for (const sx of [-1, 1]) {
-      for (const [a0, a1] of panes) {
-        // cylinder axis → Z after rotateX; original +Y ends up at +Z
-        // (rear), so radiusTop is the REAR radius. θ = π is the crown.
-        const start = Math.PI + (sx < 0 ? -a1 : a0);
-        const arc = new THREE.CylinderGeometry(rRear, rFront, 1.35, 10, 1, true, start, a1 - a0);
-        arc.rotateX(Math.PI / 2);
-        const pane = mesh(arc, GLASS);
-        pane.scale.y = 1.05; // hull section is elliptical
-        pane.position.set(0, 0.02, -14.05);
-        g.add(pane);
+    const surfP = (z: number, b: number, out: THREE.Vector3, proud: number) => {
+      // linear interp of the fuse stations spanning the nose (−17.2..−14.6)
+      const t = (z + 17.2) / 2.6;
+      const r = 1.15 + 0.71 * t;
+      const ryE = 1.28 + 0.68 * t;
+      const yc = -0.12 + 0.12 * t;
+      // outward normal: ellipse normal tilted forward down the cone
+      const nl = Math.hypot(Math.sin(b), Math.cos(b) * 0.95, 0.30);
+      out.set(
+        Math.sin(b) * r + (Math.sin(b) / nl) * proud,
+        yc + Math.cos(b) * ryE + ((Math.cos(b) * 0.95) / nl) * proud,
+        z + (-0.30 / nl) * proud,
+      );
+    };
+    const SEG = 16;
+    const B = 0.94;              // band reaches ±54° around the nose slope
+    const verts: number[] = [];
+    const v = new THREE.Vector3();
+    for (let i = 0; i <= SEG; i++) {
+      const b = -B + (2 * B * i) / SEG;
+      const zTop = -15.86 - 0.20 * b * b; // top edge sweeps forward at the sides
+      for (const z of [zTop - 0.78, zTop]) {
+        surfP(z, b, v, 0.035);
+        verts.push(v.x, v.y, v.z);
       }
+    }
+    const idx: number[] = [];
+    for (let i = 0; i < SEG; i++) {
+      const a = i * 2;
+      idx.push(a, a + 2, a + 1, a + 1, a + 2, a + 3);
+    }
+    const bandGeo = new THREE.BufferGeometry();
+    bandGeo.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
+    bandGeo.setIndex(idx);
+    bandGeo.computeVertexNormals();
+    const bandMat = GLASS.clone();
+    bandMat.side = THREE.DoubleSide;
+    g.add(mesh(bandGeo, bandMat));
+
+    // pillar posts: centre + one either side, sitting proud of the glass
+    const postMat = std(0xf2f4f6, 0.28, 0.1);
+    for (const pb of [-0.42, 0, 0.42]) {
+      const post = mesh(new THREE.BoxGeometry(0.07, 0.9, 0.05), postMat);
+      surfP(-16.26 - 0.20 * pb * pb, pb, v, 0.045);
+      post.position.copy(v);
+      const n2 = new THREE.Vector3(Math.sin(pb), Math.cos(pb) * 0.95, -0.30).normalize();
+      post.lookAt(v.x + n2.x, v.y + n2.y, v.z + n2.z);
+      g.add(post);
     }
   }
   // cabin window band, just proud of the hull at its own height

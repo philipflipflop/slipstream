@@ -40,6 +40,8 @@ export class Minimap {
   private centerZ = 0;
   private sampleRange = 0;
   private fields: AirfieldDef[] = [];
+  /** nearest internationals from a wide (480 km) scan: always findable */
+  private hubs: AirfieldDef[] = [];
   private fieldTimer = 0;
   private panelTimer = 0;
   private lastPx = 0;
@@ -53,6 +55,10 @@ export class Minimap {
   private panMoved = false;
   private panLastX = 0;
   private panLastY = 0;
+  // pinch-zoom (touch): live pointer positions + the finger gap at the
+  // last zoom step — crossing ±30% of it steps the discrete range
+  private pts = new Map<number, { x: number; y: number }>();
+  private pinchBase = 0;
 
   constructor(private gen: WorldGen) {
     this.wrap = document.createElement('div');
@@ -66,8 +72,6 @@ export class Minimap {
     this.panel.id = 'navpanel';
     this.panel.innerHTML = `
       <div class="nav-title">FLIGHT COMPUTER</div>
-      <div class="nav-hint">Click the chart to add waypoints (clicks near a runway snap to it).<br>Drag to scroll the chart — plan far beyond the horizon.</div>
-      <div class="nav-legs"></div>
       <div class="nav-buttons">
         <button data-act="zoomout">−</button>
         <button data-act="zoomin">+</button>
@@ -75,6 +79,8 @@ export class Minimap {
         <button data-act="undo">UNDO</button>
         <button data-act="clear">CLEAR</button>
       </div>
+      <div class="nav-hint">Click the chart to add waypoints (clicks near a runway snap to it).<br>Drag to scroll, pinch or − / + to zoom — plan far beyond the horizon. Amber arrows point to the nearest internationals.</div>
+      <div class="nav-legs"></div>
       <button class="nav-engage" data-act="engage">ENGAGE NAV</button>
       <button class="nav-close" data-act="close">CLOSE</button>
       <div class="nav-close-hint">N or ESC to close</div>
@@ -105,16 +111,36 @@ export class Minimap {
       if (this.expanded && e.target === this.wrap) this.onCloseNav();
     });
 
-    // drag = pan the chart; a tap (no meaningful drag) = add a waypoint
+    // drag = pan the chart; a tap (no meaningful drag) = add a waypoint;
+    // a second finger = pinch zoom (mobile has no , / . keys)
     this.canvas.addEventListener('pointerdown', (e) => {
-      if (!this.expanded || this.panPointer !== null) return;
+      if (!this.expanded) return;
+      this.pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      this.canvas.setPointerCapture(e.pointerId);
+      if (this.pts.size === 2) {
+        // second finger: stop panning, start pinching
+        this.panPointer = null;
+        this.panMoved = true; // neither finger may resolve to a waypoint
+        const [a, b] = [...this.pts.values()];
+        this.pinchBase = Math.hypot(a.x - b.x, a.y - b.y);
+        return;
+      }
+      if (this.panPointer !== null) return;
       this.panPointer = e.pointerId;
       this.panMoved = false;
       this.panLastX = e.clientX;
       this.panLastY = e.clientY;
-      this.canvas.setPointerCapture(e.pointerId);
     });
     this.canvas.addEventListener('pointermove', (e) => {
+      const p = this.pts.get(e.pointerId);
+      if (p) { p.x = e.clientX; p.y = e.clientY; }
+      if (this.pts.size === 2 && this.pinchBase > 0) {
+        const [a, b] = [...this.pts.values()];
+        const d = Math.hypot(a.x - b.x, a.y - b.y);
+        if (d > this.pinchBase * 1.3) { this.zoom(-1); this.pinchBase = d; }
+        else if (d < this.pinchBase * 0.77) { this.zoom(1); this.pinchBase = d; }
+        return;
+      }
       if (e.pointerId !== this.panPointer) return;
       const dx = e.clientX - this.panLastX;
       const dy = e.clientY - this.panLastY;
@@ -127,6 +153,8 @@ export class Minimap {
       this.panLastY = e.clientY;
     });
     const panEnd = (e: PointerEvent): void => {
+      this.pts.delete(e.pointerId);
+      if (this.pts.size < 2) this.pinchBase = 0;
       if (e.pointerId !== this.panPointer) return;
       this.panPointer = null;
       if (this.panMoved || e.type === 'pointercancel') return;
@@ -195,6 +223,8 @@ export class Minimap {
     this.panX = 0;
     this.panZ = 0;
     this.panPointer = null;
+    this.pts.clear();
+    this.pinchBase = 0;
     this.applySize();
     this.resample();
     if (on && this.rangeIdx < 2) this.rangeIdx = 2; // open the chart wide
@@ -264,6 +294,10 @@ export class Minimap {
       this.fieldTimer = 120;
       this.gen.airfieldsNear(vx, vz, Math.max(32000, RANGE * 1.4), this.fields);
       if (!this.fields.some((f) => f.major)) this.fields.push(AIRPORTS[0]);
+      // internationals from far beyond the terrain query, nearest first —
+      // without this the chart simply cannot see the next hub over
+      // (typically 100-250 km out) and the map reads as hub-less
+      this.gen.hubsNear(vx, vz, 480000, this.hubs);
     }
 
     this.draw(px, pz, vx, vz, heading, rings, route);
@@ -471,6 +505,51 @@ export class Minimap {
         ctx.fillText(ap.name, R + 5, 0.5);
       }
       ctx.restore();
+    }
+
+    // directional pointers to the nearest internationals BEYOND the field
+    // query: amber rim arrows with name + distance (expanded chart shows
+    // three, the docked map just the nearest), so the next hub is always
+    // findable even when it's a couple of hundred km out
+    {
+      const maxR = c - 13;
+      let shown = 0;
+      const want = this.expanded ? 3 : 1;
+      for (const hub of this.hubs) {
+        if (shown >= want) break;
+        if (this.fields.includes(hub)) continue; // already drawn above
+        const wx = (hub.x - vx) * toMap;
+        const wz = (hub.z - vz) * toMap;
+        const dist = Math.hypot(wx, wz);
+        if (dist < 1) continue;
+        const ux = wx / dist;
+        const uz = wz / dist;
+        const mx = ux * maxR;
+        const mz = uz * maxR;
+        ctx.fillStyle = '#ffb340';
+        ctx.beginPath();
+        ctx.moveTo(mx + ux * 11, mz + uz * 11);
+        ctx.lineTo(mx - uz * 5, mz + ux * 5);
+        ctx.lineTo(mx + uz * 5, mz - ux * 5);
+        ctx.closePath();
+        ctx.fill();
+        const km = Math.round(Math.hypot(hub.x - vx, hub.z - vz) / 1000);
+        ctx.save();
+        ctx.translate(mx - ux * 10, mz - uz * 10);
+        ctx.rotate(-rot); // labels stay upright on the heading-up docked map
+        ctx.fillStyle = '#ffb340';
+        ctx.font = `700 ${this.expanded ? 9 : 8}px 'Chakra Petch', monospace`;
+        ctx.textBaseline = 'middle';
+        ctx.textAlign = mx < -c * 0.3 ? 'left' : mx > c * 0.3 ? 'right' : 'center';
+        if (this.expanded) {
+          ctx.fillText(hub.name, 0, -6);
+          ctx.fillText(`${km} KM`, 0, 5);
+        } else {
+          ctx.fillText(`${km}`, 0, 0);
+        }
+        ctx.restore();
+        shown++;
+      }
     }
 
     ctx.restore();
