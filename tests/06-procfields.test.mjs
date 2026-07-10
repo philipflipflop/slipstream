@@ -91,3 +91,48 @@ for (let i = 0; i < found.length; i++) {
 }
 assert.ok(minD > 5000, `two strips only ${(minD / 1000).toFixed(1)} km apart`);
 console.log(`  ✓ closest pair ${(minD / 1000).toFixed(1)} km apart`);
+
+// procedural INTERNATIONALS keep appearing far afield: scan a wide ring of
+// distant supercells and demand real hubs with full twin-runway service
+{
+  const hubs = [];
+  for (let icx = -8; icx <= 8; icx++) {
+    for (let icz = -8; icz <= 8; icz++) {
+      const f = gen.intlForCell(icx, icz);
+      if (f) hubs.push(f);
+    }
+  }
+  assert.ok(hubs.length >= 8,
+    `only ${hubs.length} procedural internationals in a 1900×1900 km scan — the map goes hub-less far afield`);
+  for (const f of hubs) {
+    assert.ok(f.intl && f.rwySep >= 1000 && f.length >= 3500, `${f.name}: not a real international`);
+    // twin parallels flat and paved at the hub's own heading
+    for (const off of [-f.rwySep / 2, f.rwySep / 2]) {
+      const len = off < 0 ? f.length : (f.rwy2Len ?? f.length);
+      for (const al of [-len / 2 + 40, 0, len / 2 - 40]) {
+        const px = f.x + off * f.cosH + al * f.sinH;
+        const pz = f.z + off * f.sinH - al * f.cosH;
+        const h = gen.heightAt(px, pz);
+        assert.ok(Math.abs(h - f.elev) < 0.5, `${f.name}: parallel not flat (${h.toFixed(1)} vs ${f.elev.toFixed(1)})`);
+        assert.ok(gen.isOnRunway(px, pz), `${f.name}: parallel unpaved at ${al}`);
+      }
+    }
+    assert.ok(f.elev > 3, `${f.name}: in the sea`);
+    // never crowds the hand-placed trio
+    for (const ap of AIRPORTS) {
+      if (ap.intl) assert.ok(Math.hypot(f.x - ap.x, f.z - ap.z) > 54000, `${f.name} crowds ${ap.name}`);
+    }
+  }
+  // determinism across generators
+  const g2 = new WorldGen();
+  for (const f of hubs) {
+    const f2 = g2.intlForCell(Math.floor(f.x / 120000), Math.floor(f.z / 120000));
+    assert.ok(f2 && f2.x === f.x && f2.z === f.z && f2.name === f.name, 'hub generation not deterministic');
+  }
+  // strips honour the hub berth
+  for (const f of hubs) {
+    const nearby = gen.airfieldsNear(f.x, f.z, 13900).filter((s) => !s.intl);
+    assert.equal(nearby.length, 0, `${f.name}: strip inside the 14 km hub berth`);
+  }
+  console.log(`  ✓ ${hubs.length} procedural internationals across the wide map, flat parallels, deterministic`);
+}

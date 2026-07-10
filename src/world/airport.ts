@@ -431,6 +431,17 @@ export class Airport {
     for (const b of intlBuildings(ap)) {
       const bx = ap.x + b.across;
       const bz = ap.z - b.along;
+      if (b.kind === 'fuel') {
+        // fuel-farm tank: white cylinder + darker lid
+        const tank = new THREE.Mesh(new THREE.CylinderGeometry(b.wa, b.wa, b.h, 14), wallMat);
+        tank.position.set(bx, E + b.h / 2, bz);
+        tank.castShadow = true;
+        g.add(tank);
+        const lid = new THREE.Mesh(new THREE.CylinderGeometry(b.wa * 0.94, b.wa * 0.94, 0.8, 14), roofMat);
+        lid.position.set(bx, E + b.h + 0.15, bz);
+        g.add(lid);
+        continue;
+      }
       if (b.kind === 'tower') {
         const shaft = new THREE.Mesh(new THREE.CylinderGeometry(4.5, 6.5, b.h - 9, 10), wallMat);
         shaft.position.set(bx, E + (b.h - 9) / 2, bz);
@@ -450,7 +461,7 @@ export class Airport {
       }
       const body = new THREE.Mesh(
         new THREE.BoxGeometry(b.wa * 2, b.h, b.la * 2),
-        b.kind === 'hangar' ? hangarMat : wallMat,
+        b.kind === 'hangar' || b.kind === 'cargo' ? hangarMat : wallMat,
       );
       body.position.set(bx, E + b.h / 2, bz);
       // cast but don't receive — big flat roofs self-shadow into crawling
@@ -458,11 +469,30 @@ export class Airport {
       // the same rule)
       body.castShadow = true;
       g.add(body);
-      if (b.kind === 'hangar') {
+      if (b.kind === 'hangar' || b.kind === 'cargo') {
+        // hangar doors face the terminals; cargo docks face their apron
         const door = new THREE.Mesh(new THREE.PlaneGeometry(b.wa * 1.7, b.h * 0.7), doorMat);
-        door.position.set(bx, E + b.h * 0.35, bz - b.la - 0.15);
-        door.rotation.y = Math.PI; // faces the terminals to the north
+        const s = b.kind === 'cargo' ? 1 : -1;
+        door.position.set(bx, E + b.h * 0.35, bz + s * (b.la + 0.15));
+        door.rotation.y = s > 0 ? 0 : Math.PI;
         g.add(door);
+      } else if (b.kind === 'carpark') {
+        // open-deck car park: concrete body with dark deck voids between
+        // floor slabs — reads as parking levels without extra geometry
+        for (const fy of [0.32, 0.68]) {
+          const deckVoid = new THREE.Mesh(
+            new THREE.BoxGeometry(b.wa * 2 + 0.5, b.h * 0.14, b.la * 2 + 0.5),
+            plantMat,
+          );
+          deckVoid.position.set(bx, E + b.h * fy, bz);
+          g.add(deckVoid);
+        }
+        const roof = new THREE.Mesh(
+          new THREE.BoxGeometry(b.wa * 1.94, 1.0, b.la * 1.94),
+          plinthMat,
+        );
+        roof.position.set(bx, E + b.h + 0.15, bz);
+        g.add(roof);
       } else {
         // glazing band wrapping the upper storey + a darker plinth storey
         // at street level + a flat roof cap with rooftop plant

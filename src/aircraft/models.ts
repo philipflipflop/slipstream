@@ -1109,16 +1109,48 @@ function buildA320(): THREE.Group {
     g.add(swoosh);
   }
 
-  // cockpit glazing: one glass crown proud of the hull the whole way round
-  // (a narrow shape only pokes out as separate blobs at the sides)
-  const shield = mesh(new THREE.SphereGeometry(1.0, 14, 9), GLASS);
-  shield.scale.set(2.0, 0.5, 1.05);
-  shield.position.set(0, 1.04, -13.6);
-  g.add(shield);
+  // cockpit glazing: four windshield panes WRAPPED onto the nose as arcs
+  // of a cone that follows the hull's own taper, sitting 5 cm proud. The
+  // white hull shows through the gaps between arcs as pillar frames, so
+  // it reads as real panelled glass — an ellipsoid blob here only pokes
+  // out as two separate lumps at the sides of the nose.
+  {
+    // hull radius at the band's front/rear stations (see fuse stations)
+    const rFront = 1.82 + 0.05;
+    const rRear = 1.90 + 0.05;
+    // panes per side: [start, end] angle from the crown, radians
+    const panes: Array<[number, number]> = [
+      [0.06, 0.50],  // centre pair, split by the middle post
+      [0.56, 1.02],  // raked side panes
+    ];
+    for (const sx of [-1, 1]) {
+      for (const [a0, a1] of panes) {
+        // cylinder axis → Z after rotateX; original +Y ends up at +Z
+        // (rear), so radiusTop is the REAR radius. θ = π is the crown.
+        const start = Math.PI + (sx < 0 ? -a1 : a0);
+        const arc = new THREE.CylinderGeometry(rRear, rFront, 1.35, 10, 1, true, start, a1 - a0);
+        arc.rotateX(Math.PI / 2);
+        const pane = mesh(arc, GLASS);
+        pane.scale.y = 1.05; // hull section is elliptical
+        pane.position.set(0, 0.02, -14.05);
+        g.add(pane);
+      }
+    }
+  }
   // cabin window band, just proud of the hull at its own height
-  const winStrip = mesh(new THREE.BoxGeometry(3.82, 0.2, 23.0), std(0x10161f, 0.2, 0.7));
+  const winStrip = mesh(new THREE.BoxGeometry(3.82, 0.16, 23.0), std(0x10161f, 0.2, 0.7));
   winStrip.position.set(0, 0.62, -1.1);
   g.add(winStrip);
+
+  // wing-body ("belly") fairing: the smooth bulge that blends the wing
+  // roots into the hull — one of the A320's most recognisable curves
+  const belly = mesh(fuseGeo([
+    { z: -4.6, r: 1.1, ry: 0.55, y: -1.3 },
+    { z: -2.6, r: 2.16, ry: 1.02, y: -1.06 },
+    { z: 3.2, r: 2.16, ry: 1.02, y: -1.06 },
+    { z: 7.4, r: 1.0, ry: 0.5, y: -1.25 },
+  ], 12), navy);
+  g.add(belly);
 
   // low swept wing (25° sweep, 5° dihedral), grey upper surface
   const wing = mesh(wingGeo([
@@ -1149,6 +1181,16 @@ function buildA320(): THREE.Group {
     const surf = mesh(new THREE.BoxGeometry(4.6, 0.09, 0.75), greyWing);
     surf.position.set(0, 0, 0.37);
     g.add(hinged(sx < 0 ? 'aileronL' : 'aileronR', surf, 12.6 * sx, -0.55, 7.0));
+  }
+
+  // flap-track canoe fairings under the trailing edge, following the sweep
+  for (const sx of [-1, 1]) {
+    for (const [fx, fz] of [[3.6, 4.9], [6.6, 5.3], [9.8, 6.1]] as Array<[number, number]>) {
+      const canoe = mesh(new THREE.SphereGeometry(0.3, 8, 6), white);
+      canoe.scale.set(0.55, 0.55, 3.4);
+      canoe.position.set(fx * sx, -1.62 + (fx - 2) * 0.055, fz);
+      g.add(canoe);
+    }
   }
 
   // wing-slung LEAP nacelles: fat cowls, spinner-grey fan face, pylons.
@@ -1242,6 +1284,20 @@ function buildA320(): THREE.Group {
     gear.add(strut(3.0 * sx, -1.3, 1.5, 3.78 * sx, -2.8, 1.7, 0.15));
   }
   g.add(gear);
+
+  // spine/keel blade antennas + APU exhaust pipe in the tailcone tip —
+  // tiny, but they break the "toy" silhouette at close range
+  const antMat = std(0xe8ebee, 0.5, 0.2);
+  for (const [az, ay, s] of [[-9.5, 2.02, 1], [2.5, 2.04, 1], [-8.6, -2.02, -1]] as Array<[number, number, number]>) {
+    const ant = mesh(new THREE.BoxGeometry(0.06, 0.34, 0.5), antMat);
+    ant.position.set(0, ay + s * 0.1, az);
+    ant.rotation.x = s * -0.35;
+    g.add(ant);
+  }
+  const apu = mesh(new THREE.CylinderGeometry(0.17, 0.14, 0.7, 8), std(0x4a4d52, 0.4, 0.85));
+  apu.rotation.x = Math.PI / 2 - 0.12;
+  apu.position.set(0, 1.32, 18.55);
+  g.add(apu);
 
   navLights(g, 17.95, 8.6, 0.2);
   return g;

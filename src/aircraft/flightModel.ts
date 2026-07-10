@@ -41,6 +41,7 @@ export interface FlightState {
   thrustFrac: number;        // realized thrust 0..~1.5 (AB)
   spool: number;             // realized engine fraction (jets lag the lever)
   gustT: number;             // turbulence phase accumulator
+  trimAoA: number;           // autotrim: the AoA the pitch spring centres on
   rotorRpm: number;          // helicopter NR, 1 = 100% governed (planes: stays 1)
   vrs: number;               // helicopter vortex-ring severity 0..1 (planes: 0)
 }
@@ -64,6 +65,7 @@ export function createState(): FlightState {
     thrustFrac: 0,
     spool: 0,
     gustT: 0,
+    trimAoA: 0,
     rotorRpm: 1,
     vrs: 0,
   };
@@ -239,11 +241,40 @@ export function stepFlight(
   const vStiff = 1 + V / 260;
   const vDamp = 1 + V / 320;
 
+  // autotrim: a real airframe is flown IN TRIM — the stab holds the 1g
+  // angle of attack for the current speed and flap setting, so a neutral
+  // stick means "hold the flight path", not "chase zero alpha". Without
+  // this, low-G transports burn most of full stick just staying level
+  // (the G-limit pitch cap leaves the A320 ~0.13 rad/s of authority while
+  // the alpha spring pulls toward a diving 0°) and nose over hands-off.
+  // FBW jets autotrim near-instantly (A320 normal law / fighter FCS);
+  // conventional airframes follow at trim-wheel pace. On the ground and
+  // below flying speed the trim parks at zero so the roll stays flat.
+  {
+    const clNeed = (spec.mass * GRAV) / Math.max(qbar * S, 1e-3);
+    let trimTarget = clamp(
+      (clNeed - spec.cl0 - spec.flapsCl * inp.flaps) / spec.clSlope,
+      -0.35 * spec.stallAoA, 0.7 * spec.stallAoA,
+    );
+    // the 1g-trim assumption only holds near wings-level: banked steeply
+    // (or inverted) "nose to 1g alpha" would pull through into a spiral,
+    // so the compensation washes out with bank — as the A320's own
+    // normal-law pitch compensation stops beyond 33° of roll
+    trimTarget *= clamp(Math.cos(st.rollAngle) * 1.3, 0, 1);
+    // …and fades near the ground (the A320 freezes trim below 100 ft RA
+    // for the same reason): full trim + ground effect floats the flare
+    // forever, and a landing should end with a landing
+    trimTarget *= clamp(agl / 30, 0.3, 1);
+    if (st.onGround || V < 30) trimTarget = 0;
+    const trimRate = spec.fbw ? 2.5 : 0.5; // 1/s
+    st.trimAoA += (trimTarget - st.trimAoA) * Math.min(1, trimRate * dt);
+  }
+
   // command terms scale with vDamp too, so damping shapes the response but
   // doesn't erode the achievable rates at speed
   let aaX =
     pitchCmd * pitchRate * 5.2 * eff * vDamp -
-    aoa * 5.5 * spec.stability * eff * vStiff -
+    (aoa - st.trimAoA) * 5.5 * spec.stability * eff * vStiff -
     av.x * (4.2 * eff * vDamp + 0.35);
   let aaY =
     -inp.yaw * spec.yawRate * 2.4 * eff * vDamp -
@@ -264,13 +295,23 @@ export function stepFlight(
   }
 
   // light turbulence: smooth deterministic gusts, strongest down low where
-  // thermals and terrain rotor live, fading out by ~2.5 km
+  // thermals and terrain rotor live, fading out by ~2.5 km. Two shaping
+  // rules keep it reading as air, not a metronome: (1) response scales
+  // with the gust/airspeed ratio — a jet at 400 kt punches through the
+  // same eddy a trainer bounces over, so cruise stays glassy while final
+  // approach stays alive; (2) the fixed-frequency sines are amplitude-
+  // modulated by slow incommensurate envelopes so no regular beat
+  // survives — steady rhythmic rocking is what players read as
+  // "rubber-banding".
   if (turbulence > 0 && !st.onGround) {
     st.gustT += dt;
     const g = st.gustT;
-    const ti = turbulence * (0.35 + 0.65 * clamp(1 - st.pos.y / 2500, 0, 1));
-    aaX += (Math.sin(g * 2.17) + Math.sin(g * 5.3 + 2.0)) * 0.05 * ti;
-    aaZ += (Math.sin(g * 1.73 + 4.0) + Math.sin(g * 4.1 + 1.0)) * 0.085 * ti;
+    const vRatio = clamp(55 / Math.max(V, 25), 0.2, 1);
+    const ti = turbulence * vRatio * (0.35 + 0.65 * clamp(1 - st.pos.y / 2500, 0, 1));
+    const envX = 0.35 + 0.65 * Math.abs(Math.sin(g * 0.47 + 1.3) * Math.sin(g * 0.89));
+    const envZ = 0.35 + 0.65 * Math.abs(Math.sin(g * 0.61 + 0.4) * Math.sin(g * 1.13 + 2.2));
+    aaX += (Math.sin(g * 2.17) + Math.sin(g * 5.3 + 2.0)) * 0.05 * ti * envX;
+    aaZ += (Math.sin(g * 1.73 + 4.0) + Math.sin(g * 4.1 + 1.0)) * 0.085 * ti * envZ;
     aaY += Math.sin(g * 1.31 + 2.6) * 0.028 * ti;
     st.vel.y += Math.sin(g * 2.43 + 0.7) * 0.5 * ti * dt;
   }
@@ -646,6 +687,7 @@ export function spawnOnRunway(
   st.gForce = 1;
   st.spool = 0;
   st.gustT = 0;
+  st.trimAoA = 0;
   st.rotorRpm = 1;
   st.vrs = 0;
 }
