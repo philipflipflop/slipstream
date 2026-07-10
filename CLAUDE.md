@@ -30,12 +30,19 @@ Cloudflare builds with **npm 10.9.2**; local npm is 11. Two rules:
 
 - `src/world/heightfield.ts` — analytic heightfield, single source of truth for
   rendering, collision, scatter, minimap, and airfield placement (5 fixed —
-  three twin-runway INTERNATIONALS ~50 km apart (rwySep/rwy2Len on
+  three twin-runway INTERNATIONALS ~100 km apart (rwySep/rwy2Len on
   AirfieldDef; spawn = Meridian Intl's WESTERN runway at across −rwySep/2) —
   plus procedural strips on a 12 km cell grid, ~⅓ of cells, longest ones
-  major regionals). Change terrain in one place only. `intlBuildings()` is
-  the ONE list of terminal/pier/tower/hangar boxes: airport.ts renders it
-  and obstacles.ts derives rotated-box collision from it — never define
+  major regionals, AND procedural INTERNATIONALS on a 120 km supercell
+  grid (intlForCell: ~70% of supercells try up to 8 jittered sites against
+  flat-dry footprint probes). SUPERCELL RULE: hub jitter is capped at
+  ±28 km, keeping every hub ≥32 km inside its own supercell — flattening,
+  paint and the 14 km strip berth therefore consult ONLY the query point's
+  own supercell (one intlForCell lookup in gatherFields/makeField);
+  widening the jitter breaks that invariant. Change terrain in one place
+  only. `intlBuildings()` is the ONE list of
+  terminal/pier/tower/hangar/cargo/carpark/fuel boxes: airport.ts renders
+  it and obstacles.ts derives rotated-box collision from it — never define
   airport buildings anywhere else. The international concrete slab +
   taxiway lines are PAINTED into colorAt at the mesh's own texel (taxi
   lines fade like the city grid). Kilometre-scale ground overlay planes
@@ -78,6 +85,16 @@ Cloudflare builds with **npm 10.9.2**; local npm is 11. Two rules:
   'interrupted' (WebKit extension) — resume on ANY state !== 'running'
   (every pointer gesture hits init via the body capture listener) and on
   visibilitychange, or the sim stays silent after Siri/calls/app switches.
+- Fixed-wing autotrim: the pitch weathervane spring centres on
+  `st.trimAoA` — the 1g trim AoA for current speed/flaps (fbw airframes
+  retrim at 2.5/s like the A320's normal law, others at trim-wheel 0.5/s).
+  Trim washes out with bank (past ~40°) and inside 30 m AGL (so flares end
+  in landings), parks at 0 on the ground. Without it, low-G transports
+  burn ~¾ of their G-limit-capped pitch authority just holding level, nose
+  over hands-off, and the AP saturates + descends in banked climbs — the
+  "A320 doesn't fly right" bug (pinned in tests/16). Turbulence response
+  scales with gust/airspeed (55/V) and slow envelopes de-rhythmize the
+  gust sines: constant-amplitude chop at cruise reads as "rubber-banding".
 - Ground physics: below 1.5 m/s ground speed, aero yaw moments are zeroed
   (static tire grip) — parked aircraft must not weathervane or slide in
   wind (pinned in tests/14). The parked-stance PITCH spring fades with

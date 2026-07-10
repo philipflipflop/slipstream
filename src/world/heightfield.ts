@@ -112,7 +112,7 @@ export interface AptBuilding {
   la: number;     // half-extent along
   wa: number;     // half-extent across
   h: number;      // height above the apron, m
-  kind: 'terminal' | 'pier' | 'tower' | 'hangar';
+  kind: 'terminal' | 'pier' | 'tower' | 'hangar' | 'cargo' | 'carpark' | 'fuel';
 }
 
 const INTL_BUILDINGS: AptBuilding[] = (() => {
@@ -124,9 +124,19 @@ const INTL_BUILDINGS: AptBuilding[] = (() => {
     B.push({ along: ta + 30, across: 170, la: 27, wa: 115, h: 13, kind: 'pier' });
   }
   B.push({ along: 480, across: 275, la: 11, wa: 11, h: 87, kind: 'tower' });
-  // maintenance/cargo hangars anchor the southern end of the spine
+  // maintenance hangars anchor the southern end of the spine
   B.push({ along: -1620, across: -160, la: 55, wa: 48, h: 19, kind: 'hangar' });
   B.push({ along: -1620, across: 130, la: 55, wa: 48, h: 19, kind: 'hangar' });
+  // cargo terminals fill the northern end (freighter aprons off the piers)
+  B.push({ along: 1620, across: -170, la: 58, wa: 44, h: 15, kind: 'cargo' });
+  B.push({ along: 1620, across: 150, la: 58, wa: 44, h: 15, kind: 'cargo' });
+  // landside: multi-storey car parks in the gaps between the terminals
+  B.push({ along: -525, across: 0, la: 108, wa: 46, h: 11, kind: 'carpark' });
+  B.push({ along: 525, across: 0, la: 108, wa: 46, h: 11, kind: 'carpark' });
+  // fuel farm behind the southern hangars
+  B.push({ along: -1840, across: -390, la: 16, wa: 16, h: 10, kind: 'fuel' });
+  B.push({ along: -1840, across: -320, la: 16, wa: 16, h: 10, kind: 'fuel' });
+  B.push({ along: -1840, across: -250, la: 16, wa: 16, h: 10, kind: 'fuel' });
   return B;
 })();
 
@@ -153,6 +163,19 @@ export const RUNWAY_WIDTH = AIRPORTS[0].width;
 const CELL = 12000;
 const cellKey = (cx: number, cz: number) => (cx + 8192) * 16384 + (cz + 8192);
 
+/** Procedural INTERNATIONAL grid: one candidate per 120 km supercell, so
+ *  hub airports keep appearing however far you fly — the hand-placed trio
+ *  only anchors the home region. Jitter is capped at ±28 km, which keeps a
+ *  candidate ≥32 km inside its own supercell: flattening (~5 km), strip
+ *  berth (14 km) and neighbour queries never have to look across a
+ *  supercell boundary. */
+const INTL_CELL = 120000;
+
+const INTL_NAMES = [
+  'AURORA', 'GRANDVIEW', 'SILVERPORT', 'NORTHWIND', 'EASTBANK', 'KINGSREACH',
+  'STORMHAVEN', 'CLEARWATER', 'IRONBRIDGE', 'FAIRHAVEN', 'STARCROSS', 'WHITECLIFF',
+];
+
 const FIELD_NAMES = [
   'KESTREL', 'SADDLEBACK', 'REDSTONE', 'FOXTROT', 'WINDERMERE', 'CALDERA',
   'JUNIPER', 'HALCYON', 'BASALT', 'THISTLEDOWN', 'MIRAGE', 'OSPREY',
@@ -164,6 +187,7 @@ export class WorldGen {
   private moist: Simplex2;
   private town: Simplex2;
   private fieldCache = new Map<number, AirfieldDef | null>();
+  private intlCache = new Map<number, AirfieldDef | null>();
   private scratch: AirfieldDef[] = [];
 
   constructor(public readonly seed = 20260610, public readonly theme: WorldTheme = 'archipelago') {
@@ -363,6 +387,77 @@ export class WorldGen {
     return f;
   }
 
+  /** The (possibly absent) procedural INTERNATIONAL of a 120 km supercell. */
+  intlForCell(icx: number, icz: number): AirfieldDef | null {
+    const key = cellKey(icx, icz);
+    const hit = this.intlCache.get(key);
+    if (hit !== undefined) return hit;
+    const f = this.makeIntl(icx, icz);
+    this.intlCache.set(key, f);
+    return f;
+  }
+
+  private makeIntl(icx: number, icz: number): AirfieldDef | null {
+    // ~70% of supercells try to host a hub; each tries several jittered
+    // sites so island/mountain terrain doesn't starve whole regions
+    if (hash2(icx * 5 - 7, icz * 3 + 29) > 0.7) return null;
+
+    for (let k = 0; k < 8; k++) {
+      const site = this.tryIntlSite(icx, icz, k);
+      if (site) return site;
+    }
+    return null;
+  }
+
+  private tryIntlSite(icx: number, icz: number, k: number): AirfieldDef | null {
+    const jx = (hash2(icx * 11 + 2 + k * 101, icz * 17 + 6 - k * 59) - 0.5) * 56000;
+    const jz = (hash2(icx * 19 + 8 - k * 83, icz * 23 + 4 + k * 47) - 0.5) * 56000;
+    const ax = icx * INTL_CELL + INTL_CELL / 2 + jx;
+    const az = icz * INTL_CELL + INTL_CELL / 2 + jz;
+
+    // the hand-placed trio anchors the home region — keep clear of it
+    for (const ap of AIRPORTS) {
+      if (ap.intl && Math.hypot(ax - ap.x, az - ap.z) < 55000) return null;
+    }
+
+    const heading = (Math.floor(hash2(icx * 13 + 3 + k * 71, icz * 7 - 11) * 7) - 3) * 0.4363;
+    const sinH = Math.sin(heading);
+    const cosH = Math.cos(heading);
+
+    // a Heathrow needs a coastal plain: probe the full twin-runway
+    // footprint for dry, near-level ground before committing
+    const elev = this.baseHeightAt(ax, az);
+    if (elev < 4 || elev > 120) return null;
+    const probes: Array<[number, number]> = [
+      [-2100, 0], [2100, 0], [0, -900], [0, 900], [-1500, 700], [1500, -700],
+    ];
+    for (const [al, ac] of probes) {
+      const sx = ax + ac * cosH + al * sinH;
+      const sz = az + ac * sinH - al * cosH;
+      const e = this.baseHeightAt(sx, sz);
+      if (e < 3 || Math.abs(e - elev) > 40) return null;
+    }
+
+    const length = 3600 + Math.floor(hash2(icx * 29 + 1, icz * 31 + 15) * 3) * 150;
+    const name = `${INTL_NAMES[Math.floor(hash2(icx + 77, icz - 13) * INTL_NAMES.length)]} INTL`;
+    return {
+      name,
+      code: name[0],
+      x: ax,
+      z: az,
+      elev,
+      length,
+      width: 45,
+      major: true,
+      intl: true,
+      rwySep: 1400,
+      rwy2Len: length - 200,
+      heading,
+      cosH,
+      sinH,
+    };
+  }
+
   private makeField(cx: number, cz: number): AirfieldDef | null {
     // about a third of the cells host a candidate; terrain rejects (water,
     // mountains) thin that out further → strips every ~25-40 km of land, a
@@ -378,6 +473,10 @@ export class WorldGen {
     for (const ap of AIRPORTS) {
       if (Math.hypot(ax - ap.x, az - ap.z) < (ap.intl ? 14000 : 9000)) return null;
     }
+    // …and the supercell's procedural international (jitter capping keeps a
+    // hub ≥32 km inside its supercell, so only the strip's own cell matters)
+    const hub = this.intlForCell(Math.floor(ax / INTL_CELL), Math.floor(az / INTL_CELL));
+    if (hub && Math.hypot(ax - hub.x, az - hub.z) < 14000) return null;
 
     // each strip gets its own runway direction (25° steps, ±75° off north)
     const heading = (Math.floor(hash2(cx * 23 + 13, cz * 29 - 5) * 7) - 3) * 0.4363;
@@ -416,6 +515,15 @@ export class WorldGen {
     for (const ap of AIRPORTS) {
       if (Math.hypot(x - ap.x, z - ap.z) < radius) out.push(ap);
     }
+    const ir = Math.ceil(radius / INTL_CELL);
+    const icx = Math.floor(x / INTL_CELL);
+    const icz = Math.floor(z / INTL_CELL);
+    for (let dz = -ir; dz <= ir; dz++) {
+      for (let dx = -ir; dx <= ir; dx++) {
+        const f = this.intlForCell(icx + dx, icz + dz);
+        if (f && Math.hypot(x - f.x, z - f.z) < radius) out.push(f);
+      }
+    }
     const r = Math.ceil(radius / CELL);
     const cx = Math.floor(x / CELL);
     const cz = Math.floor(z / CELL);
@@ -437,6 +545,10 @@ export class WorldGen {
     const s = this.scratch;
     let n = 0;
     for (const ap of AIRPORTS) s[n++] = ap;
+    // the supercell hub (own cell only — jitter capping guarantees a hub's
+    // influence never reaches across a supercell boundary)
+    const hub = this.intlForCell(Math.floor(x / INTL_CELL), Math.floor(z / INTL_CELL));
+    if (hub) s[n++] = hub;
     const cx = Math.floor(x / CELL);
     const cz = Math.floor(z / CELL);
     for (let dz = -1; dz <= 1; dz++) {
@@ -652,12 +764,17 @@ export class WorldGen {
           let cr = 0.4, cg = 0.41, cb = 0.43; // apron/slab concrete
           const gk = texel > 0 ? 1 - smoothstep(10, 26, texel) : 1;
           if (gk > 0 && a > 0) {
-            // parallel taxiways inside each runway + connector stubs
+            // full taxiway system: an outer parallel inside each runway, an
+            // inner apron taxilane behind the stand rows, and connectors
+            // joining lane → parallel → runway at regular intervals
             const conn = ap.length / 2 - 240;
-            const onPara = Math.abs(ac - 600) < 15 && aAl < conn + 15;
-            const onConn = ac > 560 &&
+            const onPara = (Math.abs(ac - 600) < 15 && aAl < conn + 15) ||
+              (Math.abs(ac - 370) < 12 && aAl < 1435);
+            const onConn = (ac > 358 &&
               (aAl < 13 || Math.abs(aAl - 650) < 13 ||
-                Math.abs(aAl - 1300) < 13 || Math.abs(aAl - conn) < 13);
+                Math.abs(aAl - 1300) < 13)) ||
+              (ac > 560 && Math.abs(aAl - conn) < 13) ||
+              (ac > 358 && ac < 612 && Math.abs(aAl - 1423) < 12);
             // nose-in stand boxes along the pier faces, a shade darker
             let onStand = false;
             if (ac > 118 && ac < 292) {

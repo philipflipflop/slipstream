@@ -28,6 +28,13 @@ const ROCK = 'STRUCK A ROCK PINNACLE';
 const TERMINAL = 'CRASHED INTO THE TERMINAL';
 const TOWER = 'HIT THE CONTROL TOWER';
 const HANGAR = 'FLEW INTO A HANGAR';
+const APT_REASON: Record<string, string> = {
+  tower: TOWER,
+  hangar: HANGAR,
+  cargo: 'CRASHED INTO THE CARGO TERMINAL',
+  carpark: 'HIT THE CAR PARK',
+  fuel: 'FLEW INTO THE FUEL FARM',
+};
 
 export class ObstacleField {
   private cache = new Map<string, Solid[]>();
@@ -77,7 +84,7 @@ export class ObstacleField {
           hz: b.la,
           cs: ap.cosH,
           sn: ap.sinH,
-          reason: b.kind === 'tower' ? TOWER : b.kind === 'hangar' ? HANGAR : TERMINAL,
+          reason: APT_REASON[b.kind] ?? TERMINAL,
         });
       }
     }

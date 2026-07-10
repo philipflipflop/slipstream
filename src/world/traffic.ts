@@ -122,8 +122,10 @@ function airlinerGeo(livery: number): THREE.BufferGeometry {
   return g;
 }
 
-/** Ground service vehicle: baggage tug or fuel bowser. Forward is -Z. */
-function vehicleGeo(kind: 'tug' | 'fuel'): THREE.BufferGeometry {
+/** Ground service vehicle: baggage tug, fuel bowser, crew bus or a
+ *  baggage-cart train. Forward is -Z. */
+type VehicleKind = 'tug' | 'fuel' | 'bus' | 'carts';
+function vehicleGeo(kind: VehicleKind): THREE.BufferGeometry {
   const key = `veh${kind}`;
   const hit = geoCache.get(key);
   if (hit) return hit;
@@ -135,7 +137,7 @@ function vehicleGeo(kind: 'tug' | 'fuel'): THREE.BufferGeometry {
     const bed = new THREE.BoxGeometry(1.5, 0.7, 2.6);
     bed.translate(0, 0.65, 0.9);
     parts.push(paint(bed, 0x3a4148));
-  } else {
+  } else if (kind === 'fuel') {
     const cab = new THREE.BoxGeometry(2.2, 2.0, 2.0);
     cab.translate(0, 1.3, -2.4);
     parts.push(paint(cab, 0xf2f4f6));
@@ -143,10 +145,28 @@ function vehicleGeo(kind: 'tug' | 'fuel'): THREE.BufferGeometry {
     tank.rotateX(Math.PI / 2);
     tank.translate(0, 1.35, 0.9);
     parts.push(paint(tank, 0xc23b32));
+  } else if (kind === 'bus') {
+    const body = new THREE.BoxGeometry(2.4, 2.6, 9.4);
+    body.translate(0, 1.75, 0);
+    parts.push(paint(body, 0xf2f4f6));
+    const band = new THREE.BoxGeometry(2.5, 0.8, 9.0);
+    band.translate(0, 2.3, 0);
+    parts.push(paint(band, 0x21384f)); // window band
+  } else {
+    // three-cart baggage train behind a drawbar
+    for (const cz of [-2.2, 0, 2.2]) {
+      const cart = new THREE.BoxGeometry(1.3, 1.3, 1.9);
+      cart.translate(0, 0.95, cz);
+      parts.push(paint(cart, cz === 0 ? 0x3a4148 : 0x6d7680));
+    }
   }
   // simple axle blocks
-  for (const gz of kind === 'tug' ? [-1.3, 1.1] : [-2.2, 1.8]) {
-    const axle = new THREE.BoxGeometry(kind === 'tug' ? 1.6 : 2.3, 0.55, 0.6);
+  const axles = kind === 'tug' ? [-1.3, 1.1]
+    : kind === 'fuel' ? [-2.2, 1.8]
+    : kind === 'bus' ? [-3.1, 3.1]
+    : [-2.2, 0, 2.2];
+  for (const gz of axles) {
+    const axle = new THREE.BoxGeometry(kind === 'tug' ? 1.6 : kind === 'carts' ? 1.1 : 2.3, 0.55, 0.6);
     axle.translate(0, 0.26, gz);
     parts.push(paint(axle, 0x1a1c1f));
   }
@@ -377,8 +397,8 @@ export class Traffic {
         const s = INTL_STANDS[i];
         put('airliner', n++, s.along, s.across, s.yaw);
       }
-      // ground crew: static tugs/bowsers at the pier roots + two doing
-      // slow laps of the apron service lane
+      // ground crew: static tugs/bowsers/cart-trains at the pier roots +
+      // vehicles doing slow laps of both apron service lanes
       for (const [i, pc] of [-1020, 30, 1080].entries()) {
         if (seed(i * 3 + 1, 8) > 0.35) {
           const tug = new THREE.Mesh(vehicleGeo('tug'), this.mat);
@@ -394,12 +414,21 @@ export class Traffic {
           fuel.rotation.y = Math.PI / 2;
           g.add(fuel);
         }
+        if (seed(i * 7 + 4, 3) > 0.3) {
+          const carts = new THREE.Mesh(vehicleGeo('carts'), this.mat);
+          carts.castShadow = true;
+          carts.position.set(ap.x + (seed(i, 11) > 0.5 ? 95 : -95), ap.elev, ap.z - pc + 40);
+          carts.rotation.y = seed(i, 13) > 0.5 ? 0 : Math.PI / 2;
+          g.add(carts);
+        }
       }
-      for (const side of [-1, 1]) {
-        const m = new THREE.Mesh(vehicleGeo(side < 0 ? 'tug' : 'fuel'), this.mat);
+      const lapKinds: VehicleKind[] = ['tug', 'fuel', 'bus', 'bus'];
+      for (const [i, kind] of lapKinds.entries()) {
+        const side = i % 2 === 0 ? -1 : 1;
+        const m = new THREE.Mesh(vehicleGeo(kind), this.mat);
         m.castShadow = true;
         g.add(m);
-        movers.push({ m, along: side * seed(3, side) * 900, side, dir: side });
+        movers.push({ m, along: (seed(3 + i, side) - 0.5) * 2400, side, dir: i < 2 ? side : -side });
       }
     } else if (ap.major) {
       // a couple of singles on the GA apron east of the runway
