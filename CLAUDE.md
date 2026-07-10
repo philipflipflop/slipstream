@@ -202,8 +202,13 @@ Cloudflare builds with **npm 10.9.2**; local npm is 11. Two rules:
 - Minimap sampling is LED ~15 s ahead along the ground track (pan
   overrides the lead) — a lazily trailing sample centre leaves a black
   band hatching in at the map's leading edge at speed. The expanded chart
-  pans (drag; tap = waypoint, ⌖ ACFT recenters) — it draws from the
-  ANALYTIC heightfield, so planning range costs no 3D streaming.
+  pans (drag; tap = waypoint, ⌖ ACFT recenters; pinch or , / . zooms) —
+  it draws from the ANALYTIC heightfield, so planning range costs no 3D
+  streaming. The terrain/field query only reaches ~100 km, so nearest-hub
+  findability comes from a separate wide scan: `hubsNear` (480 km,
+  cached supercell lookups) feeds amber rim arrows with name + distance
+  to the nearest internationals (3 on the chart, 1 on the docked map) —
+  without it the next hub over is invisible and the map reads hub-less.
 - The far-shell hole must NEVER outrun real coverage: rebuildFarIndex
   clamps it to nearestGapRing() − 1.2 (closest missing chunk), and it is
   re-punched wider when the queue drains (farHoleDirty). Punching the
