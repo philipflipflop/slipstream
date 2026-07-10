@@ -3,6 +3,7 @@
 // a stabilised 3° approach at approach speed holds without falling apart.
 import assert from 'node:assert/strict';
 import { createState, stepFlight, spawnOnRunway } from '../.test-build/aircraft/flightModel.js';
+import { Autopilot } from '../.test-build/aircraft/autopilot.js';
 import { specById } from '../.test-build/aircraft/catalog.js';
 
 const dt = 1 / 180;
@@ -103,4 +104,59 @@ assert.equal(a320.retractableGear, true);
   assert.ok(st.onGround && !st.crashed,
     `A320 approach failed (${st.crashReason || 'never touched down'})`);
   console.log('  ✓ A320 flies a stabilised approach to a smooth touchdown');
+}
+
+// autotrim: hands-off at cruise the jet holds its flight path (normal-law
+// path stability) instead of nosing over into the ground — the pre-trim
+// model dove in from 800 m in under 30 s with the stick free
+{
+  const st = createState();
+  spawnOnRunway(a320, st, flat);
+  st.pos.set(0, 808, 0);
+  st.vel.set(0, 0, -130);
+  st.onGround = false;
+  st.spool = 0.55;
+  const inp = mkInp({ throttle: 0.55, gearDown: false });
+  let minAlt = Infinity;
+  for (let t = 0; t < 90; t += dt) {
+    stepFlight(a320, st, inp, dt, flat);
+    minAlt = Math.min(minAlt, st.pos.y);
+  }
+  assert.ok(!st.crashed, `A320 crashed hands-off (${st.crashReason})`);
+  assert.ok(minAlt > 500, `A320 lost ${(808 - minAlt).toFixed(0)} m hands-off — trim not holding the path`);
+  console.log(`  ✓ A320 autotrim holds the path hands-off (sagged ${(808 - minAlt).toFixed(0)} m in 90 s)`);
+}
+
+// the reported killer: AP engaged, then a climb + 30°-bank turn commanded
+// together. Pre-trim, the pitch loop saturated fighting the alpha spring
+// and the jet descended into the ground at full aft command. It must climb
+// at the V/S bug through the whole turn.
+{
+  const st = createState();
+  spawnOnRunway(a320, st, flat);
+  st.pos.set(0, 500, 0);
+  st.vel.set(0, 0, -103); // ~200 kt
+  st.onGround = false;
+  st.spool = 0.8;
+  const inp = mkInp({ throttle: 0.8, gearDown: false });
+  stepFlight(a320, st, inp, dt, flat); // populate airspeed for engage
+  st.pos.set(0, 500, 0);
+  const ap = new Autopilot();
+  ap.engage(st, 0.8);
+  ap.targetAlt = 1800;
+  ap.targetHdg = Math.PI / 2;
+  let minAlt = Infinity;
+  const frameDt = 1 / 60; // AP runs per frame in the game, not per substep
+  for (let f = 0; f < 60 * 300; f++) {
+    ap.update(a320, st, inp, frameDt);
+    for (let i = 0; i < 3; i++) stepFlight(a320, st, inp, frameDt / 3, flat);
+    minAlt = Math.min(minAlt, st.pos.y);
+    if (st.crashed) break;
+  }
+  assert.ok(!st.crashed, `A320 crashed in the AP climb+turn (${st.crashReason})`);
+  assert.ok(minAlt > 380, `A320 sank to ${minAlt.toFixed(0)} m during the AP turn`);
+  assert.ok(st.pos.y > 1600, `A320 never made the climb (topped at ${st.pos.y.toFixed(0)} m)`);
+  const hdgErr = Math.abs(st.heading - Math.PI / 2);
+  assert.ok(hdgErr < 0.05, `A320 heading off by ${(hdgErr * 57.3).toFixed(1)}°`);
+  console.log(`  ✓ A320 AP climbs through a 30° banked turn to the ALT bug (min ${minAlt.toFixed(0)} m)`);
 }

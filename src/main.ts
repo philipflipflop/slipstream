@@ -157,7 +157,7 @@ class Game {
     this.range.onHit = (hits, total) => this.screens.toast(`TARGET DOWN — ${hits}/${total}`);
     this.range.onClear = () => this.screens.toast('RANGE CLEAR — ALL TARGETS DESTROYED');
     this.range.solid = (x, y, z) => this.obstacles.solidAt(x, y, z);
-    setTurbulence(0.7); // light chop down low; tests run with 0
+    setTurbulence(0.45); // light chop down low; tests run with 0
 
     this.aircraft = new Aircraft(specById(this.save.aircraft));
     this.aircraft.addExteriorLights(this.daylight.landingLight);
