@@ -1109,32 +1109,89 @@ function buildA320(): THREE.Group {
     g.add(swoosh);
   }
 
-  // cockpit glazing: four windshield panes WRAPPED onto the nose as arcs
-  // of a cone that follows the hull's own taper, sitting 5 cm proud. The
-  // white hull shows through the gaps between arcs as pillar frames, so
-  // it reads as real panelled glass — an ellipsoid blob here only pokes
-  // out as two separate lumps at the sides of the nose.
+  // cockpit glazing: a four-pane windscreen lofted 7 cm proud of the
+  // ACTUAL nose surface. fuseGeo lofts 14-gon rings linearly between
+  // stations, so sampling the same rings (chords included) puts every
+  // glass vertex a uniform step off the rendered hull — no guessing, no
+  // half-buried panes, no bulges poking through. The band sits on the
+  // forward slope between radome and crown and wraps down at the sides,
+  // split by white posts: a proper raked windscreen, like the Meridian's.
   {
-    // hull radius at the band's front/rear stations (see fuse stations)
-    const rFront = 1.82 + 0.05;
-    const rRear = 1.90 + 0.05;
-    // panes per side: [start, end] angle from the crown, radians
-    const panes: Array<[number, number]> = [
-      [0.06, 0.50],  // centre pair, split by the middle post
-      [0.56, 1.02],  // raked side panes
+    // the A320 nose stations of the fuselage loft (z, r, ry, yCentre)
+    const NOSE: Array<[number, number, number, number]> = [
+      [-18.7, 0.22, 0.24, -0.35], [-17.2, 1.15, 1.28, -0.12], [-14.6, 1.86, 1.96, 0],
     ];
-    for (const sx of [-1, 1]) {
-      for (const [a0, a1] of panes) {
-        // cylinder axis → Z after rotateX; original +Y ends up at +Z
-        // (rear), so radiusTop is the REAR radius. θ = π is the crown.
-        const start = Math.PI + (sx < 0 ? -a1 : a0);
-        const arc = new THREE.CylinderGeometry(rRear, rFront, 1.35, 10, 1, true, start, a1 - a0);
-        arc.rotateX(Math.PI / 2);
-        const pane = mesh(arc, GLASS);
-        pane.scale.y = 1.05; // hull section is elliptical
-        pane.position.set(0, 0.02, -14.05);
-        g.add(pane);
-      }
+    const SEGS = 14; // fuseGeo(..., 14) for this hull
+    const step = (Math.PI * 2) / SEGS;
+    const lp = (a: number, b: number, t: number) => a + (b - a) * t;
+    // surface point of the faceted loft at station z, clock angle phi
+    // from the crown (phi > 0 = +x side) — walks the ring CHORD, so the
+    // result lies exactly on the rendered polygon surface
+    const surf = (z: number, phi: number): { x: number; y: number } => {
+      let i = 0;
+      while (i < NOSE.length - 2 && z > NOSE[i + 1][0]) i++;
+      const t = (z - NOSE[i][0]) / (NOSE[i + 1][0] - NOSE[i][0]);
+      const r = lp(NOSE[i][1], NOSE[i + 1][1], t);
+      const ry = lp(NOSE[i][2], NOSE[i + 1][2], t);
+      const yc = lp(NOSE[i][3], NOSE[i + 1][3], t);
+      const a = Math.PI / 2 - phi;
+      const i0 = Math.floor(a / step);
+      const f = a / step - i0;
+      const x = lp(Math.cos(i0 * step), Math.cos((i0 + 1) * step), f) * r;
+      const y = lp(Math.sin(i0 * step), Math.sin((i0 + 1) * step), f) * ry + yc;
+      return { x, y };
+    };
+    const PROUD = 0.07;
+    // glass columns at the hull's own facet pitch (2π/14) so the flat
+    // glass quads always span no wider than a hull facet — a coarser
+    // sampling lets hull vertices pierce the panes as white shards
+    const phis = Array.from({ length: 9 }, (_, i) => (i - 4) * ((Math.PI * 2) / SEGS / 2));
+    const col = (phi: number) => {
+      const zb = -17.50 + phi * phi * 0.22; // side columns sweep aft
+      const zt = -16.60 + phi * phi * 0.30;
+      const b = surf(zb, phi);
+      const t = surf(zt, phi);
+      const nx = Math.sin(phi) * PROUD;
+      const ny = Math.cos(phi) * PROUD;
+      return {
+        xb: b.x + nx, yb: b.y + ny, zb: zb - 0.02,
+        xt: t.x + nx, yt: t.y + ny, zt: zt - 0.02,
+      };
+    };
+    const cols = phis.map(col);
+    const verts: number[] = [];
+    for (let i = 0; i < cols.length - 1; i++) {
+      const a = cols[i];
+      const b = cols[i + 1];
+      verts.push(
+        a.xb, a.yb, a.zb, b.xb, b.yb, b.zb, a.xt, a.yt, a.zt,
+        b.xb, b.yb, b.zb, b.xt, b.yt, b.zt, a.xt, a.yt, a.zt,
+      );
+    }
+    const glassGeo = new THREE.BufferGeometry();
+    glassGeo.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
+    glassGeo.computeVertexNormals();
+    g.add(new THREE.Mesh(glassGeo, new THREE.MeshStandardMaterial({
+      color: 0x16242f, roughness: 0.08, metalness: 0.9, side: THREE.DoubleSide,
+    })));
+
+    // white posts over the pane seams (centre + both mid-columns)
+    const postMat = std(0xdfe3e8, 0.4, 0.2);
+    for (const pi of [2, 4, 6]) {
+      const c = cols[pi];
+      const dx = c.xt - c.xb;
+      const dy = c.yt - c.yb;
+      const dz = c.zt - c.zb;
+      const len = Math.hypot(dx, dy, dz);
+      const post = mesh(new THREE.BoxGeometry(0.034, len - 0.05, 0.045), postMat);
+      const nx = Math.sin(phis[pi]) * 0.015;
+      const ny = Math.cos(phis[pi]) * 0.015;
+      post.position.set(c.xb + dx / 2 + nx, c.yb + dy / 2 + ny, c.zb + dz / 2);
+      post.quaternion.setFromUnitVectors(
+        new THREE.Vector3(0, 1, 0),
+        new THREE.Vector3(dx / len, dy / len, dz / len),
+      );
+      g.add(post);
     }
   }
   // cabin window band, just proud of the hull at its own height
