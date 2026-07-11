@@ -40,6 +40,10 @@ export class Minimap {
   private centerZ = 0;
   private sampleRange = 0;
   private fields: AirfieldDef[] = [];
+  /** nearest internationals (fixed + procedural hubs), sorted by distance —
+   *  searched far beyond the chart's terrain range so the next hub is
+   *  always signposted at the rim instead of being a needle in a haystack */
+  private hubs: AirfieldDef[] = [];
   private fieldTimer = 0;
   private panelTimer = 0;
   private lastPx = 0;
@@ -53,6 +57,9 @@ export class Minimap {
   private panMoved = false;
   private panLastX = 0;
   private panLastY = 0;
+  // pinch-to-zoom (touch): positions of the active pointers on the chart
+  private pinch = new Map<number, { x: number; y: number }>();
+  private pinchBase = 0;
 
   constructor(private gen: WorldGen) {
     this.wrap = document.createElement('div');
@@ -66,8 +73,6 @@ export class Minimap {
     this.panel.id = 'navpanel';
     this.panel.innerHTML = `
       <div class="nav-title">FLIGHT COMPUTER</div>
-      <div class="nav-hint">Click the chart to add waypoints (clicks near a runway snap to it).<br>Drag to scroll the chart — plan far beyond the horizon.</div>
-      <div class="nav-legs"></div>
       <div class="nav-buttons">
         <button data-act="zoomout">−</button>
         <button data-act="zoomin">+</button>
@@ -75,6 +80,8 @@ export class Minimap {
         <button data-act="undo">UNDO</button>
         <button data-act="clear">CLEAR</button>
       </div>
+      <div class="nav-hint">Click the chart to add waypoints (clicks near a runway snap to it).<br>Drag to scroll, pinch or −/+ to zoom — amber rim arrows point to the nearest internationals.</div>
+      <div class="nav-legs"></div>
       <button class="nav-engage" data-act="engage">ENGAGE NAV</button>
       <button class="nav-close" data-act="close">CLOSE</button>
       <div class="nav-close-hint">N or ESC to close</div>
@@ -105,16 +112,36 @@ export class Minimap {
       if (this.expanded && e.target === this.wrap) this.onCloseNav();
     });
 
-    // drag = pan the chart; a tap (no meaningful drag) = add a waypoint
+    // drag = pan the chart; a tap (no meaningful drag) = add a waypoint;
+    // a second finger = pinch-to-zoom (steps through the range settings)
     this.canvas.addEventListener('pointerdown', (e) => {
-      if (!this.expanded || this.panPointer !== null) return;
+      if (!this.expanded) return;
+      this.pinch.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      this.canvas.setPointerCapture(e.pointerId);
+      if (this.pinch.size === 2) {
+        // pinch begins: stop panning, and make sure neither release taps
+        const [a, b] = [...this.pinch.values()];
+        this.pinchBase = Math.hypot(a.x - b.x, a.y - b.y);
+        this.panPointer = null;
+        this.panMoved = true;
+        return;
+      }
+      if (this.panPointer !== null) return;
       this.panPointer = e.pointerId;
       this.panMoved = false;
       this.panLastX = e.clientX;
       this.panLastY = e.clientY;
-      this.canvas.setPointerCapture(e.pointerId);
     });
     this.canvas.addEventListener('pointermove', (e) => {
+      const p = this.pinch.get(e.pointerId);
+      if (p) { p.x = e.clientX; p.y = e.clientY; }
+      if (this.pinch.size === 2 && this.pinchBase > 0) {
+        const [a, b] = [...this.pinch.values()];
+        const d = Math.hypot(a.x - b.x, a.y - b.y);
+        if (d > this.pinchBase * 1.3) { this.zoom(-1); this.pinchBase = d; }
+        else if (d < this.pinchBase * 0.77) { this.zoom(1); this.pinchBase = d; }
+        return;
+      }
       if (e.pointerId !== this.panPointer) return;
       const dx = e.clientX - this.panLastX;
       const dy = e.clientY - this.panLastY;
@@ -127,6 +154,8 @@ export class Minimap {
       this.panLastY = e.clientY;
     });
     const panEnd = (e: PointerEvent): void => {
+      this.pinch.delete(e.pointerId);
+      if (this.pinch.size < 2) this.pinchBase = 0;
       if (e.pointerId !== this.panPointer) return;
       this.panPointer = null;
       if (this.panMoved || e.type === 'pointercancel') return;
@@ -264,6 +293,8 @@ export class Minimap {
       this.fieldTimer = 120;
       this.gen.airfieldsNear(vx, vz, Math.max(32000, RANGE * 1.4), this.fields);
       if (!this.fields.some((f) => f.major)) this.fields.push(AIRPORTS[0]);
+      // nearest internationals, searched far beyond the chart's own range
+      this.gen.hubsNear(vx, vz, 650000, this.hubs);
     }
 
     this.draw(px, pz, vx, vz, heading, rings, route);
@@ -471,6 +502,50 @@ export class Minimap {
         ctx.fillText(ap.name, R + 5, 0.5);
       }
       ctx.restore();
+    }
+
+    // signposts to the nearest internationals BEYOND the airfield query
+    // range (those inside it already drew their own rim pointers above):
+    // amber arrows at the rim with name + distance, so the next hub is a
+    // heading to fly, not a needle in a haystack
+    {
+      const fieldsR = Math.max(32000, RANGE * 1.4);
+      let shown = 0;
+      const maxShown = this.expanded ? 3 : 1;
+      for (const ap of this.hubs) {
+        if (shown >= maxShown) break;
+        const dw = Math.hypot(ap.x - vx, ap.z - vz);
+        if (dw < fieldsR) continue;
+        shown++;
+        const mxr = (ap.x - vx) * toMap;
+        const mzr = (ap.z - vz) * toMap;
+        const dpx = Math.hypot(mxr, mzr);
+        const maxR = c - 13;
+        const ux = mxr / dpx;
+        const uz = mzr / dpx;
+        const mx = ux * maxR;
+        const mz = uz * maxR;
+        ctx.fillStyle = '#ffb340';
+        ctx.beginPath();
+        ctx.moveTo(mx + ux * 9, mz + uz * 9);
+        ctx.lineTo(mx - uz * 5.5, mz + ux * 5.5);
+        ctx.lineTo(mx + uz * 5.5, mz - ux * 5.5);
+        ctx.closePath();
+        ctx.fill();
+        // upright label tucked inside the rim (expanded names it in full)
+        ctx.save();
+        ctx.translate(mx - ux * 13, mz - uz * 13);
+        ctx.rotate(-rot);
+        // screen-space direction (after the chart rotation) sets alignment
+        const sx = ux * Math.cos(rot) - uz * Math.sin(rot);
+        const sz = ux * Math.sin(rot) + uz * Math.cos(rot);
+        ctx.font = `700 9px 'Chakra Petch', monospace`;
+        ctx.textAlign = sx > 0.35 ? 'right' : sx < -0.35 ? 'left' : 'center';
+        ctx.textBaseline = sz > 0.35 ? 'bottom' : sz < -0.35 ? 'top' : 'middle';
+        const km = Math.round(dw / 1000);
+        ctx.fillText(this.expanded ? `${ap.name} ${km} KM` : `${km}`, 0, 0);
+        ctx.restore();
+      }
     }
 
     ctx.restore();

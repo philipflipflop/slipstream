@@ -509,6 +509,32 @@ export class WorldGen {
     };
   }
 
+  /**
+   * Every INTERNATIONAL (fixed + procedural hub) within `radius` of (x, z),
+   * sorted nearest-first. Radius can be hundreds of km: the supercell scan
+   * is cheap (cached lookups; cold cells cost a handful of noise probes) —
+   * this is how the chart finds "the nearest hubs" far beyond its
+   * terrain-drawing range, so long-haul planning isn't a needle hunt.
+   */
+  hubsNear(x: number, z: number, radius: number, out: AirfieldDef[] = []): AirfieldDef[] {
+    out.length = 0;
+    for (const ap of AIRPORTS) {
+      if (ap.intl && Math.hypot(x - ap.x, z - ap.z) < radius) out.push(ap);
+    }
+    const ir = Math.ceil(radius / INTL_CELL);
+    const icx = Math.floor(x / INTL_CELL);
+    const icz = Math.floor(z / INTL_CELL);
+    for (let dz = -ir; dz <= ir; dz++) {
+      for (let dx = -ir; dx <= ir; dx++) {
+        const f = this.intlForCell(icx + dx, icz + dz);
+        if (f && Math.hypot(x - f.x, z - f.z) < radius) out.push(f);
+      }
+    }
+    out.sort((a, b) =>
+      (Math.hypot(x - a.x, z - a.z)) - (Math.hypot(x - b.x, z - b.z)));
+    return out;
+  }
+
   /** Every airfield (fixed + procedural) within `radius` of (x, z). */
   airfieldsNear(x: number, z: number, radius: number, out: AirfieldDef[] = []): AirfieldDef[] {
     out.length = 0;

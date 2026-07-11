@@ -1,0 +1,40 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><style>body{margin:0;background:#8fa8bf}</style></head>
+<body>
+<script type="module">
+import * as THREE from 'three';
+import { buildAircraftModel } from '/src/aircraft/models.ts';
+
+const params = new URLSearchParams(location.search);
+const id = params.get('ac') ?? 'a320';
+const az = Number(params.get('az') ?? 30) * Math.PI / 180;  // azimuth deg
+const el = Number(params.get('el') ?? 12) * Math.PI / 180;  // elevation deg
+const dist = Number(params.get('d') ?? 40);
+const tx = Number(params.get('tx') ?? 0);   // look-at target offset
+const ty = Number(params.get('ty') ?? 0);
+const tz = Number(params.get('tz') ?? 0);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x8fa8bf);
+const cam = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 0.1, 500);
+cam.position.set(
+  tx + Math.sin(az) * Math.cos(el) * dist,
+  ty + Math.sin(el) * dist,
+  tz - Math.cos(az) * Math.cos(el) * dist,
+);
+cam.lookAt(tx, ty, tz);
+scene.add(new THREE.HemisphereLight(0xe8f0ff, 0x777066, 0.9));
+const sun = new THREE.DirectionalLight(0xfff4e0, 2.2);
+sun.position.set(30, 50, -20);
+scene.add(sun);
+scene.add(buildAircraftModel(id));
+const r = new THREE.WebGLRenderer({ antialias: true });
+r.setSize(innerWidth, innerHeight);
+r.toneMapping = THREE.ACESFilmicToneMapping;
+document.body.appendChild(r.domElement);
+r.setAnimationLoop(() => r.render(scene, cam));
+document.title = 'viewer-ready';
+</script>
+</body>
+</html>

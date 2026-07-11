@@ -136,3 +136,23 @@ console.log(`  ✓ closest pair ${(minD / 1000).toFixed(1)} km apart`);
   }
   console.log(`  ✓ ${hubs.length} procedural internationals across the wide map, flat parallels, deterministic`);
 }
+
+// hubsNear: the chart's long-range hub search — sorted nearest-first,
+// includes the fixed trio, and always finds SOMETHING within 650 km from
+// anywhere reasonable (that's what feeds the rim signposts)
+{
+  const near = gen.hubsNear(0, 0, 650000);
+  assert.ok(near.length >= 4, `only ${near.length} hubs within 650 km of home`);
+  assert.equal(near[0].name, 'MERIDIAN INTL', 'nearest hub to spawn should be home');
+  for (let i = 1; i < near.length; i++) {
+    const a = Math.hypot(near[i - 1].x, near[i - 1].z);
+    const b = Math.hypot(near[i].x, near[i].z);
+    assert.ok(a <= b + 1, 'hubsNear not sorted nearest-first');
+  }
+  for (const p of [[300000, -250000], [-400000, 350000], [150000, 500000]]) {
+    const h = gen.hubsNear(p[0], p[1], 650000);
+    assert.ok(h.length >= 1, `no hub within 650 km of (${p[0] / 1000}, ${p[1] / 1000}) km`);
+    assert.ok(h.every((f) => f.intl), 'hubsNear returned a non-international');
+  }
+  console.log(`  ✓ hubsNear: ${near.length} hubs within 650 km of home, sorted, hubs found everywhere`);
+}
