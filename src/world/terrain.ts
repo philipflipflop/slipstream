@@ -24,6 +24,10 @@ interface Chunk {
   counts: number[];
   group: THREE.Group;
   disposables: Array<{ dispose(): void }>;
+  /** the running geomorph, while t < 1. An upgrade's morph start reproduces
+   *  the old mesh's FINAL surface, so swapping a still-morphing chunk jumps
+   *  the unfinished fraction in one frame — feed() defers until done. */
+  morph: { u: { value: number }; t: number; dur: number };
 }
 
 function buildTreeGeometry(): THREE.BufferGeometry {
@@ -359,6 +363,12 @@ export class TerrainManager {
   // arrives, turned into a static image a screenshot can catch.
   morphHold = false;
 
+  // DEBUG (?shellonly=1): stream and bookkeep chunks normally but never show
+  // them — the far shell renders everywhere (hole stays closed). This is "the
+  // screen the instant BEFORE every arrival"; diffing it against ?morphhold=1
+  // (arrival states) makes anything that pops visible in a still image.
+  shellOnly = false;
+
   // how far out each resolution reaches, in rings; set by quality preset
   ultraRing = -1; // res 112 (8 m steps) — close-up detail; -1 disables
   fineRing = 3;
@@ -472,6 +482,11 @@ export class TerrainManager {
       // scatter-only rebuilds keep the finer mesh (geomorph start is then
       // the identical surface, so only the new instances grow in)
       if (existing && existing.res >= res && existing.scatter >= scatter) continue;
+      // never rebuild a chunk that is still morphing: the replacement's
+      // morph start is the old mesh's FINAL surface, so a mid-morph swap
+      // snaps the unfinished fraction in one frame (visible after altitude-
+      // tier requeues at speed). The regular requeue retries it shortly.
+      if (existing && existing.morph.t < 1) continue;
       // a missing chunk appears fast at 56 first; the ultra res arrives a
       // beat later as a seamless geomorph upgrade (matters at boot/teleport)
       if (!existing && res > 56) res = 56;
@@ -580,6 +595,19 @@ export class TerrainManager {
     return s;
   }
 
+  /** DEBUG: build the far shell synchronously right now (morphhold/shellonly
+   *  screenshots race the worker under virtual-time headless capture). */
+  forceFarBuild(px: number, pz: number): void {
+    const snap = this.farSnap();
+    this.finalizeFar(buildFarPayload(
+      this.gen,
+      Math.round(px / snap) * snap,
+      Math.round(pz / snap) * snap,
+      this.farCells,
+      this.farCellSize,
+    ));
+  }
+
   private finalizeFar(p: FarPayload): void {
     this.farPending = false;
     if (this.farStale) {
@@ -655,7 +683,7 @@ export class TerrainManager {
       // visible coarse terrain instead of popping in over sky-dome void
       const holeRings = Math.min(this.effRadius() - 2.2, this.nearestGapRing() - 1.2);
       const holeR = holeRings * CHUNK_SIZE;
-      holeR2 = holeR > 0 ? holeR * holeR : -1;
+      holeR2 = holeR > 0 && !this.shellOnly ? holeR * holeR : -1;
     }
     const idx = this.farIndexArr;
     const n = cells + 1;
@@ -795,10 +823,12 @@ export class TerrainManager {
     geo.setAttribute('baseNrm', new THREE.BufferAttribute(p.baseNrms, 3));
     geo.setIndex(new THREE.BufferAttribute(p.index, 1));
 
-    // nearby chunks swell in ~a second; the outer rings take several — at
-    // that range a slow swell reads as nothing at all (this is what kills
-    // the residual "tiles hatch at the edge" feel at altitude)
-    const morph = { u: { value: 0 }, t: 0, dur: 1.1 + Math.min(ring, 24) * 0.16 };
+    // nearby chunks swell in ~a second; the outer rings take MUCH longer —
+    // the swell rate has to stay under ~1 px/s at the tile's distance or
+    // watching the edge reads as terrain materializing. A ring-24 arrival
+    // (~21 km) rising a few hundred metres over ~13 s is sub-perceptual,
+    // and it still completes long before the tile gets close at any speed
+    const morph = { u: { value: 0 }, t: 0, dur: 1.1 + Math.min(ring, 26) * 0.45 };
     this.morphs.push(morph);
     const mat = this.makeChunkMat(morph.u);
 
@@ -869,9 +899,10 @@ export class TerrainManager {
       }
     }
 
+    group.visible = !this.shellOnly;
     this.scene.add(group);
     this.chunks.set(key, {
-      key, cx: p.cx, cz: p.cz, res: p.res, scatter: p.scatter, counts, group, disposables,
+      key, cx: p.cx, cz: p.cz, res: p.res, scatter: p.scatter, counts, group, disposables, morph,
     });
     this.farHoleDirty = true; // coverage grew — widen the shell hole when idle
 

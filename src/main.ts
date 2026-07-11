@@ -182,6 +182,9 @@ class Game {
     // ?morphhold=1 — freeze chunks at geomorph start (debug: any visible tile
     // seam in a still frame = the pop players would see at tile arrival)
     this.terrain.morphHold = params.get('morphhold') === '1';
+    // ?shellonly=1 — hide all chunks, render the shell everywhere (debug:
+    // this is the pre-arrival image; diff against morphhold for the pop)
+    this.terrain.shellOnly = params.get('shellonly') === '1';
     if (params.get('mode') === 'race') this.save.mode = 'race';
     const aptParam = Number(params.get('apt') ?? '0');
     if (aptParam > 0 && aptParam < AIRPORTS.length) this.spawnField = AIRPORTS[aptParam];
@@ -762,6 +765,12 @@ class Game {
             if (this.aircraft.state.crashed) break;
           }
           this.wasOnGround = this.aircraft.state.onGround;
+          // debug captures need the shell NOW — virtual-time headless runs
+          // race the worker build, and both comparisons are shell-relative
+          if (this.terrain.morphHold || this.terrain.shellOnly) {
+            const p = this.aircraft.state.pos;
+            this.terrain.forceFarBuild(p.x, p.z);
+          }
           // &ap=1 — engage the autopilot after the fast-forward (smoke test)
           if (new URLSearchParams(location.search).get('ap') === '1' && !this.aircraft.state.onGround) {
             this.toggleAutopilot();

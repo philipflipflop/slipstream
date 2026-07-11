@@ -235,6 +235,9 @@ export class Traffic {
 
   private parked = new Map<string, {
     group: THREE.Group;
+    /** grow-in ramp 0→1 when built at distance (same rule as Airport
+     *  furniture): parked rows rise from the apron instead of popping */
+    grow: number;
     /** apron service vehicles doing slow laps of the stand row */
     movers: Array<{ m: THREE.Object3D; along: number; side: number; dir: number }>;
     def: AirfieldDef;
@@ -286,6 +289,12 @@ export class Traffic {
 
     // ---- apron service vehicles: slow laps along the stand rows ----
     for (const rec of this.parked.values()) {
+      if (rec.grow < 1) {
+        rec.grow = Math.min(1, rec.grow + dt / 6);
+        const s = rec.grow * rec.grow * (3 - 2 * rec.grow);
+        rec.group.scale.y = Math.max(s, 0.001);
+        rec.group.position.y = rec.def.elev * (1 - Math.max(s, 0.001));
+      }
       for (const v of rec.movers) {
         v.along += v.dir * 7 * dt;
         if (Math.abs(v.along) > 1500) v.dir = -v.dir;
@@ -302,7 +311,7 @@ export class Traffic {
     const near = this.gen.airfieldsNear(px, pz, BUILD_RADIUS, this.queryScratch);
     for (const def of near) {
       const key = `${def.x},${def.z}`;
-      if (!this.parked.has(key)) this.buildParked(def, key);
+      if (!this.parked.has(key)) this.buildParked(def, key, Math.hypot(def.x - px, def.z - pz) > 8000);
     }
     for (const [key, rec] of this.parked) {
       const [fx, fz] = key.split(',').map(Number);
@@ -373,7 +382,7 @@ export class Traffic {
 
   /* ------------------------------------------------ parked ---- */
 
-  private buildParked(ap: AirfieldDef, key: string): void {
+  private buildParked(ap: AirfieldDef, key: string, growIn = false): void {
     const g = new THREE.Group();
     const movers: Array<{ m: THREE.Object3D; along: number; side: number; dir: number }> = [];
     const seed = (a: number, b: number) => hash2(Math.round(ap.x) + a, Math.round(ap.z) + b);
@@ -449,6 +458,10 @@ export class Traffic {
       root = pivot;
     }
     this.scene.add(root);
-    this.parked.set(key, { group: root, movers, def: ap });
+    if (growIn) {
+      root.scale.y = 0.001;
+      root.position.y = ap.elev * 0.999;
+    }
+    this.parked.set(key, { group: root, grow: growIn ? 0 : 1, movers, def: ap });
   }
 }

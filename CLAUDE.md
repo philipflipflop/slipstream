@@ -62,9 +62,29 @@ Cloudflare builds with **npm 10.9.2**; local npm is 11. Two rules:
   was never on screen and the difference pops in the arrival frame. Verify
   with `?morphhold=1` (freezes every chunk at morph start): a frozen frame
   must show a seamless coarse landscape — any visible tile seam IS the pop.
+  `?shellonly=1` hides all chunks and skips the far-shell hole punch so the
+  shell alone can be photographed; both debug params call `forceFarBuild()`
+  after `ff` because virtual-time headless races the worker (the shell may
+  never build otherwise).
 - `src/world/terrain.ts` — streaming, LOD rings (quality-set `fineRing`/`midRing`
   + high-altitude variants), geomorph animation, horizon shell management (shell
-  builds only when the chunk queue is idle — keep it that way).
+  builds only when the chunk queue is idle — keep it that way). Morph rules:
+  NEVER rebuild a chunk whose morph is still running (`feed()` defers while
+  `existing.morph.t < 1`) — the replacement's morph start reproduces the old
+  mesh's FINAL surface, so a mid-morph swap snaps the unfinished fraction in
+  one frame (showed up after altitude-tier requeues at speed). Morph duration
+  scales with ring (`1.1 + min(ring, 26)·0.45`, ~12.7 s at the edge): the
+  envelope undershoots ridges between shell lattice points and the streaming
+  edge sits INSIDE fog visibility at altitude, so arrivals are watchable —
+  the fix is keeping the swell rate under ~1 px/s at tile distance, not more
+  exactness.
+- Distant furniture grows in: airports (airport.ts) and parked NPC rows
+  (traffic.ts) built more than 8 km away rise out of the ground over ~6 s
+  (smoothstep scale.y about FIELD ELEVATION — scaling about world 0 sinks
+  elevated fields like Highmoor underground). Builds within 8 km (boot/
+  spawn) appear instantly at full size. Without this, the 20/16 km
+  BUILD_RADIUS pops whole terminals into frame at cruise ("middle-distance
+  pop").
 - `src/world/obstacles.ts` — solid-object collision (towers/houses/trees/hoodoos),
   pure. Hit volumes derive from `buildScatter` in terrainBuilder — the SAME lists
   the renderer instances. Never place scatter outside `buildScatter`, or rendering

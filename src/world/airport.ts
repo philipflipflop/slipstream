@@ -25,6 +25,10 @@ const DROP_RADIUS = 24000;
 interface BuiltField {
   def: AirfieldDef;
   group: THREE.Group;
+  /** grow-in ramp 0→1 for fields built at distance: furniture rises out of
+   *  the apron over a few seconds (like terrain geomorphs) instead of a
+   *  whole airport materializing in one frame at the 20 km build radius */
+  grow: number;
   sockPivot: THREE.Group;
   beacon: THREE.Mesh | null;
   /** PAPI boxes in rows of four (closest to the runway first), both
@@ -111,6 +115,16 @@ export class Airport {
     const divisor = this.nightOps ? 350 : 900;
 
     for (const f of this.built.values()) {
+      // grow-in: squash vertically about the field's own elevation and rise
+      // over ~6 s — sub-perceptual at the build radius, and done long before
+      // the field is close enough to read
+      if (f.grow < 1) {
+        f.grow = Math.min(1, f.grow + 1 / (60 * 6));
+        const s = f.grow * f.grow * (3 - 2 * f.grow);
+        f.group.scale.y = Math.max(s, 0.001);
+        f.group.position.y = f.def.elev * (1 - Math.max(s, 0.001));
+      }
+
       // windsock: points downwind, droops when the wind is light, flutters
       const localYaw = Math.PI / 2 - this.windPointYaw + f.def.heading;
       const flutter = Math.sin(time * (1.6 + this.windKt * 0.12)) * (0.03 + 1.2 / (4 + this.windKt * 2));
@@ -179,7 +193,9 @@ export class Airport {
     const near = this.gen.airfieldsNear(px, pz, BUILD_RADIUS, this.queryScratch);
     for (const def of near) {
       const key = `${def.x},${def.z}`;
-      if (!this.built.has(key)) this.buildField(def, key);
+      // fields built at distance grow in; ones built on top of you (boot,
+      // teleport) appear instantly — you'd watch the growth from the apron
+      if (!this.built.has(key)) this.buildField(def, key, Math.hypot(def.x - px, def.z - pz) > 8000);
     }
     for (const [key, f] of this.built) {
       if (Math.hypot(f.def.x - px, f.def.z - pz) > DROP_RADIUS) {
@@ -193,7 +209,7 @@ export class Airport {
     }
   }
 
-  private buildField(ap: AirfieldDef, key: string): void {
+  private buildField(ap: AirfieldDef, key: string, growIn = false): void {
     const g = new THREE.Group();
     const E = ap.elev;
 
@@ -334,9 +350,13 @@ export class Airport {
       world[i] = _v.x; world[i + 1] = _v.y; world[i + 2] = _v.z;
     }
 
+    if (growIn) {
+      root.scale.y = 0.001;
+      root.position.y = ap.elev * 0.999;
+    }
     this.built.set(key, {
       def: ap, group: root as THREE.Group, sockPivot, beacon, papi,
-      edge: { mesh: lights, local, world }, aeroBeacon,
+      edge: { mesh: lights, local, world }, aeroBeacon, grow: growIn ? 0 : 1,
     });
   }
 
