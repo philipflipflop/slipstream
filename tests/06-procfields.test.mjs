@@ -1,6 +1,8 @@
 // Procedural airfields: deterministic, sensibly spaced, flat, paved, on land.
 import assert from 'node:assert/strict';
-import { WorldGen, AIRPORTS } from '../.test-build/world/heightfield.js';
+import {
+  WorldGen, AIRPORTS, intlTaxiways, airfieldWorld,
+} from '../.test-build/world/heightfield.js';
 
 const gen = new WorldGen();
 
@@ -61,6 +63,30 @@ console.log('  ✓ all strips flat, paved along their own headings, on land');
       for (const za of [-len / 2 + 30, 0, len / 2 - 30]) {
         const h = gen.heightAt(ap.x + off, ap.z + za);
         assert.ok(Math.abs(h - ap.elev) < 0.5, `${ap.name}: runway not flat at ${za} (${h.toFixed(1)})`);
+      }
+    }
+  }
+  // the taxiway system: every segment inside the turf perimeter, every
+  // hold-marked end actually reaching runway pavement, all memoised
+  for (const ap of intl) {
+    const segs = intlTaxiways(ap);
+    assert.ok(segs.length >= 20, `${ap.name}: only ${segs.length} taxiway segments`);
+    assert.equal(intlTaxiways(ap), segs, 'intlTaxiways not memoised');
+    for (const t of segs) {
+      for (const e of [1, -1]) {
+        const al = t.along + e * t.halfLen * t.cosY;
+        const ac = t.across + e * t.halfLen * t.sinY;
+        assert.ok(Math.abs(ac) < 740 && Math.abs(al) < 2100,
+          `${ap.name}: taxiway end outside the perimeter (${al.toFixed(0)}, ${ac.toFixed(0)})`);
+        assert.ok(Math.abs(ac) >= 330,
+          `${ap.name}: taxiway end inside the stand rows (across ${ac.toFixed(0)})`);
+      }
+      if (t.hold) {
+        const al = t.along + t.hold * t.halfLen * t.cosY;
+        const ac = t.across + t.hold * t.halfLen * t.sinY;
+        const w = airfieldWorld(ap, al, ac);
+        assert.ok(gen.isOnRunway(w.x, w.z),
+          `${ap.name}: hold-short segment end not on runway pavement (${al.toFixed(0)}, ${ac.toFixed(0)})`);
       }
     }
   }

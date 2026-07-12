@@ -15,9 +15,25 @@
  * many kilometres out, which is how you find the field in the dark.
  */
 import * as THREE from 'three';
-import { WorldGen, AirfieldDef, intlBuildings, INTL_STANDS } from './heightfield';
+import { WorldGen, AirfieldDef, intlBuildings, intlTaxiways, INTL_STANDS } from './heightfield';
 import { runwayIdent } from '../nav/ils';
 import { clamp } from '../core/math';
+
+/**
+ * Linear-space value → sRGB canvas byte. Canvas textures are sRGB-decoded
+ * by the renderer while terrain vertex colours stay linear, so painting
+ * canvas pixels through this transfer keeps overlay planes the SAME TONE as
+ * the terrain paint beneath them (the airport z-fight rule).
+ */
+const srgb = (v: number): number =>
+  Math.round(255 * Math.max(0, 1.055 * Math.pow(Math.max(v, 0), 1 / 2.4) - 0.055));
+const rgb = (r: number, g: number, b: number): string => `rgb(${srgb(r)},${srgb(g)},${srgb(b)})`;
+
+/** Taxiway/stand pavement tones — MUST match the colorAt backing paint. */
+const PAVE: [number, number, number] = [0.3, 0.31, 0.33];
+const APRON: [number, number, number] = [0.4, 0.41, 0.43];
+const STAND: [number, number, number] = [0.31, 0.32, 0.34];
+const TAXI_YELLOW = '#c9a83e';
 
 const BUILD_RADIUS = 20000;
 const DROP_RADIUS = 24000;
@@ -34,8 +50,15 @@ interface BuiltField {
   /** PAPI boxes in rows of four (closest to the runway first), both
    *  thresholds of every runway; angle thresholds index PAPI_DEG[i % 4] */
   papi: Array<{ mesh: THREE.Mesh; world: THREE.Vector3 }>;
-  /** runway edge lights: instanced mesh + local and world positions */
-  edge: { mesh: THREE.InstancedMesh; local: Float32Array; world: Float32Array };
+  /** point-source light strings (runway edges, taxiway edges): instanced
+   *  mesh + local/world positions + per-string size law */
+  edge: Array<{
+    mesh: THREE.InstancedMesh;
+    local: Float32Array;
+    world: Float32Array;
+    div: number;
+    cap: number;
+  }>;
   /** alternating white/green airport beacon + steady facility glow (night presets only) */
   aeroBeacon: { white: THREE.Sprite; green: THREE.Sprite; glow: THREE.Sprite } | null;
 }
@@ -107,13 +130,110 @@ export class Airport {
     return mat;
   }
 
-  update(time: number, px: number, pz: number, py = 0): void {
-    // light-size floor: lights never shrink below ~2 px; night lets them
-    // bloom much larger so a lit runway carries across the valley
-    // (d/450 holds ≈2 px at any range at 1280 px width)
-    const maxS = this.nightOps ? 60 : 3;
-    const divisor = this.nightOps ? 350 : 900;
+  private groundMats = new Map<string, THREE.MeshLambertMaterial>();
 
+  private canvasMat(key: string, w: number, h: number,
+    draw: (ctx: CanvasRenderingContext2D) => void,
+    opts?: { wrapT?: boolean; side?: THREE.Side }): THREE.MeshLambertMaterial {
+    let mat = this.groundMats.get(key);
+    if (mat) return mat;
+    const c = document.createElement('canvas');
+    c.width = w;
+    c.height = h;
+    draw(c.getContext('2d')!);
+    const tex = new THREE.CanvasTexture(c);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.anisotropy = 4;
+    if (opts?.wrapT) tex.wrapT = THREE.RepeatWrapping;
+    mat = new THREE.MeshLambertMaterial({ map: tex, side: opts?.side ?? THREE.FrontSide });
+    this.groundMats.set(key, mat);
+    return mat;
+  }
+
+  /** Tiling taxiway ribbon: 30 m across (23 m pavement between shoulders),
+   *  double yellow edge lines + continuous centreline; one tile = 30 m of
+   *  length, so ribbons repeat it via scaled UVs. Same technique as the
+   *  runway texture — this is what makes taxiways crisp instead of the old
+   *  16 m-texel vertex-paint blur. */
+  private taxiMat(): THREE.MeshLambertMaterial {
+    return this.canvasMat('taxi', 128, 128, (ctx) => {
+      ctx.fillStyle = rgb(...PAVE);
+      ctx.fillRect(0, 0, 128, 128);
+      // shoulders, a shade darker and warmer
+      ctx.fillStyle = 'rgba(28,22,14,0.3)';
+      ctx.fillRect(0, 0, 15, 128);
+      ctx.fillRect(113, 0, 15, 128);
+      // gear-track sheen down the middle
+      ctx.fillStyle = 'rgba(0,0,0,0.1)';
+      ctx.fillRect(50, 0, 28, 128);
+      // asphalt speckle, wrapped in y so the ribbon tiles seamlessly
+      for (let i = 0; i < 80; i++) {
+        const v = Math.floor(22 + Math.random() * 36);
+        ctx.fillStyle = `rgba(${v},${v},${Math.floor(v * 1.08)},0.15)`;
+        const x = 15 + Math.random() * 98;
+        const y = Math.random() * 128;
+        const sw = 1 + Math.random() * 3;
+        const sh = 3 + Math.random() * 11;
+        for (const dy of [-128, 0, 128]) ctx.fillRect(x, y + dy, sw, sh);
+      }
+      ctx.fillStyle = TAXI_YELLOW;
+      for (const x of [16, 20, 106, 110]) ctx.fillRect(x, 0, 2, 128);
+      ctx.fillRect(62, 0, 4, 128);
+    }, { wrapT: true });
+  }
+
+  /** Runway-holding position bar: two solid yellow lines on the holding
+   *  side, two dashed toward the runway (canvas top = runway side). */
+  private holdMat(): THREE.MeshLambertMaterial {
+    return this.canvasMat('hold', 128, 32, (ctx) => {
+      ctx.fillStyle = rgb(...PAVE);
+      ctx.fillRect(0, 0, 128, 32);
+      ctx.fillStyle = TAXI_YELLOW;
+      ctx.fillRect(15, 20, 98, 3);
+      ctx.fillRect(15, 26, 98, 3);
+      for (let x = 15; x < 113; x += 12) {
+        ctx.fillRect(x, 6, 7, 3);
+        ctx.fillRect(x, 12, 7, 3);
+      }
+    });
+  }
+
+  /** Gate stand marking: darker pad, yellow lead-in line + T stop bar.
+   *  Canvas bottom = the entry side (south for an unrotated yaw-0 stand).
+   *  Oversized vs the painted stand box so the vertex-paint spill can never
+   *  peek past the crisp plane at fine texels. */
+  private standMat(): THREE.MeshLambertMaterial {
+    return this.canvasMat('stand', 128, 192, (ctx) => {
+      ctx.fillStyle = rgb(...APRON);
+      ctx.fillRect(0, 0, 128, 192);
+      ctx.fillStyle = rgb(...STAND);
+      ctx.fillRect(33, 50, 62, 92);
+      ctx.strokeStyle = 'rgba(232,228,218,0.55)';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(33, 50, 62, 92);
+      ctx.fillStyle = TAXI_YELLOW;
+      ctx.fillRect(62, 96, 4, 96);   // lead-in from the entry edge
+      ctx.fillRect(50, 92, 28, 4);   // T stop bar at the nose position
+    });
+  }
+
+  /** Red runway-holding-position sign ("27L-9R"), cached per designator. */
+  private signMat(text: string): THREE.MeshLambertMaterial {
+    return this.canvasMat(`sign:${text}`, 128, 48, (ctx) => {
+      ctx.fillStyle = '#8d1a1a';
+      ctx.fillRect(0, 0, 128, 48);
+      ctx.strokeStyle = '#e8e4da';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(3, 3, 122, 42);
+      ctx.fillStyle = '#f2ede2';
+      ctx.font = 'bold 24px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(text, 64, 25);
+    }, { side: THREE.DoubleSide });
+  }
+
+  update(time: number, px: number, pz: number, py = 0): void {
     for (const f of this.built.values()) {
       // grow-in: squash vertically about the field's own elevation and rise
       // over ~6 s — sub-perceptual at the build radius, and done long before
@@ -158,17 +278,18 @@ export class Airport {
         (f.aeroBeacon.glow.material as THREE.SpriteMaterial).opacity = 0.45 * prox;
       }
 
-      // runway edge lights: rescale so distant ones hold ~2 px
-      const { mesh, local, world } = f.edge;
-      const n = local.length / 3;
-      for (let i = 0; i < n; i++) {
-        const d = Math.hypot(px - world[i * 3], py - world[i * 3 + 1], pz - world[i * 3 + 2]);
-        const s = clamp(d / divisor, 1, maxS);
-        _m.makeScale(s, s, s);
-        _m.setPosition(local[i * 3], local[i * 3 + 1], local[i * 3 + 2]);
-        mesh.setMatrixAt(i, _m);
+      // edge-light strings: rescale so distant ones hold ~2 px
+      for (const { mesh, local, world, div, cap } of f.edge) {
+        const n = local.length / 3;
+        for (let i = 0; i < n; i++) {
+          const d = Math.hypot(px - world[i * 3], py - world[i * 3 + 1], pz - world[i * 3 + 2]);
+          const s = clamp(d / div, 1, cap);
+          _m.makeScale(s, s, s);
+          _m.setPosition(local[i * 3], local[i * 3 + 1], local[i * 3 + 2]);
+          mesh.setMatrixAt(i, _m);
+        }
+        mesh.instanceMatrix.needsUpdate = true;
       }
-      mesh.instanceMatrix.needsUpdate = true;
 
       // PAPI: each box compares the aircraft's angle above its own position
       // against its slope threshold — white above, red below, so each row
@@ -258,19 +379,42 @@ export class Airport {
       }
     }
 
+    let beacon: THREE.Mesh | null = null;
+    const taxiPts: number[] = []; // blue taxiway edge lights (night only)
+    if (ap.intl) beacon = this.buildIntlExtras(g, ap, taxiPts);
+    else if (ap.major) beacon = this.buildMajorExtras(g, ap);
+
+    // point-source light strings: runway edges (always) + taxiway edges.
+    // Night lets them bloom much larger so a lit field carries across the
+    // valley (d/350 holds ≈2 px at any range at 1280 px width).
     const lightGeo = new THREE.SphereGeometry(0.42, 6, 5);
-    const edgeMat = new THREE.MeshBasicMaterial({ color: 0xffdd88, fog: false });
-    const local = Float32Array.from(localPts);
-    const lightCount = local.length / 3;
-    const lights = new THREE.InstancedMesh(lightGeo, edgeMat, lightCount);
-    for (let i = 0; i < lightCount; i++) {
-      _m.makeTranslation(local[i * 3], local[i * 3 + 1], local[i * 3 + 2]);
-      lights.setMatrixAt(i, _m);
+    const edge: BuiltField['edge'] = [];
+    const strings: Array<{ pts: number[]; color: number; div: number; cap: number }> = [
+      {
+        pts: localPts, color: 0xffdd88,
+        div: this.nightOps ? 350 : 900, cap: this.nightOps ? 60 : 3,
+      },
+    ];
+    if (taxiPts.length > 0) {
+      // taxiway edges are blue and dimmer than the runway string
+      strings.push({ pts: taxiPts, color: 0x3d6bff, div: 500, cap: 26 });
     }
-    // instanced bounds are the 0.42 m base sphere — never let that cull a
-    // multi-kilometre string of lights
-    lights.frustumCulled = false;
-    g.add(lights);
+    for (const st of strings) {
+      const local = Float32Array.from(st.pts);
+      const n = local.length / 3;
+      const mesh = new THREE.InstancedMesh(
+        lightGeo, new THREE.MeshBasicMaterial({ color: st.color, fog: false }), n,
+      );
+      for (let i = 0; i < n; i++) {
+        _m.makeTranslation(local[i * 3], local[i * 3 + 1], local[i * 3 + 2]);
+        mesh.setMatrixAt(i, _m);
+      }
+      // instanced bounds are the 0.42 m base sphere — never let that cull a
+      // multi-kilometre string of lights
+      mesh.frustumCulled = false;
+      g.add(mesh);
+      edge.push({ mesh, local, world: new Float32Array(local.length), div: st.div, cap: st.cap });
+    }
 
     // windsock on a pivot near the southern threshold of the main runway
     const sockX = ap.x + runways[0].off - ap.width / 2 - 14;
@@ -291,10 +435,6 @@ export class Airport {
     sock.position.set(2.75, 0, 0);
     sockPivot.add(sock);
     g.add(sockPivot);
-
-    let beacon: THREE.Mesh | null = null;
-    if (ap.intl) beacon = this.buildIntlExtras(g, ap);
-    else if (ap.major) beacon = this.buildMajorExtras(g, ap);
 
     // airport beacon: alternating white/green flash, the "find me" light.
     // Night presets only — by day it reads as visual noise.
@@ -343,11 +483,12 @@ export class Airport {
     for (const b of papi) b.mesh.getWorldPosition(b.world); // rotation-proof
 
     // world positions of the edge lights (for per-frame distance scaling)
-    const world = new Float32Array(local.length);
-    for (let i = 0; i < local.length; i += 3) {
-      _v.set(local[i], local[i + 1], local[i + 2]);
-      g.localToWorld(_v);
-      world[i] = _v.x; world[i + 1] = _v.y; world[i + 2] = _v.z;
+    for (const e of edge) {
+      for (let i = 0; i < e.local.length; i += 3) {
+        _v.set(e.local[i], e.local[i + 1], e.local[i + 2]);
+        g.localToWorld(_v);
+        e.world[i] = _v.x; e.world[i + 1] = _v.y; e.world[i + 2] = _v.z;
+      }
     }
 
     if (growIn) {
@@ -356,7 +497,7 @@ export class Airport {
     }
     this.built.set(key, {
       def: ap, group: root as THREE.Group, sockPivot, beacon, papi,
-      edge: { mesh: lights, local, world }, aeroBeacon, grow: growIn ? 0 : 1,
+      edge, aeroBeacon, grow: growIn ? 0 : 1,
     });
   }
 
@@ -420,17 +561,100 @@ export class Airport {
   }
 
   /**
-   * International extras: central apron, parallel taxiways + connectors,
-   * and the terminal spine from intlBuildings — the SAME list obstacles.ts
-   * turns into collision boxes, so the buildings are exactly as solid as
-   * they look. Returns the tower's red obstruction beacon.
+   * International extras: the full taxiway system as crisp textured ribbons
+   * (from the SAME intlTaxiways list colorAt paints as mid-LOD backing),
+   * hold-short bars + runway designator signs, gate stand markings, and the
+   * terminal spine from intlBuildings — the SAME list obstacles.ts turns
+   * into collision boxes, so the buildings are exactly as solid as they
+   * look. Returns the tower's red obstruction beacon. When nightOps, blue
+   * taxiway edge-light positions are pushed into taxiPts.
    */
-  private buildIntlExtras(g: THREE.Group, ap: AirfieldDef): THREE.Mesh {
+  private buildIntlExtras(g: THREE.Group, ap: AirfieldDef, taxiPts: number[]): THREE.Mesh {
     const E = ap.elev;
-    // NOTE: the concrete slab and taxiway system are painted into the
-    // TERRAIN vertex colours (heightfield colorAt) — kilometre-scale
-    // overlay planes z-fight against mismatched terrain tones, and paint
-    // at the mesh's own texel can't
+
+    // ---- taxiway ribbons ----
+    // Runway-sized planes over same-tone terrain paint (the z-fight rule):
+    // close up the terrain under them is clean turf (no backing halo) and
+    // depth precision is plentiful; from the mid ring out colorAt paints
+    // the same rectangles in the same tone beneath them.
+    const tMat = this.taxiMat();
+    const hMat = this.holdMat();
+    const holdGeo = new THREE.PlaneGeometry(30, 7.5);
+    holdGeo.rotateX(-Math.PI / 2);
+    const signGeo = new THREE.PlaneGeometry(3.4, 1.1);
+    const postGeo = new THREE.CylinderGeometry(0.07, 0.07, 1.2, 5);
+    const postMat = new THREE.MeshLambertMaterial({ color: 0x8d949b });
+    const n1 = runwayIdent(ap.heading);
+    const n2 = runwayIdent(ap.heading + Math.PI);
+    for (const t of intlTaxiways(ap)) {
+      const len = t.halfLen * 2;
+      const geo = new THREE.PlaneGeometry(t.halfWid * 2, len);
+      const uv = geo.attributes.uv as THREE.BufferAttribute;
+      for (let i = 0; i < uv.count; i++) uv.setY(i, uv.getY(i) * (len / 30));
+      geo.rotateX(-Math.PI / 2);
+      const ribbon = new THREE.Mesh(geo, tMat);
+      // connectors sit a step above the parallels so junction overlaps
+      // never z-fight (the apron 0.04 / taxi 0.05 rule from the regionals);
+      // everything stays under the runway planes at +0.06
+      ribbon.position.set(ap.x + t.across, E + (t.conn ? 0.048 : 0.04), ap.z - t.along);
+      ribbon.rotation.y = -t.yaw;
+      ribbon.receiveShadow = true;
+      g.add(ribbon);
+
+      if (t.hold) {
+        // hold-short bar ~15-22 m before the runway edge, dashed pair
+        // (canvas top) toward the runway
+        const u = t.hold * (t.halfLen - 28);
+        const hAlong = t.along + u * t.cosY;
+        const hAcross = t.across + u * t.sinY;
+        const bar = new THREE.Mesh(holdGeo, hMat);
+        bar.position.set(ap.x + hAcross, E + 0.055, ap.z - hAlong);
+        bar.rotation.y = -t.yaw + (t.hold > 0 ? 0 : Math.PI);
+        g.add(bar);
+
+        // red runway-designator sign beside the bar, facing the taxiing
+        // pilot (guards the runway at this segment's across sign)
+        const sideR = t.across < 0 ? -1 : 1;
+        const text = `${n1}${sideR < 0 ? 'L' : 'R'}-${n2}${sideR < 0 ? 'R' : 'L'}`;
+        const v = t.halfWid + 3.5;
+        const sAlong = hAlong - v * t.sinY;
+        const sAcross = hAcross + v * t.cosY;
+        const face = new THREE.Mesh(signGeo, this.signMat(text));
+        face.position.set(ap.x + sAcross, E + 1.55, ap.z - sAlong);
+        face.rotation.y = Math.atan2(-t.hold * t.sinY, t.hold * t.cosY);
+        g.add(face);
+        const post = new THREE.Mesh(postGeo, postMat);
+        post.position.set(ap.x + sAcross, E + 0.6, ap.z - sAlong);
+        g.add(post);
+      }
+
+      // blue taxiway edge lights after dark, both edges every 60 m
+      if (this.nightOps) {
+        for (let u = -t.halfLen + 12; u <= t.halfLen - 12; u += 60) {
+          for (const sv of [-1, 1]) {
+            const v = sv * (t.halfWid - 2);
+            taxiPts.push(
+              ap.x + t.across + u * t.sinY + v * t.cosY,
+              E + 0.5,
+              ap.z - (t.along + u * t.cosY - v * t.sinY),
+            );
+          }
+        }
+      }
+    }
+
+    // ---- gate stand markings: darker pad + lead-in, one per stand from
+    // the ONE INTL_STANDS list, so paint, bridge and parked NPC line up ----
+    const standGeo = new THREE.PlaneGeometry(70, 100);
+    standGeo.rotateX(-Math.PI / 2);
+    const sMat = this.standMat();
+    for (const s of INTL_STANDS) {
+      const pad = new THREE.Mesh(standGeo, sMat);
+      pad.position.set(ap.x + s.across, E + 0.052, ap.z - s.along);
+      if (s.yaw === Math.PI) pad.rotation.y = Math.PI; // entry from the north
+      pad.receiveShadow = true;
+      g.add(pad);
+    }
 
     const wallMat = new THREE.MeshLambertMaterial({ color: 0x9ba3ac });
     const hangarMat = new THREE.MeshLambertMaterial({ color: 0x788089 });

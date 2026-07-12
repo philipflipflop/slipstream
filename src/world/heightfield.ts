@@ -145,6 +145,83 @@ export function intlBuildings(ap: AirfieldDef): AptBuilding[] {
   return ap.intl ? INTL_BUILDINGS : [];
 }
 
+/**
+ * One taxiway segment of the international layout, in the runway frame.
+ * ONE list, like INTL_STANDS: colorAt paints the same-tone backing corridor
+ * into the terrain and airport.ts lays the crisp textured ribbon, hold-short
+ * bars and blue edge lights from the very same rectangles — geometry and
+ * paint can never disagree.
+ */
+export interface TaxiSeg {
+  along: number;   // centre, runway frame
+  across: number;
+  halfLen: number; // half-extent down the segment's own axis
+  halfWid: number; // half-width (ribbon plane matches exactly)
+  yaw: number;     // axis rotation from the runway axis (0 = parallel twy)
+  cosY: number;    // cached axis direction
+  sinY: number;
+  /** connectors render a step above the parallels so junction overlaps
+   *  never z-fight (same trick as apron 0.04 / taxi 0.05 at regionals) */
+  conn: boolean;
+  /** which axis end (+1/−1 × halfLen) butts onto a runway: airport.ts puts
+   *  a hold-short bar + runway designator sign just before that end */
+  hold?: 1 | -1;
+}
+
+/** Runway inner edge |across| for the 1400 m parallel-pair layout. */
+const INTL_RWY_EDGE = 700 - 22.5;
+
+const taxiCache = new Map<number, TaxiSeg[]>();
+
+/**
+ * The full Heathrow-style taxiway system of an international: an outer
+ * parallel inside each runway, an inner apron taxilane along the stand
+ * rows, right-angle connectors, runway-end connectors and two 30° rapid
+ * exits per runway. Pure function of the main runway length (all
+ * internationals share the 1400 m separation), memoised.
+ */
+export function intlTaxiways(ap: AirfieldDef): TaxiSeg[] {
+  if (!ap.intl) return [];
+  const key = Math.round(ap.length);
+  const hit = taxiCache.get(key);
+  if (hit) return hit;
+
+  const segs: TaxiSeg[] = [];
+  const mk = (along: number, across: number, halfLen: number, yaw: number,
+    conn: boolean, hold?: 1 | -1) => {
+    segs.push({
+      along, across, halfLen, halfWid: 15, yaw,
+      cosY: Math.cos(yaw), sinY: Math.sin(yaw), conn, hold,
+    });
+  };
+  const connEnd = ap.length / 2 - 240; // runway-end connector station
+  const E = INTL_RWY_EDGE;
+  for (const s of [-1, 1]) {
+    // parallel taxiways: outer (runway side) + inner apron taxilane
+    mk(0, s * 600, connEnd + 15, 0, false);
+    mk(0, s * 370, 1450, 0, false);
+    // right-angle connectors, apron edge across the outer parallel to the
+    // runway; +axis always points outward at the runway on either side
+    for (const alj of [0, 650, -650, 1300, -1300]) {
+      mk(alj, s * (340 + E + 6) / 2, (E + 6 - 340) / 2, s * Math.PI / 2, true, 1);
+    }
+    // runway-end connectors (outer parallel → threshold)
+    for (const e of [1, -1]) {
+      mk(e * connEnd, s * (570 + E + 6) / 2, (E + 6 - 570) / 2, s * Math.PI / 2, true, 1);
+    }
+    // inner↔outer cross-lanes sealing the apron taxilane ends
+    for (const e of [1, -1]) mk(e * 1423, s * 485, 130, s * Math.PI / 2, true);
+    // rapid-exit taxiways: leave the runway at 30° pointing AWAY from the
+    // touchdown zone so a decelerating lander rolls off forward (one per
+    // landing direction per runway)
+    for (const d of [1, -1]) {
+      mk(d * 510, s * (E + 585) / 2, 107, Math.atan2(-0.5 * s, 0.866 * d), true, -1);
+    }
+  }
+  taxiCache.set(key, segs);
+  return segs;
+}
+
 /** Runway-frame → world for airport layout points. */
 export function airfieldWorld(
   ap: AirfieldDef, along: number, across: number,
@@ -775,48 +852,58 @@ export class WorldGen {
           r = 0.16; g = 0.17; b = 0.19;
           break;
         }
-        // internationals: the whole central slab between the parallels is
-        // concrete (wide enough to survive every LOD's texel), with the
-        // taxiway system painted darker INTO the terrain — same-texel paint
-        // never z-fights the way overlay planes over mismatched tones do.
-        // The taxi lines fade to the slab tone when the mesh can't resolve
-        // them (coarse LODs, far shell), exactly like the city street grid.
-        if (ap.intl && Math.abs(across) < 700 && Math.abs(along) < 1950) {
+        // internationals — Heathrow rules: mowed turf inside the perimeter,
+        // pavement only where aircraft actually roll. The central-terminal
+        // apron is wide enough to survive every LOD's texel; the taxiway
+        // corridors are painted only at MID/COARSE texels as same-tone
+        // backing under the crisp ribbon planes airport.ts lays from the
+        // SAME intlTaxiways list (overlay planes over mismatched terrain
+        // tones z-fight at depth-precision range — close up, the fine ring
+        // shows the ribbons over clean turf with no blurry painted halo).
+        if (ap.intl && Math.abs(across) < 870 && Math.abs(along) < 2150) {
           const ac = Math.abs(across);
           const aAl = Math.abs(along);
-          const a = smoothstep(700, 640, ac) * smoothstep(1950, 1800, aAl);
-          let cr = 0.4, cg = 0.41, cb = 0.43; // apron/slab concrete
-          const gk = texel > 0 ? 1 - smoothstep(10, 26, texel) : 1;
-          if (gk > 0 && a > 0) {
-            // full taxiway system: an outer parallel inside each runway, an
-            // inner apron taxilane behind the stand rows, and connectors
-            // joining lane → parallel → runway at regular intervals
-            const conn = ap.length / 2 - 240;
-            const onPara = (Math.abs(ac - 600) < 15 && aAl < conn + 15) ||
-              (Math.abs(ac - 370) < 12 && aAl < 1435);
-            const onConn = (ac > 358 &&
-              (aAl < 13 || Math.abs(aAl - 650) < 13 ||
-                Math.abs(aAl - 1300) < 13)) ||
-              (ac > 560 && Math.abs(aAl - conn) < 13) ||
-              (ac > 358 && ac < 612 && Math.abs(aAl - 1423) < 12);
+          const a = smoothstep(870, 770, ac) * smoothstep(2150, 2040, aAl);
+          // uniform mowed turf; mow stripes resolve in the fine ring only
+          // (under-sampled stripes would moiré like the city street grid)
+          let cr = 0.29, cg = 0.47, cb = 0.22;
+          const mow = texel > 0 ? 1 - smoothstep(13, 20, texel) : 1;
+          if (mow > 0 && (Math.floor(along / 34) & 1)) {
+            cr += 0.035 * mow; cg += 0.05 * mow; cb += 0.02 * mow;
+          }
+          if ((ac < 340 && aAl < 1720) ||
+              (across > -420 && across < -220 && along > -1900 && along < -1780)) {
+            // central-terminal-area apron + the fuel-farm pad concrete
+            cr = 0.4; cg = 0.41; cb = 0.43;
             // nose-in stand boxes along the pier faces, a shade darker
-            let onStand = false;
-            if (ac > 118 && ac < 292) {
+            const gk = texel > 0 ? 1 - smoothstep(10, 26, texel) : 1;
+            if (gk > 0 && ac > 118 && ac < 292) {
               for (const s of INTL_STANDS) {
                 if (Math.abs(along - s.along) < 24 && Math.abs(across - s.across) < 17) {
-                  onStand = true;
+                  cr = lerp(cr, 0.31, gk);
+                  cg = lerp(cg, 0.32, gk);
+                  cb = lerp(cb, 0.34, gk);
                   break;
                 }
               }
             }
-            if (onPara || onConn) {
-              cr = lerp(cr, 0.19, gk);
-              cg = lerp(cg, 0.2, gk);
-              cb = lerp(cb, 0.22, gk);
-            } else if (onStand) {
-              cr = lerp(cr, 0.31, gk);
-              cg = lerp(cg, 0.32, gk);
-              cb = lerp(cb, 0.34, gk);
+          } else {
+            // taxiway backing corridors (mid ring in, far shell out)
+            const tw = texel > 0
+              ? smoothstep(18, 30, texel) * (1 - smoothstep(90, 140, texel))
+              : 1;
+            if (tw > 0) {
+              for (const t of intlTaxiways(ap)) {
+                const du = along - t.along;
+                const dv = across - t.across;
+                const u = du * t.cosY + dv * t.sinY;
+                if (Math.abs(u) > t.halfLen) continue;
+                if (Math.abs(dv * t.cosY - du * t.sinY) > t.halfWid) continue;
+                cr = lerp(cr, 0.3, tw);
+                cg = lerp(cg, 0.31, tw);
+                cb = lerp(cb, 0.33, tw);
+                break;
+              }
             }
           }
           r = lerp(r, cr, a); g = lerp(g, cg, a); b = lerp(b, cb, a);

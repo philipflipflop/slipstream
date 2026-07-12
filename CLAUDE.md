@@ -43,11 +43,26 @@ Cloudflare builds with **npm 10.9.2**; local npm is 11. Two rules:
   only. `intlBuildings()` is the ONE list of
   terminal/pier/tower/hangar/cargo/carpark/fuel boxes: airport.ts renders
   it and obstacles.ts derives rotated-box collision from it — never define
-  airport buildings anywhere else. The international concrete slab +
-  taxiway lines are PAINTED into colorAt at the mesh's own texel (taxi
-  lines fade like the city grid). Kilometre-scale ground overlay planes
-  z-fight against mismatched terrain tones — only runway-sized planes over
-  SAME-TONE terrain paint are safe.
+  airport buildings anywhere else. Same pattern for the taxiway system:
+  `intlTaxiways()` is the ONE segment list (inner+outer parallels,
+  right-angle + runway-end connectors, 30° rapid exits; memoised per
+  runway length, pinned in tests/06) — airport.ts lays crisp textured
+  ribbon planes, hold-short bars, red designator signs and blue night
+  edge lights from it, and colorAt paints the SAME rectangles as backing.
+  Heathrow ground rules: mowed turf inside the perimeter (mow stripes
+  fade off above ~20 m texels like the city grid), pavement ONLY where
+  aircraft roll; the CTA apron slab + stand boxes stay vertex-painted
+  (wide enough to survive every texel). Kilometre-scale ground overlay
+  planes z-fight against mismatched terrain tones — only runway-sized
+  planes over SAME-TONE terrain paint are safe. Two corollaries: taxiway
+  backing paint is gated texel 18→30 in (the fine ring shows the crisp
+  ribbon over clean turf — no blurry paint halo, and depth is precise
+  that close) and 90→140 out (far shell); and canvas pixels for any
+  ground plane MUST go through airport.ts's lin→sRGB `rgb()` helper
+  (PAVE/APRON/STAND constants) or the texture won't match the linear
+  vertex paint beneath it. Ground-plane z-stack: parallels E+0.04,
+  connectors/RETs +0.048, stand pads +0.052, hold bars +0.055, runways
+  +0.06 — planes in the same class must never overlap each other.
 - `src/world/terrainBuilder.ts` — pure payload builder (no three.js/DOM), runs in
   `terrain.worker.ts` with a synchronous fallback. Chunk LODs nest (56/28/14) and
   every payload carries `baseY` geomorph starts; the far horizon shell shares
