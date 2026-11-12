@@ -1,12 +1,13 @@
-/** localStorage persistence for settings + best times. */
+/** localStorage persistence for settings, best times and the logbook. */
 import type { WorldTheme } from './world/heightfield';
 import type { TimeOfDay } from './world/daylight';
 
 export type Quality = 'low' | 'medium' | 'high';
+export type GameMode = 'free' | 'race' | 'approach';
 
 export interface SaveData {
   aircraft: string;
-  mode: 'free' | 'race';
+  mode: GameMode;
   world: WorldTheme;
   tod: TimeOfDay;
   quality: Quality;
@@ -16,6 +17,10 @@ export interface SaveData {
   sensitivity: number;
   muted: boolean;
   bestTimes: Record<string, number>;
+  /** best landing score (0–100) per aircraft id */
+  bestLandings: Record<string, number>;
+  /** graded runway landings logged, all aircraft */
+  landings: number;
 }
 
 const QUALITY_VERSION = 2; // v2: 6-core phones (iPhones) rate medium
@@ -34,12 +39,18 @@ export function loadSave(): SaveData {
     sensitivity: 1,
     muted: false,
     bestTimes: {},
+    bestLandings: {},
+    landings: 0,
   };
   try {
     const raw = localStorage.getItem(KEY);
     if (!raw) return def;
     const parsed = JSON.parse(raw) as Partial<SaveData>;
-    const out = { ...def, ...parsed, bestTimes: { ...(parsed.bestTimes ?? {}) } };
+    const out = {
+      ...def, ...parsed,
+      bestTimes: { ...(parsed.bestTimes ?? {}) },
+      bestLandings: { ...(parsed.bestLandings ?? {}) },
+    };
     // saves written before a heuristic bump re-derive the device default
     // once (e.g. iPhones that an older build wrongly pinned to 'low');
     // any quality the user picks afterwards persists with the new version

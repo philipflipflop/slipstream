@@ -174,11 +174,26 @@ export class SoundEngine {
     this.kind = kind;
   }
 
+  /**
+   * Fade every continuous voice (engine, wind, warnings) to silence. The
+   * per-frame update only runs while flying, so without this the engine
+   * note it last set droned on through the pause menu, the crash screen
+   * and the hangar. One-shots (crash boom, UI clicks) still play.
+   */
+  silence(): void {
+    if (!this.ctx) return;
+    const t = this.ctx.currentTime;
+    for (const g of [this.engineGain, this.jetNoiseGain, this.whineGain, this.windGain, this.stallGain]) {
+      g.gain.setTargetAtTime(0, t, 0.12);
+    }
+  }
+
   /** Per-frame state drive. `nr` = rotor RPM and `horn` = low-rotor-RPM
-   *  warning (helicopter only; planes leave the defaults). */
+   *  warning (helicopter only; planes leave the defaults). `alarm` is the
+   *  master warning (terrain / gear / overspeed): a two-tone whoop. */
   update(
     throttle: number, thrustFrac: number, airspeed: number, stalled: boolean,
-    time: number, nr = 1, horn = false,
+    time: number, nr = 1, horn = false, alarm = false,
   ): void {
     if (!this.ctx) return;
     const t = this.ctx.currentTime;
@@ -224,6 +239,10 @@ export class SoundEngine {
       // low-rotor-RPM horn: steady low blare, unmistakably not the stall beeper
       this.stallOsc.frequency.setTargetAtTime(410, t, 0.02);
       this.stallGain.gain.setTargetAtTime(0.07, t, 0.03);
+    } else if (alarm && !stalled) {
+      // master warning: alternating two-tone, ~2.5 Hz
+      this.stallOsc.frequency.setTargetAtTime(Math.sin(time * 16) > 0 ? 1180 : 760, t, 0.012);
+      this.stallGain.gain.setTargetAtTime(0.055, t, 0.03);
     } else {
       this.stallOsc.frequency.setTargetAtTime(880, t, 0.02);
       const beep = stalled ? (Math.sin(time * 22) > 0 ? 0.06 : 0) : 0;

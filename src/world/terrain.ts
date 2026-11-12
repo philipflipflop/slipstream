@@ -1,33 +1,43 @@
 /**
- * Infinite streamed terrain: square chunks ringed around the aircraft with
- * distance-based nested LOD and skirt geometry. The heavy generation math
- * runs in a Web Worker (terrain.worker.ts) so the main thread never hitches
- * while flying — chunks arrive as transferable typed arrays and only the
- * cheap GPU upload happens here. Falls back to synchronous generation if
- * workers are unavailable.
+ * Infinite streamed terrain: square chunks around the aircraft at four
+ * nested resolutions, over one coarse far-horizon shell. Detail is a pure
+ * function of DISTANCE (see lod.ts): every chunk carries its parent level's
+ * look and the vertex shader blends parent → own per vertex inside a
+ * per-level distance band, so mesh swaps (up and down a level) land in dead
+ * zones where both meshes render the identical surface. Nothing animates
+ * over time in steady flight — that is what finally retired the LOD "pop".
+ *
+ * The heavy generation math runs in a Web Worker (terrain.worker.ts) —
+ * chunks arrive as transferable typed arrays and only the cheap GPU upload
+ * happens here. Falls back to synchronous generation without workers.
  */
 import * as THREE from 'three';
 import { WorldGen } from './heightfield';
 import { buildChunkPayload, buildFarPayload, ChunkPayload, FarPayload, CHUNK_SIZE } from './terrainBuilder';
+import {
+  LOD_PRESETS, LodPreset, LodQuality, LodFrame, lodFrame, planStep, wantLevel, edgeBand,
+  LEVEL_RES, levelOfRes, CHUNK_R, DEL_HYST, SHELL_SLACK, HOLE_STEP,
+} from './lod';
 
 export { CHUNK_SIZE };
 
 interface Chunk {
-  key: string;
+  key: number;
   cx: number;
   cz: number;
-  res: number;
+  level: number;
   scatter: 0 | 1 | 2;
-  /** instance count per scatter list at build time — deterministic RNG makes
-   *  a lower level's list an exact prefix of a higher one, so on upgrade only
-   *  instances beyond these counts are new (and grow in) */
-  counts: number[];
   group: THREE.Group;
   disposables: Array<{ dispose(): void }>;
-  /** the running geomorph, while t < 1. An upgrade's morph start reproduces
-   *  the old mesh's FINAL surface, so swapping a still-morphing chunk jumps
-   *  the unfinished fraction in one frame — feed() defers until done. */
-  morph: { u: { value: number }; t: number; dur: number };
+  /** arrival time-fade, shader uniform (x = start blend: 0 parent look /
+   *  1 own look, y = eased progress). It only matters when a build lands
+   *  LATE (the chunk is already inside a blend band): the new mesh then
+   *  eases from the look it replaced to its distance blend instead of
+   *  snapping. On-time swaps start where they end, so it does nothing. */
+  fade: { value: THREE.Vector2 };
+  fadeT: number;
+  /** same easing for a fresh chunk's scatter instances (null = shared mats) */
+  gFade: { value: number } | null;
 }
 
 function buildTreeGeometry(): THREE.BufferGeometry {
@@ -227,34 +237,31 @@ function mergeGeoms(geoms: THREE.BufferGeometry[]): THREE.BufferGeometry {
 }
 
 const MAX_INFLIGHT = 3;
+const HALF = CHUNK_SIZE / 2;
+/** arrival time-fade length, s (see Chunk.fade) */
+const FADE_DUR = 1.2;
 
-/** Shared "already full-size" grow uniform for re-instanced (upgraded) chunks. */
-const FULL_GROWN = { value: 1 };
+/** Numeric chunk key — the streamer scans a couple of thousand cells several
+ *  times a second at altitude, so no string building in that loop. */
+const keyOf = (cx: number, cz: number): number => (cx + 32768) * 65536 + (cz + 32768);
 
-/**
- * Clone a scatter material so its instances scale with a per-chunk grow
- * uniform (each object swells from its own base point alongside the terrain
- * geomorph — trees/buildings rise out of the ground instead of popping).
- * All clones share one GL program per base kind via the cache key.
- */
-function makeGrowMat(base: THREE.MeshLambertMaterial, u: { value: number }): THREE.MeshLambertMaterial {
-  const mat = base.clone();
-  mat.onBeforeCompile = (sh) => {
-    sh.uniforms.uGrow = u;
-    sh.vertexShader = 'uniform float uGrow;\n' + sh.vertexShader.replace(
-      '#include <begin_vertex>',
-      '#include <begin_vertex>\n\ttransformed *= uGrow;',
-    );
-  };
-  mat.customProgramCacheKey = () => (base.map ? 'tower-grow' : 'scatter-grow');
-  return mat;
-}
+/** ?lodtint=1 — per-level tints (14 red, 28 amber, 56 green, 112 blue) */
+const LEVEL_TINT = [
+  new THREE.Vector3(1.0, 0.45, 0.4),
+  new THREE.Vector3(1.0, 0.85, 0.35),
+  new THREE.Vector3(0.5, 1.0, 0.5),
+  new THREE.Vector3(0.45, 0.7, 1.0),
+];
+
+const GROW_ONE = { value: 1 };
 
 export class TerrainManager {
   readonly gen: WorldGen;
-  private chunks = new Map<string, Chunk>();
-  private queue: Array<{ cx: number; cz: number; res: number; priority: number }> = [];
-  private pending = new Map<string, number>(); // key → res*4+scatter being built
+  private chunks = new Map<number, Chunk>();
+  private queue: Array<{ cx: number; cz: number; dc: number }> = [];
+  private pending = new Map<number, number>(); // key → level*4+scatter being built
+  /** jobs posted to the worker and not yet answered */
+  private inFlight = 0;
   private results: ChunkPayload[] = [];
   private worker: Worker | null = null;
 
@@ -268,23 +275,47 @@ export class TerrainManager {
   private rockGeo: THREE.BufferGeometry;
   private houseGeo: THREE.BufferGeometry;
   private towerGeo: THREE.BufferGeometry;
-  private lastCx = Infinity;
-  private lastCz = Infinity;
 
-  /** ring radius in chunks; set by quality preset */
-  radius = 7;
   /** payload finalizations (GPU uploads) per frame */
   buildBudget = 2;
-  /** extra rings per altitude tier [ground, low, mid, high]: the visible
-   *  seam distance must grow with how far you can see, or the leading edge
-   *  hatches tiles in plain view at 20k ft (set by quality preset) */
-  altBonusTiers = [0, 4, 6, 8];
-  private altTier = 0;
+
+  // ---- distance LOD state (lod.ts holds the policy) ----
+  private preset: LodPreset = LOD_PRESETS.high;
+  private lod: LodFrame = lodFrame(LOD_PRESETS.high, 0);
+  /** slew-limited height above ground: LOD reach follows this, so a cliff
+   *  passing underneath cannot jerk every threshold at once */
+  private aglS = -1;
+  private px = Infinity;
+  private pz = Infinity;
+  private scanX = Infinity;
+  private scanZ = Infinity;
+  private scanAgl = 0;
+  private scanDirty = true;
+  private scanCooldown = 0;
+  /** collapse edge: beyond it level-0 chunks sit exactly on the far shell.
+   *  Follows the real shell hole (coverage-limited) through a slew limit so
+   *  a streaming hiccup eases the far band instead of snapping it. */
+  private edge = 0;
+  private edgeTarget = 0;
+  private edgeSnap = true;
+  private fading: Chunk[] = [];
+
+  // shared shader uniforms — one upload per frame drives every chunk
+  private uCenter = { value: new THREE.Vector2() };
+  private uBands = [0, 1, 2, 3].map(() => ({ value: new THREE.Vector2(0, 1) }));
+  private uGrow = [0, 1, 2].map(() => ({ value: new THREE.Vector2(0, 1) }));
+  private uDbg = { value: 0 };
+  private growMats = new Map<number, THREE.MeshLambertMaterial>();
+
+  /** streaming health counters (autofly telemetry / tests):
+   *  swaps = level changes, late = swaps that landed inside a blend band
+   *  (eased by the time-fade instead of being pixel-identical) */
+  readonly stats = { swaps: 0, late: 0, fresh: 0, lateFresh: 0, dropped: 0 };
 
   // far shell: one coarse mega-mesh of the horizon underneath the chunk ring
   private farMesh: THREE.Mesh | null = null;
   private farGeo: THREE.BufferGeometry | null = null;
-  private farIndexArr: Uint32Array | null = null;
+  private farIndexArr: Uint16Array | Uint32Array | null = null;
   private farOx = Infinity;
   private farOz = Infinity;
   private farGeoOx = 0;
@@ -296,12 +327,10 @@ export class TerrainManager {
   private farResult: FarPayload | null = null;
   private farCells = 140;
   private farCellSize = 450;
-
-  // running geomorph animations (one per freshly finalized chunk);
-  // dur stretches with distance so far tiles swell too slowly to notice
-  private morphs: Array<{ u: { value: number }; t: number; dur: number }> = [];
-  // shell hole needs re-punching once coverage completes
-  private farHoleDirty = false;
+  // the hole currently punched in the shell index (world centre + radius)
+  private holeX = 0;
+  private holeZ = 0;
+  private holeR = -1;
 
   /** 0 = day (no cost); > 0 lights the city windows at that intensity and
    *  > 0.3 also fits blinking red obstruction beacons to the supertalls.
@@ -336,75 +365,59 @@ export class TerrainManager {
     }
     if (windowGlow > 0.3) {
       this.beaconGeo = new THREE.SphereGeometry(2.4, 6, 5);
-      this.beaconMat = new THREE.MeshBasicMaterial({ color: 0xff2a2a, transparent: true, opacity: 0.9 });
+      this.beaconMat = this.makeBeaconMat();
     }
 
     try {
       this.worker = new Worker(new URL('./terrain.worker.ts', import.meta.url), { type: 'module' });
       this.worker.postMessage({ type: 'init', seed: gen.seed, theme: gen.theme });
       this.worker.onmessage = (e: MessageEvent<ChunkPayload | FarPayload>) => {
-        if ('far' in e.data) this.farResult = e.data;
-        else this.results.push(e.data);
+        if ('far' in e.data) { this.farResult = e.data; return; }
+        this.results.push(e.data);
+        this.inFlight--;
+        // refeed straight away: the worker's throughput must not hang off
+        // the render frame rate (at 20 fps it would idle 90% of the time)
+        this.feed();
       };
       this.worker.onerror = () => {
         // worker died — fall back to synchronous builds
         this.worker = null;
         this.pending.clear();
+        this.inFlight = 0;
         this.farPending = false;
+        this.scanDirty = true;
       };
     } catch {
       this.worker = null;
     }
   }
 
-  // DEBUG (?morphhold=1): freeze every chunk at its geomorph START. A frozen
-  // frame must be pixel-seamless against the shell/parent surfaces — any
-  // visible tile seam here is exactly the jump players see the frame a tile
-  // arrives, turned into a static image a screenshot can catch.
-  morphHold = false;
+  // DEBUG (?lodtint=1): tint every chunk by level and darken it by how far
+  // it is collapsed toward its parent look — the blend bands become rings
+  // you can photograph. Seamless swaps mean a level boundary always sits in
+  // a zone where the finer side is fully dark and the coarser fully bright.
+  set lodTint(on: boolean) { this.uDbg.value = on ? 1 : 0; }
+
+  /** DEBUG (?lodlog=1): console.warn every swap that was not seamless */
+  logLate = false;
 
   // DEBUG (?shellonly=1): stream and bookkeep chunks normally but never show
-  // them — the far shell renders everywhere (hole stays closed). This is "the
-  // screen the instant BEFORE every arrival"; diffing it against ?morphhold=1
-  // (arrival states) makes anything that pops visible in a still image.
+  // them — the far shell renders everywhere (hole stays closed).
   shellOnly = false;
 
-  // how far out each resolution reaches, in rings; set by quality preset
-  ultraRing = -1; // res 112 (8 m steps) — close-up detail; -1 disables
-  fineRing = 3;
-  midRing = 5;
-  fineRingHigh = 5;
-  midRingHigh = 8;
-
-  // resolutions nest (112 = 2×56 = 4×28 = 8×14): a coarse chunk's vertices
-  // are an exact subset of the fine grid, so shorelines and ridges don't
-  // crawl when a chunk upgrades LOD — and geomorph starts can reproduce the
-  // coarse surface exactly. At altitude the whole area below is in plain
-  // view, so the fine rings reach further out (but ultra is skipped: 8 m
-  // facets are indistinguishable from 16 m ones a kilometre below you).
-  private resForRing(ring: number): number {
-    const high = this.altTier >= 1;
-    if (!high && ring <= this.ultraRing) return 112;
-    if (ring <= (high ? this.fineRingHigh : this.fineRing)) return 56;
-    if (ring <= (high ? this.midRingHigh : this.midRing)) return 28;
-    return 14;
+  /** Quality preset hook: LOD reach + load radius (see lod.ts). */
+  setQuality(q: LodQuality): void {
+    this.preset = LOD_PRESETS[q];
+    this.scanDirty = true;
   }
 
-  private scatterForRing(ring: number): 0 | 1 | 2 {
-    if (ring > 6) return 0;
-    return ring <= 3 ? 2 : 1;
+  /** How far the fog may open versus its ground range (altitude-driven). */
+  fogScale(): number {
+    return this.lod.fogScale;
   }
 
-  /** Current streaming radius (widens at altitude so the view fills out). */
-  effRadius(): number {
-    return this.radius + this.altBonusTiers[this.altTier];
-  }
-
-  /** Call every frame with the player position + height above ground. */
+  /** Call every frame with the streaming centre + height above ground. */
   update(px: number, pz: number, agl = 0, dt = 0.016): void {
-    const cx = Math.floor(px / CHUNK_SIZE);
-    const cz = Math.floor(pz / CHUNK_SIZE);
-
     // obstruction beacons blink in a slow aviation-red double pulse
     if (this.beaconMat) {
       this.beaconTime += dt;
@@ -412,55 +425,75 @@ export class TerrainManager {
       this.beaconMat.opacity = t < 0.18 || (t > 0.3 && t < 0.42) ? 0.95 : 0.08;
     }
 
-    // advance geomorphs: fresh chunks swell from the surface they replaced
-    for (let i = this.morphs.length - 1; i >= 0; i--) {
-      const m = this.morphs[i];
-      if (this.morphHold) { m.u.value = 0; continue; }
-      m.t = Math.min(m.t + dt / m.dur, 1);
-      m.u.value = m.t * m.t * (3 - 2 * m.t);
-      if (m.t >= 1) {
-        this.morphs[i] = this.morphs[this.morphs.length - 1];
-        this.morphs.pop();
+    // a jump (respawn / restart) is a cut: re-anchor instead of slewing
+    const jumped = this.px === Infinity || Math.hypot(px - this.px, pz - this.pz) > 1500;
+    this.px = px;
+    this.pz = pz;
+    if (jumped || this.aglS < 0) {
+      this.aglS = Math.max(agl, 0);
+      this.edgeSnap = true;
+      this.scanDirty = true;
+    } else {
+      const d = Math.max(agl, 0) - this.aglS;
+      const lim = 120 * dt;
+      this.aglS += d > lim ? lim : d < -lim ? -lim : d;
+    }
+    this.lod = lodFrame(this.preset, this.aglS);
+
+    // advance arrival fades
+    for (let i = this.fading.length - 1; i >= 0; i--) {
+      const c = this.fading[i];
+      c.fadeT = Math.min(c.fadeT + dt / FADE_DUR, 1);
+      const e = c.fadeT * c.fadeT * (3 - 2 * c.fadeT);
+      c.fade.value.y = e;
+      if (c.gFade) c.gFade.value = e;
+      if (c.fadeT >= 1) {
+        this.fading[i] = this.fading[this.fading.length - 1];
+        this.fading.pop();
+        this.scanDirty = true; // a swap deferred behind this fade can go now
       }
     }
 
-    // altitude tiers with hysteresis so the radius doesn't flap around a
-    // threshold: reach keeps growing as you climb
+    // upload finished payloads. Budgeted by TIME, not count: far chunks are
+    // a few hundred vertices and dozens fit in a millisecond, while a count
+    // cap throttles streaming with the frame rate (slow devices fell behind
+    // exactly when they could least afford it)
     {
-      const up = [1150, 3200, 5200];
-      const down = [750, 2600, 4400];
-      let tier = this.altTier;
-      if (tier < 3 && agl > up[tier]) tier++;
-      else if (tier > 0 && agl < down[tier - 1]) tier--;
-      if (tier !== this.altTier) {
-        this.altTier = tier;
-        if (this.lastCx !== Infinity) this.requeue(this.lastCx, this.lastCz);
+      const t0 = performance.now();
+      const ms = this.buildBudget * 1.6;
+      let n = 0;
+      while (this.results.length > 0 &&
+        (n < this.buildBudget || (n < 40 && performance.now() - t0 < ms))) {
+        this.finalize(this.results.shift()!);
+        n++;
       }
     }
 
-    if (cx !== this.lastCx || cz !== this.lastCz) {
-      this.lastCx = cx;
-      this.lastCz = cz;
-      this.requeue(cx, cz);
+    // re-plan when the centre has moved, the reach has changed, or coverage
+    // did (finalize / fade end) — the latter rate-limited to a few Hz
+    this.scanCooldown -= dt;
+    const moved = Math.hypot(px - this.scanX, pz - this.scanZ) > 60 ||
+      Math.abs(this.aglS - this.scanAgl) > 6;
+    if (moved || (this.scanDirty && this.scanCooldown <= 0)) this.scan();
+
+    // collapse edge eases toward the real shell hole
+    if (this.edgeSnap) {
+      this.edge = this.edgeTarget;
+      this.edgeSnap = false;
+    } else {
+      const d = this.edgeTarget - this.edge;
+      // outward: brisk when far behind (boot / respawn fill), inward: gentle
+      const lim = (d > 0 ? Math.max(500, d * 0.8) : 200) * dt;
+      this.edge += d > lim ? lim : d < -lim ? -lim : d;
     }
 
-    // upload finished payloads (budgeted — uploads are cheap but not free).
-    // A deep backlog (altitude-tier requeue floods hundreds of far res-14
-    // chunks) triples the budget: those payloads are tiny and the view
-    // fills out in seconds instead of a quarter minute.
-    const budget = this.queue.length + this.results.length > 120
-      ? this.buildBudget * 3
-      : this.buildBudget;
-    for (let i = 0; i < budget && this.results.length > 0; i++) {
-      this.finalize(this.results.shift()!);
-    }
-
-    // once the queue fully drains, re-punch the shell hole out to the now-
-    // complete coverage (it was held small while chunks were missing)
-    if (this.farHoleDirty && this.pending.size === 0 && this.queue.length === 0) {
-      this.farHoleDirty = false;
-      this.rebuildFarIndex();
-    }
+    // shader uniforms
+    this.uCenter.value.set(px, pz);
+    const eb = edgeBand(this.lod, this.edge);
+    this.uBands[0].value.set(eb[0], eb[1]);
+    for (let l = 1; l <= 3; l++) this.uBands[l].value.set(this.lod.band[l][0], this.lod.band[l][1]);
+    this.uGrow[0].value.set(eb[0], eb[1]);
+    for (let s = 1; s <= 2; s++) this.uGrow[s].value.set(this.lod.grow[s][0], this.lod.grow[s][1]);
 
     // far shell: swap in a freshly baked horizon
     if (this.farResult) {
@@ -469,48 +502,14 @@ export class TerrainManager {
       this.finalizeFar(p);
     }
 
-    // keep the worker fed, nearest jobs first
-    while (this.pending.size < MAX_INFLIGHT && this.queue.length > 0) {
-      const job = this.queue.shift()!;
-      const ring = Math.hypot(job.cx - cx, job.cz - cz);
-      if (ring > this.effRadius() + 0.5) continue; // stale
-      const key = `${job.cx},${job.cz}`;
-      let res = this.resForRing(ring);
-      const scatter = this.scatterForRing(ring);
-      const existing = this.chunks.get(key);
-      // a chunk can need a rebuild for resolution OR for denser scatter —
-      // scatter-only rebuilds keep the finer mesh (geomorph start is then
-      // the identical surface, so only the new instances grow in)
-      if (existing && existing.res >= res && existing.scatter >= scatter) continue;
-      // never rebuild a chunk that is still morphing: the replacement's
-      // morph start is the old mesh's FINAL surface, so a mid-morph swap
-      // snaps the unfinished fraction in one frame (visible after altitude-
-      // tier requeues at speed). The regular requeue retries it shortly.
-      if (existing && existing.morph.t < 1) continue;
-      // a missing chunk appears fast at 56 first; the ultra res arrives a
-      // beat later as a seamless geomorph upgrade (matters at boot/teleport)
-      if (!existing && res > 56) res = 56;
-      if (existing && existing.res > res) res = existing.res;
-      const combo = res * 4 + scatter;
-      if ((this.pending.get(key) ?? 0) >= combo) continue;
-      this.pending.set(key, combo);
-      const prev = existing?.res ?? 0;
-      const shellCell = this.farGeo ? this.farGeoCell : this.farCellSize;
-      if (this.worker) {
-        this.worker.postMessage({ type: 'build', cx: job.cx, cz: job.cz, res, scatter, prev, shellCell });
-      } else {
-        // synchronous fallback: one chunk per frame at most
-        this.results.push(buildChunkPayload(this.gen, job.cx, job.cz, res, scatter, prev, shellCell));
-        break;
-      }
-    }
+    this.feed();
 
     // recentre the horizon shell preferably when no chunk work is
-    // outstanding — it's the biggest single job. But at cruise in the top
-    // altitude tier the queue may NEVER fully drain (slower devices), and
-    // a starved shell drifts kilometres stale then lurches forward in one
-    // visible step; past ~7 km of drift the rebuild goes ahead of the
-    // chunk queue (one ~100 ms worker job every few km — imperceptible).
+    // outstanding — it's the biggest single job. But at cruise the queue may
+    // NEVER fully drain (slower devices), and a starved shell drifts
+    // kilometres stale then lurches forward in one visible step; past ~7 km
+    // of drift the rebuild goes ahead of the chunk queue (one ~100 ms worker
+    // job every few km — imperceptible).
     const farDrift = Math.max(Math.abs(px - this.farOx), Math.abs(pz - this.farOz));
     if (
       !this.farPending &&
@@ -538,41 +537,125 @@ export class TerrainManager {
     const cz = Math.floor(pz / CHUNK_SIZE);
     for (let dz = -rings; dz <= rings; dz++)
       for (let dx = -rings; dx <= rings; dx++)
-        if (!this.chunks.has(`${cx + dx},${cz + dz}`)) return false;
+        if (!this.chunks.has(keyOf(cx + dx, cz + dz))) return false;
     return true;
   }
 
-  // Rings are EUCLIDEAN chunk distance: coverage is a disc, so the horizon
-  // seam reads as distance haze in every direction instead of a square
-  // platform (Chebyshev coverage varied ±40% between axis and diagonal
-  // headings — that's what made high-altitude edges pop in as tiles). A
-  // disc also holds ~27% fewer chunks than the old square at the same
-  // radius, which pays for the wider high-altitude reach.
-  private requeue(cx: number, cz: number): void {
-    const radius = this.effRadius();
-    for (const [key, chunk] of this.chunks) {
-      if (Math.hypot(chunk.cx - cx, chunk.cz - cz) > radius + 1.5) {
-        this.scene.remove(chunk.group);
-        for (const d of chunk.disposables) d.dispose();
-        this.chunks.delete(key);
+  private centreDist(cx: number, cz: number): number {
+    return Math.hypot((cx + 0.5) * CHUNK_SIZE - this.px, (cz + 0.5) * CHUNK_SIZE - this.pz);
+  }
+
+  private drop(c: Chunk): void {
+    this.scene.remove(c.group);
+    for (const d of c.disposables) d.dispose();
+    this.chunks.delete(c.key);
+    const i = this.fading.indexOf(c);
+    if (i >= 0) {
+      this.fading[i] = this.fading[this.fading.length - 1];
+      this.fading.pop();
+    }
+  }
+
+  /**
+   * Re-plan the disc around the streaming centre: drop chunks that have left
+   * it, queue every chunk whose level or scatter density should step, and
+   * re-punch the shell hole to the coverage that actually exists. Coverage
+   * is EUCLIDEAN (a disc) — the horizon seam reads as distance haze in every
+   * direction instead of a square platform.
+   */
+  private scan(): void {
+    const f = this.lod;
+    const px = this.px;
+    const pz = this.pz;
+    this.scanX = px;
+    this.scanZ = pz;
+    this.scanAgl = this.aglS;
+    this.scanDirty = false;
+    this.scanCooldown = 0.07;
+
+    // 1. chunks beyond the disc go — but only once fully collapsed onto the
+    // shell (the edge can lag the load radius while it slews inward on a
+    // descent), so the hand-back to the shell changes no pixel
+    for (const c of this.chunks.values()) {
+      const dc = this.centreDist(c.cx, c.cz);
+      if (dc > f.load + DEL_HYST && (dc - CHUNK_R > this.edge + 30 || dc > f.load + 4000)) {
+        this.drop(c);
       }
     }
+
+    // 2. plan builds, nearest first; note the closest hole in coverage
     this.queue.length = 0;
-    for (let dz = -radius; dz <= radius; dz++) {
-      for (let dx = -radius; dx <= radius; dx++) {
-        const ring = Math.hypot(dx, dz);
-        if (ring > radius + 0.5) continue; // outside the disc
-        const tx = cx + dx;
-        const tz = cz + dz;
-        const want = this.resForRing(ring);
-        const wantS = this.scatterForRing(ring);
-        const existing = this.chunks.get(`${tx},${tz}`);
-        if (existing && existing.res >= want && existing.scatter >= wantS) continue;
-        this.queue.push({ cx: tx, cz: tz, res: want, priority: dx * dx + dz * dz });
+    const ccx = Math.floor(px / CHUNK_SIZE);
+    const ccz = Math.floor(pz / CHUNK_SIZE);
+    const r = Math.ceil((f.load + DEL_HYST) / CHUNK_SIZE) + 1;
+    let gap = Infinity;
+    for (let dz = -r; dz <= r; dz++) {
+      const cz = ccz + dz;
+      const mz = (cz + 0.5) * CHUNK_SIZE - pz;
+      for (let dx = -r; dx <= r; dx++) {
+        const cx = ccx + dx;
+        const mx = (cx + 0.5) * CHUNK_SIZE - px;
+        const dc = Math.hypot(mx, mz);
+        if (dc >= f.load + DEL_HYST) continue;
+        const c = this.chunks.get(keyOf(cx, cz));
+        if (!c) {
+          if (dc >= f.load) continue;
+          const nx = Math.max(Math.abs(mx) - HALF, 0);
+          const nz = Math.max(Math.abs(mz) - HALF, 0);
+          const dn = Math.hypot(nx, nz);
+          if (dn < gap) gap = dn;
+        }
+        if (planStep(f, dc, c ? c.level : -1, c ? c.scatter : 0)) this.queue.push({ cx, cz, dc });
       }
     }
-    this.queue.sort((a, b) => a.priority - b.priority);
-    this.rebuildFarIndex();
+    this.queue.sort((a, b) => a.dc - b.dc);
+
+    // 3. the shell hole must NEVER outrun real coverage: where streaming
+    // lags, the shell keeps underlying the gap (no sky-dome void), and the
+    // collapse edge retreats with it
+    // (the punched hole may sit up to a re-punch step off-centre: keep that
+    // much clear of the nearest missing chunk as well)
+    const hole = Math.max(Math.min(f.hole, gap - HOLE_STEP - 30), 0);
+    this.edgeTarget = Math.max(hole - SHELL_SLACK, 0);
+    if (Math.abs(hole - this.holeR) > 25 || Math.hypot(px - this.holeX, pz - this.holeZ) > HOLE_STEP - 60) {
+      this.holeX = px;
+      this.holeZ = pz;
+      this.holeR = hole;
+      this.rebuildFarIndex();
+    }
+  }
+
+  /** Keep the worker fed, nearest jobs first. */
+  private feed(): void {
+    // (results are bounded too: uploads are budgeted per frame, and baking
+    // far ahead of them only makes payloads stale)
+    while (this.inFlight < MAX_INFLIGHT && this.results.length < 48 && this.queue.length > 0) {
+      const job = this.queue.shift()!;
+      const key = keyOf(job.cx, job.cz);
+      if (this.pending.has(key)) continue;
+      const c = this.chunks.get(key);
+      // never swap a chunk whose arrival fade is still running: the next
+      // mesh's start look assumes this one has settled (re-planned when the
+      // fade ends)
+      if (c && c.fadeT < 1) continue;
+      const step = planStep(this.lod, this.centreDist(job.cx, job.cz), c ? c.level : -1, c ? c.scatter : 0);
+      if (!step) continue;
+      this.pending.set(key, step.level * 4 + step.scatter);
+      const res = LEVEL_RES[step.level];
+      // morph data always reaches the PARENT level (the shell for level 0)
+      const prev = step.level > 0 ? res / 2 : 0;
+      const shellCell = this.farGeo ? this.farGeoCell : this.farCellSize;
+      if (this.worker) {
+        this.inFlight++;
+        this.worker.postMessage({
+          type: 'build', cx: job.cx, cz: job.cz, res, scatter: step.scatter, prev, shellCell,
+        });
+      } else {
+        // synchronous fallback: one chunk per frame at most
+        this.results.push(buildChunkPayload(this.gen, job.cx, job.cz, res, step.scatter, prev, shellCell));
+        break;
+      }
+    }
   }
 
   /** Quality preset hook: shell density. Forces a rebuild when it changes. */
@@ -595,7 +678,7 @@ export class TerrainManager {
     return s;
   }
 
-  /** DEBUG: build the far shell synchronously right now (morphhold/shellonly
+  /** DEBUG: build the far shell synchronously right now (shellonly/lodtint
    *  screenshots race the worker under virtual-time headless capture). */
   forceFarBuild(px: number, pz: number): void {
     const snap = this.farSnap();
@@ -633,7 +716,11 @@ export class TerrainManager {
     geo.setAttribute('position', new THREE.BufferAttribute(p.positions, 3));
     geo.setAttribute('normal', new THREE.BufferAttribute(p.normals, 3));
     geo.setAttribute('color', new THREE.BufferAttribute(p.colors, 3));
-    this.farIndexArr = new Uint32Array(p.cells * p.cells * 6);
+    // 16-bit indices whenever the lattice allows (every preset): the hole
+    // is re-punched several times a second at speed, and this halves the
+    // upload
+    const nIdx = p.cells * p.cells * 6;
+    this.farIndexArr = (p.cells + 1) * (p.cells + 1) <= 65535 ? new Uint16Array(nIdx) : new Uint32Array(nIdx);
     geo.setIndex(new THREE.BufferAttribute(this.farIndexArr, 1));
     this.farGeo = geo;
 
@@ -647,44 +734,19 @@ export class TerrainManager {
     this.scene.add(mesh);
   }
 
-  /** Distance (in rings) of the closest missing chunk inside the disc. */
-  private nearestGapRing(): number {
-    const R = Math.ceil(this.effRadius());
-    for (let r = 0; r <= R; r++) {
-      for (let dz = -r; dz <= r; dz++) {
-        for (let dx = -r; dx <= r; dx++) {
-          if (Math.max(Math.abs(dx), Math.abs(dz)) !== r) continue; // ring shell only
-          if (Math.hypot(dx, dz) > this.effRadius() + 0.5) continue;
-          if (!this.chunks.has(`${this.lastCx + dx},${this.lastCz + dz}`)) return r;
-        }
-      }
-    }
-    return R + 1;
-  }
-
   /**
-   * Re-index the shell, skipping quads fully inside the DISC the detailed
-   * chunk coverage ACTUALLY fills — the hole is circular to match the
-   * Euclidean streaming metric. Index-only: vertices stay put, so this is
-   * cheap enough to run on every chunk crossing.
+   * Re-index the shell, skipping quads fully inside the hole disc (the area
+   * detailed chunks ACTUALLY cover, centred on the streaming centre). Index-
+   * only: vertices stay put, so this is cheap enough to run every ~200 m.
    */
   private rebuildFarIndex(): void {
     if (!this.farGeo || !this.farIndexArr) return;
     const cells = this.farGeoCells;
     const cs = this.farGeoCell;
     const half = (cells * cs) / 2;
-    let ccx = Infinity, ccz = Infinity, holeR2 = -1;
-    if (this.lastCx !== Infinity) {
-      ccx = (this.lastCx + 0.5) * CHUNK_SIZE;
-      ccz = (this.lastCz + 0.5) * CHUNK_SIZE;
-      // the hole must never outrun the chunks that actually EXIST: when
-      // streaming lags (fast climb, altitude-tier requeue, slow device) the
-      // shell keeps underlying the gap, so fresh tiles geomorph up from
-      // visible coarse terrain instead of popping in over sky-dome void
-      const holeRings = Math.min(this.effRadius() - 2.2, this.nearestGapRing() - 1.2);
-      const holeR = holeRings * CHUNK_SIZE;
-      holeR2 = holeR > 0 && !this.shellOnly ? holeR * holeR : -1;
-    }
+    const ccx = this.holeX;
+    const ccz = this.holeZ;
+    const holeR2 = this.holeR > 0 && !this.shellOnly ? this.holeR * this.holeR : -1;
     const idx = this.farIndexArr;
     const n = cells + 1;
     // the OUTER edge is a disc too (trim the square's corners): the terrain
@@ -720,36 +782,43 @@ export class TerrainManager {
   }
 
   /**
-   * A Lambert clone whose vertices blend from baseY (the surface this chunk
-   * replaces — coarser LOD or the far shell) up to their true heights as
-   * uMorph runs 0→1: LOD swaps read as a smooth swell instead of a pop.
+   * A Lambert clone whose vertices blend from the PARENT look (baseY /
+   * baseCol / baseNrm — the coarser level, or the far shell for level 0) to
+   * their own, by each vertex's distance from the streaming centre inside
+   * this level's band. Shape, paint and shading all ride the same factor.
    * All clones share one GL program via the custom cache key.
    */
-  private makeChunkMat(u: { value: number }): THREE.MeshLambertMaterial {
+  private makeChunkMat(level: number, fade: { value: THREE.Vector2 }): THREE.MeshLambertMaterial {
     const mat = new THREE.MeshLambertMaterial({ vertexColors: true });
     mat.onBeforeCompile = (sh) => {
-      sh.uniforms.uMorph = u;
+      sh.uniforms.uCenter = this.uCenter;
+      sh.uniforms.uBand = this.uBands[level];
+      sh.uniforms.uFade = fade;
+      sh.uniforms.uDbg = this.uDbg;
+      sh.uniforms.uTint = { value: LEVEL_TINT[level] };
       sh.vertexShader =
-        'attribute float baseY;\nattribute vec3 baseCol;\nattribute vec3 baseNrm;\nuniform float uMorph;\nvarying vec3 vTWorld;\n' +
+        'attribute float baseY;\nattribute vec3 baseCol;\nattribute vec3 baseNrm;\n' +
+        'uniform vec2 uCenter;\nuniform vec2 uBand;\nuniform vec2 uFade;\n' +
+        'uniform float uDbg;\nuniform vec3 uTint;\nvarying vec3 vTWorld;\n' +
         sh.vertexShader
-          .replace(
-            '#include <begin_vertex>',
-            '#include <begin_vertex>\n\ttransformed.y = mix(baseY, position.y, uMorph);' +
-            '\n\tvTWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;',
-          )
-          // shading sharpens with the swell too: an instant normals snap
-          // reads as a brightness pop at low sun even though the silhouette
-          // is already morphing smoothly
-          .replace(
-            '#include <beginnormal_vertex>',
-            '#include <beginnormal_vertex>\n\tobjectNormal = normalize(mix(baseNrm, objectNormal, uMorph));',
-          )
-          // the paint sharpens with the same swell: colours start at the
-          // replaced surface's coarse-texel palette (shell or parent LOD),
-          // so a fresh tile never "snaps" into fine detail
+          // the blend factor comes first: colour, normal and position all
+          // use it. Distance is horizontal, from the streaming centre.
           .replace(
             '#include <color_vertex>',
-            '#include <color_vertex>\n\tvColor.rgb = mix(baseCol, vColor.rgb, uMorph);',
+            '\tfloat tDist = distance((modelMatrix * vec4(position, 1.0)).xz, uCenter);' +
+            '\n\tfloat tM = mix(uFade.x, 1.0 - smoothstep(uBand.x, uBand.y, tDist), uFade.y);' +
+            '\n\t#include <color_vertex>' +
+            '\n\tvColor.rgb = mix(baseCol, vColor.rgb, tM);' +
+            '\n\tvColor.rgb = mix(vColor.rgb, uTint * (0.35 + 0.65 * tM), uDbg);',
+          )
+          .replace(
+            '#include <beginnormal_vertex>',
+            '#include <beginnormal_vertex>\n\tobjectNormal = normalize(mix(baseNrm, objectNormal, tM));',
+          )
+          .replace(
+            '#include <begin_vertex>',
+            '#include <begin_vertex>\n\ttransformed.y = mix(baseY, position.y, tM);' +
+            '\n\tvTWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;',
           );
       // close-range albedo detail: value-noise octaves break up the smooth
       // vertex-colour interpolation that reads as "low poly" up close. Each
@@ -794,24 +863,115 @@ export class TerrainManager {
             }`,
           );
     };
-    mat.customProgramCacheKey = () => 'terrain-geomorph';
+    mat.customProgramCacheKey = () => 'terrain-dlod';
+    return mat;
+  }
+
+  /**
+   * Scatter material: instances scale from their own base point by distance
+   * inside a grow band (trees, rocks and houses shrink into the ground
+   * before their chunk drops to a sparser density; city towers ride the far
+   * collapse edge). Materials are SHARED per (kind, band) — only a fresh
+   * chunk arriving inside a band gets its own clone, for the arrival fade.
+   */
+  private growMat(
+    base: THREE.MeshLambertMaterial, kind: number, band: number, fade: { value: number } | null,
+  ): THREE.MeshLambertMaterial {
+    const id = kind * 3 + band;
+    if (!fade) {
+      const hit = this.growMats.get(id);
+      if (hit) return hit;
+    }
+    const mat = base.clone();
+    mat.onBeforeCompile = (sh) => {
+      sh.uniforms.uCenter = this.uCenter;
+      sh.uniforms.uGBand = this.uGrow[band];
+      sh.uniforms.uGFade = fade ?? GROW_ONE;
+      sh.vertexShader =
+        'uniform vec2 uCenter;\nuniform vec2 uGBand;\nuniform float uGFade;\n' +
+        sh.vertexShader.replace(
+          '#include <begin_vertex>',
+          '#include <begin_vertex>' +
+          '\n\ttransformed *= (1.0 - smoothstep(uGBand.x, uGBand.y, distance(instanceMatrix[3].xz, uCenter))) * uGFade;',
+        );
+    };
+    mat.customProgramCacheKey = () => (base.map ? 'tower-dgrow' : 'scatter-dgrow');
+    if (!fade) this.growMats.set(id, mat);
+    return mat;
+  }
+
+  /** Obstruction-beacon material: rides its tower's grow (instanceColor.r
+   *  carries the tower height, so the lamp stays on the rising roof). */
+  private makeBeaconMat(): THREE.MeshBasicMaterial {
+    const mat = new THREE.MeshBasicMaterial({ color: 0xff2a2a, transparent: true, opacity: 0.9 });
+    mat.onBeforeCompile = (sh) => {
+      sh.uniforms.uCenter = this.uCenter;
+      sh.uniforms.uGBand = this.uGrow[0];
+      sh.vertexShader =
+        'uniform vec2 uCenter;\nuniform vec2 uGBand;\n' +
+        sh.vertexShader
+          .replace('#include <color_vertex>', '#include <color_vertex>\n\tvColor.rgb = vec3(1.0);')
+          .replace(
+            '#include <begin_vertex>',
+            '#include <begin_vertex>' +
+            '\n\tfloat bG = 1.0 - smoothstep(uGBand.x, uGBand.y, distance(instanceMatrix[3].xz, uCenter));' +
+            '\n\ttransformed *= bG;\n\ttransformed.y += instanceColor.r * (bG - 1.0);',
+          );
+    };
+    mat.customProgramCacheKey = () => 'beacon-dgrow';
     return mat;
   }
 
   /** Wrap a worker payload in GPU objects and swap it into the scene. */
   private finalize(p: ChunkPayload): void {
-    const key = `${p.cx},${p.cz}`;
-    if ((this.pending.get(key) ?? 0) === p.res * 4 + p.scatter) this.pending.delete(key);
+    const key = keyOf(p.cx, p.cz);
+    const level = levelOfRes(p.res);
+    if (this.pending.get(key) === level * 4 + p.scatter) this.pending.delete(key);
+    this.scanDirty = true;
 
-    const ring = Math.hypot(p.cx - this.lastCx, p.cz - this.lastCz);
-    if (ring > this.effRadius() + 1.5) return; // flew away while it was baking
-
+    const f = this.lod;
+    const dc = this.centreDist(p.cx, p.cz);
     const old = this.chunks.get(key);
-    if (old) {
-      if (old.res >= p.res && old.scatter >= p.scatter) return;
-      this.scene.remove(old.group);
-      for (const d of old.disposables) d.dispose();
-      this.chunks.delete(key);
+    let start: -1 | 0 | 1 = 0;
+    let onTime = true;
+    if (!old) {
+      // flew away while it was baking?
+      if (wantLevel(f, dc, -1) < 0) { this.stats.dropped++; return; }
+      this.stats.fresh++;
+      // a fresh chunk should arrive collapsed onto the shell: level 0, past
+      // the edge
+      if (level !== 0 || dc - CHUNK_R < this.uBands[0].value.y - 1) {
+        onTime = false;
+        if (this.farMesh) this.stats.lateFresh++;
+      }
+    } else {
+      // only the step that is STILL wanted may land: plans can flip while a
+      // payload bakes (a turn, a climb), and a stale swap would not be
+      // between identical surfaces
+      const step = planStep(f, dc, old.level, old.scatter);
+      if (!step || step.level !== level || (level === old.level && step.scatter !== p.scatter)) {
+        this.stats.dropped++;
+        return;
+      }
+      start = step.start;
+      if (level !== old.level) {
+        this.stats.swaps++;
+        // seam check: finer mesh fully collapsed, coarser fully itself
+        const fine = Math.max(level, old.level);
+        const coarse = fine - 1;
+        const fineOuter = this.uBands[fine].value.y;
+        const coarseInner = this.uBands[coarse].value.x;
+        if (dc - CHUNK_R < fineOuter - 1 || dc + CHUNK_R > coarseInner + 1) {
+          onTime = false;
+          this.stats.late++;
+          if (this.logLate) {
+            console.warn(`late swap ${old.level}→${level} dc=${dc.toFixed(0)} T=${f.T.map((v) => v.toFixed(0))} ` +
+              `fineOuter=${fineOuter.toFixed(0)} coarseInner=${coarseInner.toFixed(0)} agl=${this.aglS.toFixed(0)} ` +
+              `q=${this.queue.length} pend=${this.pending.size} res=${this.results.length}`);
+          }
+        }
+      }
+      this.drop(old);
     }
 
     const geo = new THREE.BufferGeometry();
@@ -822,15 +982,29 @@ export class TerrainManager {
     geo.setAttribute('baseCol', new THREE.BufferAttribute(p.baseCols, 3));
     geo.setAttribute('baseNrm', new THREE.BufferAttribute(p.baseNrms, 3));
     geo.setIndex(new THREE.BufferAttribute(p.index, 1));
+    // the shader displaces vertices between two surfaces: bound both
+    geo.computeBoundingSphere();
+    {
+      let lo = Infinity;
+      let hi = -Infinity;
+      for (let i = 0; i < p.baseY.length; i++) {
+        const b = p.baseY[i];
+        const y = p.positions[i * 3 + 1];
+        if (b < lo) lo = b;
+        if (y < lo) lo = y;
+        if (b > hi) hi = b;
+        if (y > hi) hi = y;
+      }
+      const bs = geo.boundingSphere!;
+      bs.center.set(HALF, (lo + hi) / 2, HALF);
+      bs.radius = Math.hypot(CHUNK_R + 80, (hi - lo) / 2 + 20);
+    }
 
-    // nearby chunks swell in ~a second; the outer rings take MUCH longer —
-    // the swell rate has to stay under ~1 px/s at the tile's distance or
-    // watching the edge reads as terrain materializing. A ring-24 arrival
-    // (~21 km) rising a few hundred metres over ~13 s is sub-perceptual,
-    // and it still completes long before the tile gets close at any speed
-    const morph = { u: { value: 0 }, t: 0, dur: 1.1 + Math.min(ring, 26) * 0.45 };
-    this.morphs.push(morph);
-    const mat = this.makeChunkMat(morph.u);
+    // an on-time arrival starts exactly where its distance blend already is
+    // — no fade needed (and no later swap deferred behind one)
+    if (onTime) start = -1;
+    const fade = { value: new THREE.Vector2(start < 0 ? 0 : start, start < 0 ? 1 : 0) };
+    const mat = this.makeChunkMat(level, fade);
 
     const mesh = new THREE.Mesh(geo, mat);
     mesh.position.set(p.cx * CHUNK_SIZE, 0, p.cz * CHUNK_SIZE);
@@ -842,39 +1016,44 @@ export class TerrainManager {
     group.add(mesh);
     const disposables: Array<{ dispose(): void }> = [geo, mat];
 
-    // Scatter lists at a lower level are an exact prefix of the same lists
-    // at a higher level (same RNG stream, shorter loops), so on upgrade the
-    // carried-over instances render at full size and only the NEW suffix
-    // grows in with the terrain swell — nothing pops, nothing re-grows.
-    const counts: number[] = [];
-    let listIdx = 0;
-    const addInstances = (geo: THREE.BufferGeometry, base: THREE.MeshLambertMaterial, mats: Float32Array, tints: Float32Array): void => {
-      const idx = listIdx++;
-      const count = mats.length / 16;
-      counts[idx] = count;
-      if (count === 0) return;
-      const nFull = old ? Math.min(old.counts[idx] ?? count, count) : 0;
-      const emit = (i0: number, n: number, u: { value: number }): void => {
-        if (n <= 0) return;
-        const mat = makeGrowMat(base, u);
-        const im = new THREE.InstancedMesh(geo, mat, n);
-        (im.instanceMatrix.array as Float32Array).set(mats.subarray(i0 * 16, (i0 + n) * 16));
-        im.instanceMatrix.needsUpdate = true;
-        if (tints.length > 0) {
-          im.instanceColor = new THREE.InstancedBufferAttribute(tints.slice(i0 * 3, (i0 + n) * 3), 3);
-        }
-        group.add(im);
-        disposables.push(mat, { dispose: () => im.dispose() });
-      };
-      emit(0, nFull, FULL_GROWN);
-      emit(nFull, count - nFull, morph.u);
+    // Scatter lists at a lower density are an exact prefix of the same lists
+    // at a higher one (per-category RNG streams, shorter loops): the level-1
+    // prefix and the level-2 suffix simply ride different grow bands, so a
+    // density change never moves, adds or removes a visible object.
+    // A fresh chunk landing INSIDE a grow band (boot, respawn, lag) eases
+    // its instances in with the terrain's arrival fade.
+    const hasInstances = p.scatter > 0 || p.towerMats.length + p.glassMats.length > 0;
+    const freshFade = !old && hasInstances && !onTime ? { value: 0 } : null;
+    const emit = (
+      geo: THREE.BufferGeometry, base: THREE.MeshLambertMaterial, kind: number, band: number,
+      mats: Float32Array, tints: Float32Array, i0: number, n: number,
+    ): void => {
+      if (n <= 0) return;
+      const mat = this.growMat(base, kind, band, freshFade);
+      const im = new THREE.InstancedMesh(geo, mat, n);
+      (im.instanceMatrix.array as Float32Array).set(mats.subarray(i0 * 16, (i0 + n) * 16));
+      im.instanceMatrix.needsUpdate = true;
+      if (tints.length > 0) {
+        im.instanceColor = new THREE.InstancedBufferAttribute(tints.slice(i0 * 3, (i0 + n) * 3), 3);
+      }
+      group.add(im);
+      if (freshFade) disposables.push(mat);
+      disposables.push({ dispose: () => im.dispose() });
     };
-    addInstances(this.treeGeo, this.treeMat, p.treeMats, p.treeTints);
-    addInstances(this.leafGeo, this.treeMat, p.leafMats, p.leafTints);
-    addInstances(this.rockGeo, this.treeMat, p.rockMats, p.rockTints);
-    addInstances(this.houseGeo, this.houseMat, p.houseMats, p.houseTints);
-    addInstances(this.towerGeo, this.towerMat, p.towerMats, p.towerTints);
-    addInstances(this.towerGeo, this.glassMat, p.glassMats, p.glassTints);
+    const lists: Array<[THREE.BufferGeometry, THREE.MeshLambertMaterial, number, Float32Array, Float32Array]> = [
+      [this.treeGeo, this.treeMat, 0, p.treeMats, p.treeTints],
+      [this.leafGeo, this.treeMat, 0, p.leafMats, p.leafTints],
+      [this.rockGeo, this.treeMat, 0, p.rockMats, p.rockTints],
+      [this.houseGeo, this.houseMat, 1, p.houseMats, p.houseTints],
+    ];
+    lists.forEach(([g, base, kind, mats, tints], li) => {
+      const count = mats.length / 16;
+      const n1 = Math.min(p.l1[li] ?? count, count);
+      emit(g, base, kind, 1, mats, tints, 0, n1);
+      emit(g, base, kind, 2, mats, tints, n1, count - n1);
+    });
+    emit(this.towerGeo, this.towerMat, 2, 0, p.towerMats, p.towerTints, 0, p.towerMats.length / 16);
+    emit(this.towerGeo, this.glassMat, 3, 0, p.glassMats, p.glassTints, 0, p.glassMats.length / 16);
 
     // night: red obstruction beacons on the tall towers (matrices are
     // composeYRot, so el[5] = height and el[12..14] = base position)
@@ -883,17 +1062,21 @@ export class TerrainManager {
       for (const arr of [p.towerMats, p.glassMats]) {
         for (let i = 0; i < arr.length; i += 16) {
           const sy = arr[i + 5];
-          if (sy > 150) tops.push(arr[i + 12], arr[i + 13] + sy + 3, arr[i + 14]);
+          if (sy > 150) tops.push(arr[i + 12], arr[i + 13] + sy + 3, arr[i + 14], sy + 3);
         }
       }
       if (tops.length > 0) {
-        const bm = new THREE.InstancedMesh(this.beaconGeo, this.beaconMat, tops.length / 3);
+        const nB = tops.length / 4;
+        const bm = new THREE.InstancedMesh(this.beaconGeo, this.beaconMat, nB);
         const bmm = new THREE.Matrix4();
-        for (let i = 0; i < tops.length / 3; i++) {
-          bmm.makeTranslation(tops[i * 3], tops[i * 3 + 1], tops[i * 3 + 2]);
+        const heights = new Float32Array(nB * 3);
+        for (let i = 0; i < nB; i++) {
+          bmm.makeTranslation(tops[i * 4], tops[i * 4 + 1], tops[i * 4 + 2]);
           bm.setMatrixAt(i, bmm);
+          heights[i * 3] = tops[i * 4 + 3];
         }
         bm.instanceMatrix.needsUpdate = true;
+        bm.instanceColor = new THREE.InstancedBufferAttribute(heights, 3);
         group.add(bm);
         disposables.push({ dispose: () => bm.dispose() });
       }
@@ -901,16 +1084,11 @@ export class TerrainManager {
 
     group.visible = !this.shellOnly;
     this.scene.add(group);
-    this.chunks.set(key, {
-      key, cx: p.cx, cz: p.cz, res: p.res, scatter: p.scatter, counts, group, disposables, morph,
-    });
-    this.farHoleDirty = true; // coverage grew — widen the shell hole when idle
-
-    // if this was a capped first build, queue the full-strength upgrade
-    const want = this.resForRing(ring);
-    const wantS = this.scatterForRing(ring);
-    if (p.res < want || p.scatter < wantS) {
-      this.queue.push({ cx: p.cx, cz: p.cz, res: want, priority: ring * ring });
-    }
+    const chunk: Chunk = {
+      key, cx: p.cx, cz: p.cz, level, scatter: p.scatter, group, disposables,
+      fade, fadeT: start < 0 ? 1 : 0, gFade: freshFade,
+    };
+    this.chunks.set(key, chunk);
+    if (chunk.fadeT < 1) this.fading.push(chunk);
   }
 }

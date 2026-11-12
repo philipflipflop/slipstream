@@ -236,6 +236,41 @@ export function airfieldWorld(
 export const RUNWAY_LENGTH = AIRPORTS[0].length;
 export const RUNWAY_WIDTH = AIRPORTS[0].width;
 
+/**
+ * Approach surfaces — the obstacle-limitation rule every real airport is
+ * built to. Off each runway end a plane rises at 2.0° (the ILS glide path
+ * is 3.0°, its low full-scale needle 2.3°): terrain is squashed under it
+ * and nothing scattered may stand through it, inside a corridor that
+ * splays with distance and climbs away at 1:2 beyond its edges. Without
+ * it a procedural world happily parks a 400 m hill on a 3° final —
+ * Meridian's own runway 36L had one 98 m ABOVE the glide path, 5 km out.
+ * Corridor length scales with the traffic the field takes.
+ */
+const APP_SLOPE = 0.035;
+/** terrain keeps up to this much relief above the surface (soft squash) */
+const APP_RELIEF = 8;
+/** trees / buildings may top out this far above the surface */
+const APP_OBSTACLE = 10;
+const approachLen = (ap: AirfieldDef): number => (ap.intl ? 12000 : ap.major ? 7000 : 5000);
+
+/** Approach-surface height over a point given relative to the field centre
+ *  (Infinity outside both corridors). */
+function approachSurface(ap: AirfieldDef, dax: number, daz: number): number {
+  const along = dax * ap.sinH - daz * ap.cosH;
+  const d = Math.abs(along) - ap.length * 0.5;
+  const len = approachLen(ap);
+  if (d <= 0 || d >= len + 800) return Infinity;
+  // parallel pairs share one corridor spanning both centrelines
+  const across = Math.abs(dax * ap.cosH + daz * ap.sinH) - (ap.rwySep ? ap.rwySep * 0.5 : 0);
+  const w = 200 + d * 0.05;
+  let s = ap.elev + d * APP_SLOPE;
+  if (across > w) s += (across - w) * 0.5;
+  // past the protected length the surface climbs steeply away: the far end
+  // is a ramp, not a headwall
+  if (d > len) s += (d - len) * 1.2;
+  return s;
+}
+
 /** Procedural airfield grid: one candidate per CELL×CELL region. */
 const CELL = 12000;
 const cellKey = (cx: number, cz: number) => (cx + 8192) * 16384 + (cz + 8192);
@@ -432,10 +467,38 @@ export class WorldGen {
     return m;
   }
 
+  /** Lowest approach surface over (x, z) across the gathered fields. */
+  private surfaceAt(x: number, z: number, n: number): number {
+    let s = Infinity;
+    for (let i = 0; i < n; i++) {
+      const ap = this.scratch[i];
+      const dax = x - ap.x;
+      const daz = z - ap.z;
+      const reach = ap.length * 0.5 + approachLen(ap) + 3200;
+      if (Math.abs(dax) > reach || Math.abs(daz) > reach) continue;
+      const v = approachSurface(ap, dax, daz);
+      if (v < s) s = v;
+    }
+    return s;
+  }
+
+  /**
+   * Highest a tree, rock or building may reach at (x, z) without standing
+   * in a runway's approach path (Infinity away from every corridor).
+   * buildScatter consults this — so rendering AND collision respect it.
+   */
+  approachLimitAt(x: number, z: number): number {
+    return this.surfaceAt(x, z, this.gatherFields(x, z)) + APP_OBSTACLE;
+  }
+
   /** Terrain elevation in metres at world (x, z), runways flattened in. */
   heightAt(x: number, z: number): number {
     let e = this.baseHeightAt(x, z);
     const n = this.gatherFields(x, z);
+    // approach surfaces first (flattening below then wins on any overlap):
+    // ground standing through one is squashed to a few metres of relief
+    const cap = this.surfaceAt(x, z, n);
+    if (e > cap) e = cap + APP_RELIEF * (1 - Math.exp(-(e - cap) / APP_RELIEF));
     for (let i = 0; i < n; i++) {
       const ap = this.scratch[i];
       const dax = x - ap.x;

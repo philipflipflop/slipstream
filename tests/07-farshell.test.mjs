@@ -4,7 +4,7 @@
 // coarser LOD exactly and sit below the true terrain when rising from shell.
 import assert from 'node:assert/strict';
 import { WorldGen } from '../.test-build/world/heightfield.js';
-import { buildFarPayload, buildChunkPayload } from '../.test-build/world/terrainBuilder.js';
+import { buildFarPayload, buildChunkPayload, shellVertexHeight } from '../.test-build/world/terrainBuilder.js';
 
 const gen = new WorldGen();
 const cells = 64;
@@ -147,12 +147,14 @@ const fresh = buildChunkPayload(gen, 3, 2, 14, 0, 0, cellSize);
       const wx = 3 * 900 + fresh.positions[v * 3];
       const wz = 2 * 900 + fresh.positions[v * 3 + 2];
       if (wx % cellSize === 0 && wz % cellSize === 0) {
-        // dry land never morphs up through the water sheet: near the
-        // waterline the start is clamped just above it (0.7 from the chunk
-        // clamp, or shell clamp 1.3 + the 0.5 non-coplanar lift = 1.8)
-        const nearWater = fresh.baseY[v] <= 1.81 && fresh.baseY[v] > 0;
-        assert.ok(fresh.baseY[v] <= y - 5.4 || nearWater,
-          `lattice vertex ${i},${j}: baseY ${fresh.baseY[v]} vs y ${y}`);
+        // the collapsed surface is the shell EXACTLY (+0.5 m so it is never
+        // coplanar) — no waterline clamp: the distance blend needs the true
+        // parent look or the hand-over to the shell would show
+        const shell = shellVertexHeight(gen, wx / cellSize, wz / cellSize, cellSize);
+        assert.ok(Math.abs(fresh.baseY[v] - (shell + 0.5)) < 1e-3,
+          `lattice vertex ${i},${j}: baseY ${fresh.baseY[v]} vs shell ${shell}`);
+        assert.ok(fresh.baseY[v] <= y - 0.7,
+          `lattice vertex ${i},${j}: collapsed surface above terrain (${fresh.baseY[v]} vs ${y})`);
         onLattice++;
       }
       // loose sanity bound only — in steep terrain the envelope legitimately

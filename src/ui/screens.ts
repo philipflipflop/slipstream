@@ -6,7 +6,7 @@
 import { CATALOG } from '../aircraft/catalog';
 import { WORLDS, WorldTheme } from '../world/heightfield';
 import { DAYLIGHTS, TimeOfDay } from '../world/daylight';
-import type { SaveData, Quality } from '../save';
+import type { SaveData, Quality, GameMode } from '../save';
 import { formatTime } from '../core/math';
 
 export interface DebriefStats {
@@ -14,6 +14,21 @@ export interface DebriefStats {
   distanceKm: number;
   maxAltFt: number;
   maxSpdKt: number;
+}
+
+/** A graded landing, pre-digested for the debrief panel. */
+export interface LandingReport {
+  runway: string;        // "36L · MERIDIAN INTL"
+  score: number;         // 0..100 (0 with grade "—" = never made the runway)
+  grade: string;
+  verdict: string;
+  fpm: number;
+  cross: number;         // m, + = right of the centreline
+  past: number;          // m beyond the threshold
+  aim: number;           // m, centre of the touchdown zone
+  wind: string;          // "090° / 12 KT" or "CALM"
+  best: number | null;
+  isRecord: boolean;
 }
 
 type ScreenName = 'menu' | 'pause' | 'crash' | 'victory' | null;
@@ -25,13 +40,15 @@ export class Screens {
   onRestart: () => void = () => {};
   onHangar: () => void = () => {};
   onAircraft: (id: string) => void = () => {};
-  onMode: (mode: 'free' | 'race') => void = () => {};
+  onMode: (mode: GameMode) => void = () => {};
   onWorld: (world: WorldTheme) => void = () => {};
   onTod: (tod: TimeOfDay) => void = () => {};
   onSettings: () => void = () => {};
   onAnyClick: () => void = () => {};
   /** kind: 'hdg' | 'alt' | 'spd' | 'vs'; dir: -1 | 1 */
   onApAdjust: (kind: 'hdg' | 'alt' | 'spd' | 'vs', dir: number) => void = () => {};
+  /** the APPR button on the autopilot panel */
+  onApproach: () => void = () => {};
 
   private save: SaveData;
   private menuEl!: HTMLDivElement;
@@ -45,6 +62,7 @@ export class Screens {
   private rotateHint!: HTMLDivElement;
   private apPanel!: HTMLDivElement;
   private apVals!: { hdg: HTMLElement; alt: HTMLElement; spd: HTMLElement; vs: HTMLElement };
+  private apApprBtn!: HTMLButtonElement;
   private toastTimer = 0;
   private isTouch: boolean;
 
@@ -132,6 +150,10 @@ export class Screens {
                   <div class="mc-name">Ring Rush</div>
                   <div class="mc-desc">14 gates against the clock</div>
                 </button>
+                <button class="mode-chip" data-mode="approach">
+                  <div class="mc-name">Final Approach</div>
+                  <div class="mc-desc">Start on final. Land it, get graded</div>
+                </button>
               </div>
               <div class="world-row"></div>
               <div class="tod-row"></div>
@@ -162,7 +184,7 @@ export class Screens {
     m.querySelector('.settings-btn')!.addEventListener('click', () => this.settingsEl.classList.add('on'));
     m.querySelectorAll<HTMLButtonElement>('.mode-chip').forEach((chip) => {
       chip.addEventListener('click', () => {
-        this.save.mode = chip.dataset.mode as 'free' | 'race';
+        this.save.mode = chip.dataset.mode as GameMode;
         this.onMode(this.save.mode);
         this.refreshMenu();
       });
@@ -251,12 +273,19 @@ export class Screens {
     });
 
     const best = this.save.bestTimes[spec.id];
+    const bestLdg = this.save.bestLandings[spec.id];
     m.querySelector('.best-time')!.innerHTML =
       this.save.mode === 'race'
         ? best
           ? `RING RUSH BEST — <b>${formatTime(best)}</b>`
           : 'RING RUSH — no time set in this aircraft'
-        : '';
+        : this.save.mode === 'approach'
+          ? bestLdg !== undefined
+            ? `BEST LANDING — <b>${bestLdg} / 100</b>`
+            : 'FINAL APPROACH — no landing graded in this aircraft'
+          : bestLdg !== undefined
+            ? `BEST LANDING — <b>${bestLdg} / 100</b> · ${this.save.landings} logged`
+            : '';
 
     m.querySelectorAll('.hangar-dots i').forEach((dot, i) => {
       dot.classList.toggle('on', CATALOG[i].id === spec.id);
@@ -336,8 +365,9 @@ export class Screens {
       <div class="screen">
         <div class="veil"></div>
         <div class="panel victory">
-          <div class="kicker">course complete</div>
-          <h2>ALL GATES CLEARED</h2>
+          <div class="kicker v-kicker">course complete</div>
+          <h2 class="v-title">ALL GATES CLEARED</h2>
+          <p class="v-note"></p>
           <div class="stats-slot"></div>
           <div class="row">
             <button class="btn primary restart">Run It Again</button>
@@ -355,6 +385,37 @@ export class Screens {
     const extra = `
       <div class="cell"><div class="k">Time</div><div class="v green">${formatTime(time)}</div></div>
       <div class="cell"><div class="k">${isRecord ? 'New record!' : 'Best'}</div><div class="v">${formatTime(best)}</div></div>`;
+    this.victoryEl.querySelector('.v-kicker')!.textContent = 'course complete';
+    this.victoryEl.querySelector('.v-title')!.textContent = 'ALL GATES CLEARED';
+    this.victoryEl.querySelector('.v-note')!.textContent = '';
+    this.victoryEl.querySelector('.restart')!.textContent = 'Run It Again';
+    this.victoryEl.querySelector('.stats-slot')!.innerHTML = this.debriefHtml(stats, extra);
+    this.show('victory');
+  }
+
+  /** Final Approach debrief: the grade, and which third of it to fix. */
+  showLanding(r: LandingReport, stats: DebriefStats): void {
+    const made = r.grade !== '—';
+    const side = Math.abs(r.cross) < 0.5 ? 'ON THE LINE' : `${Math.abs(r.cross).toFixed(1)} m ${r.cross > 0 ? 'RIGHT' : 'LEFT'}`;
+    const zone = r.past - r.aim;
+    const zoneTxt = Math.abs(zone) < 60 ? 'IN THE ZONE' : `${Math.abs(zone).toFixed(0)} m ${zone > 0 ? 'LONG' : 'SHORT'}`;
+    const extra = made
+      ? `
+      <div class="cell"><div class="k">Grade</div><div class="v green">${r.grade} · ${r.score}</div></div>
+      <div class="cell"><div class="k">${r.isRecord ? 'New best!' : 'Best'}</div><div class="v">${r.best ?? r.score}</div></div>
+      <div class="cell"><div class="k">Touchdown</div><div class="v">${Math.round(r.fpm)} fpm</div></div>
+      <div class="cell"><div class="k">Centreline</div><div class="v">${side}</div></div>
+      <div class="cell"><div class="k">Touchdown zone</div><div class="v">${zoneTxt}</div></div>
+      <div class="cell"><div class="k">Wind</div><div class="v">${r.wind}</div></div>`
+      : `
+      <div class="cell"><div class="k">Grade</div><div class="v">—</div></div>
+      <div class="cell"><div class="k">Wind</div><div class="v">${r.wind}</div></div>`;
+    this.victoryEl.querySelector('.v-kicker')!.textContent = made ? `landed · runway ${r.runway}` : 'down, but not on the runway';
+    this.victoryEl.querySelector('.v-title')!.textContent = made ? r.verdict : 'OFF-FIELD ARRIVAL';
+    this.victoryEl.querySelector('.v-note')!.textContent = made
+      ? 'Scored on sink rate (40), centreline (30) and touchdown zone (30).'
+      : 'Fly the diamonds down to the threshold — the grade needs wheels on the runway.';
+    this.victoryEl.querySelector('.restart')!.textContent = 'Fly It Again';
     this.victoryEl.querySelector('.stats-slot')!.innerHTML = this.debriefHtml(stats, extra);
     this.show('victory');
   }
@@ -368,6 +429,7 @@ export class Screens {
       <div class="krow"><span>Rudder</span><kbd>RUD pedals</kbd></div>
       <div class="krow"><span>Brakes / fire cannon (airborne)</span><kbd>BRAKE (hold)</kbd></div>
       <div class="krow"><span>Gear / flaps / camera / AP</span><kbd>top buttons</kbd></div>
+      <div class="krow"><span>ILS approach / autoland</span><kbd>APPR on the AP panel</kbd></div>
       <div class="krow"><span>Flight computer (chart)</span><kbd>NAV</kbd></div>
       <div class="krow"><span>Pause</span><kbd>⏸ top right</kbd></div>`;
     const keyRows = `
@@ -383,6 +445,7 @@ export class Screens {
       <div class="krow"><span>Engine cut / relight (helicopter)</span><kbd>X</kbd></div>
       <div class="krow"><span>ILS receiver auto/off</span><kbd>I</kbd></div>
       <div class="krow"><span>Autopilot / hover hold</span><kbd>T</kbd></div>
+      <div class="krow"><span>Autopilot approach — ILS autoland</span><kbd>L</kbd></div>
       <div class="krow"><span>AP heading bug</span><kbd>[ / ]</kbd></div>
       <div class="krow"><span>AP altitude bug</span><kbd>PgUp / PgDn</kbd></div>
       <div class="krow"><span>AP speed bug</span><kbd>Home / End</kbd></div>
@@ -402,6 +465,17 @@ export class Screens {
           <div class="kicker">flight manual</div>
           <h2>CONTROLS</h2>
           <div class="keys">${this.isTouch ? touchRows + keyRows : keyRows}</div>
+          <div class="kicker" style="margin-top:6px">gamepad</div>
+          <div class="keys">
+            <div class="krow"><span>Pitch & roll / rudder</span><kbd>left stick / right stick</kbd></div>
+            <div class="krow"><span>Throttle up / down</span><kbd>RT / LT</kbd></div>
+            <div class="krow"><span>Brakes · cannon / speed brake</span><kbd>A / B</kbd></div>
+            <div class="krow"><span>Gear / camera</span><kbd>Y / X</kbd></div>
+            <div class="krow"><span>Flaps up / down</span><kbd>LB / RB</kbd></div>
+            <div class="krow"><span>Autopilot / APPR</span><kbd>D-pad ▲ / ▼</kbd></div>
+            <div class="krow"><span>HUD / nav chart</span><kbd>D-pad ◀ / ▶</kbd></div>
+            <div class="krow"><span>Pause / minimap</span><kbd>Start / Back</kbd></div>
+          </div>
           <p style="color:var(--fog);font-size:12.5px;line-height:1.5">
             Pick a time of day in the hangar — at night the runway edge lights and the
             four PAPI boxes beside the threshold guide you home (two white two red =
@@ -413,6 +487,13 @@ export class Screens {
             toward the cyan diamonds (localizer below the horizon, glideslope on the
             right); they turn green when you're on the beam. <kbd>I</kbd> switches the
             receiver off/auto.
+            With an ILS tuned, <kbd>L</kbd> (or <b>APPR</b> on the autopilot panel) couples the
+            autopilot to it: it captures the localizer, rides the glideslope at the right
+            speed for your flap setting, flares, lands and brakes to a stop — you manage
+            gear and flaps. Touch the stick and the aircraft is yours again.
+            Every runway landing is graded on sink rate, centreline and touchdown zone;
+            <b>Final Approach</b> mode starts you on final with a fresh wind each time.
+            The gear lever is locked on the ground — and landing with it up ends the flight.
             Flying 101: full throttle, let speed build past the white arc, then ease back.
             Keep the nose where the speed stays healthy — if <b style="color:var(--danger)">STALL</b> flashes,
             push forward and add power. Land into the runway slow, flaps down, gentle sink.
@@ -524,10 +605,17 @@ export class Screens {
     }
   }
 
+  /** APPR button state: lit while coupled, labelled with the phase. */
+  setApAppr(available: boolean, active: boolean, label: string): void {
+    this.apApprBtn.style.display = available ? '' : 'none';
+    this.apApprBtn.classList.toggle('on', active);
+    if (this.apApprBtn.textContent !== label) this.apApprBtn.textContent = label;
+  }
+
   private buildApPanel(): void {
     this.apPanel = this.el(`
       <div id="appanel">
-        <div class="ap-title">AUTOPILOT</div>
+        <div class="ap-head"><span class="ap-title">AUTOPILOT</span><button class="ap-appr">APPR</button></div>
         <div class="ap-row" data-k="hdg">
           <span class="ap-lbl">HDG</span><button data-d="-1">−</button>
           <span class="ap-val" data-v="hdg">000°</span><button data-d="1">+</button>
@@ -554,7 +642,12 @@ export class Screens {
     };
 
     // press = one tick; hold = auto-repeat, like a real AP bug knob
-    this.apPanel.querySelectorAll<HTMLButtonElement>('button').forEach((b) => {
+    this.apApprBtn = this.apPanel.querySelector('.ap-appr')!;
+    this.apApprBtn.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      this.onApproach();
+    });
+    this.apPanel.querySelectorAll<HTMLButtonElement>('.ap-row[data-k] button').forEach((b) => {
       const kind = (b.parentElement as HTMLElement).dataset.k as 'hdg' | 'alt' | 'spd' | 'vs';
       const dir = Number(b.dataset.d);
       let timer = 0;

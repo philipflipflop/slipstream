@@ -22,6 +22,10 @@ export interface HudData {
   brakes: boolean;
   airbrake: boolean;
   autopilot: boolean;
+  /** autopilot annunciation ("AP", "AP · LOC", "AP · G/S", "FLARE", …) */
+  apMode: string;
+  /** master warning text (terrain / gear / overspeed), null when quiet */
+  warn: string | null;
   stalled: boolean;
   afterburner: boolean;
   vne: number;        // m/s
@@ -97,6 +101,7 @@ export class Hud {
     this.canvas.height = Math.floor(this.h * this.dpr);
     this.canvas.style.width = `${this.w}px`;
     this.canvas.style.height = `${this.h}px`;
+    this.safeTopPx = -1;
   }
 
   clear(): void {
@@ -131,7 +136,11 @@ export class Hud {
 
     const full = this.mode === 'full';
     if (full) this.attitude(d, cx, cy, s);
-    this.speedTape(d, compact ? 10 : w * 0.13, cy, s, compact, full);
+    // on short screens (phones in landscape) the autopilot panel sits where
+    // the speed readout is — slide the tape out from under it while it shows
+    const tapeX = compact ? 10 : w * 0.13;
+    const apClear = d.autopilot && h < 640 && !compact ? 220 + this.safeLeft() : 0;
+    this.speedTape(d, Math.max(tapeX, apClear), cy, s, compact, full);
     this.altTape(d, compact ? w - 10 : w * 0.87, cy, s, compact, full);
     if (full) this.headingRibbon(d, cx, (compact ? 46 : 30) + this.safeTop(), s, compact);
     this.annunciators(d, cx, cy, s, false);
@@ -269,10 +278,24 @@ export class Hud {
     ctx.fillText(`TGT ${gun.hits}/${gun.targets}`, cx + 60 * s, cy + 214 * s);
   }
 
+  /** Safe-area inset (CSS --sat), read once per resize rather than forcing
+   *  a style resolve several times every frame. */
+  private safeTopPx = -1;
+  private safeLeftPx = 0;
+  private readSafe(): void {
+    const cs = getComputedStyle(document.documentElement);
+    const t = parseFloat(cs.getPropertyValue('--sat'));
+    const l = parseFloat(cs.getPropertyValue('--sal'));
+    this.safeTopPx = Number.isFinite(t) ? t : 0;
+    this.safeLeftPx = Number.isFinite(l) ? l : 0;
+  }
   private safeTop(): number {
-    const v = getComputedStyle(document.documentElement).getPropertyValue('--sat');
-    const n = parseFloat(v);
-    return Number.isFinite(n) ? n : 0;
+    if (this.safeTopPx < 0) this.readSafe();
+    return this.safeTopPx;
+  }
+  private safeLeft(): number {
+    if (this.safeTopPx < 0) this.readSafe();
+    return this.safeLeftPx;
   }
 
   private g(alpha: number): string { return `rgba(${PHOS}, ${alpha})`; }
@@ -559,7 +582,7 @@ export class Hud {
     if (!safetyOnly) {
       const items: Array<[string, string]> = [];
       if (d.heli?.engineOut) items.push(['ENG OUT', `rgba(${RED},0.95)`]);
-      if (d.autopilot) items.push(['AP', `rgba(${AMBER},0.95)`]);
+      if (d.autopilot) items.push([d.apMode || 'AP', `rgba(${AMBER},0.95)`]);
       if (d.retractable) items.push(d.gearDown ? ['GEAR ▼', this.g(0.9)] : ['GEAR ▲', this.g(0.45)]);
       if (d.flaps > 0.01) items.push([`FLAPS ${Math.round(d.flaps * 3)}`, this.g(0.9)]);
       if (d.airbrake) items.push(['SPD BRK', `rgba(${AMBER},0.95)`]);
@@ -575,6 +598,14 @@ export class Hud {
       ctx.fillStyle = `rgba(${RED},0.95)`;
       ctx.font = `700 ${Math.round(24 * s)}px 'Chakra Petch', monospace`;
       ctx.fillText('STALL', cx, cy - 110 * s);
+      ctx.font = `600 ${Math.round(13 * s)}px 'Chakra Petch', monospace`;
+    }
+
+    // master warning — shown in every HUD mode, yields to the stall flash
+    if (d.warn && !d.stalled && Math.sin(this.time * 16) > -0.35) {
+      ctx.fillStyle = `rgba(${RED},0.95)`;
+      ctx.font = `700 ${Math.round(22 * s)}px 'Chakra Petch', monospace`;
+      ctx.fillText(d.warn, cx, cy - 110 * s);
       ctx.font = `600 ${Math.round(13 * s)}px 'Chakra Petch', monospace`;
     }
 

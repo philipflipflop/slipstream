@@ -89,6 +89,7 @@ times are comparable; `?wind=hdg,kt` forces a specific wind.
 | Minimap on/off | `M` |
 | Nav chart / flight computer | `N` (zoom `,` `.`) |
 | ILS receiver auto / off | `I` |
+| Autopilot **approach** — ILS-coupled autoland | `L` (or APPR on the autopilot panel) |
 | Pause | `Esc` or `P` |
 | Restart flight | `R` |
 
@@ -141,6 +142,39 @@ thrust model) — the handling differences fall out of the numbers, not scripts.
   read per-leg true headings, distances and ETE, then ENGAGE NAV and the autopilot
   flies the plan, sequencing each fix.
 - **Ring Rush** — 14 gates against the clock. Best time per aircraft is saved locally.
+- **Final Approach** — you start airborne on final to one of the home runways, a few
+  kilometres out, slightly off the centreline and the glide path, with a fresh head- or
+  crosswind every time. Land it and stop: the debrief grades the touchdown out of 100 —
+  **sink rate** (40), **centreline** (30) and **touchdown zone** (30) — and tells you which
+  third to fix. Best score per aircraft is saved.
+
+Every runway landing is graded the same way in Free Flight too (a toast calls the grade,
+the touchdown rate in fpm, how far off the line and how far in), and the hangar keeps
+your best.
+
+### Autoland
+
+With an ILS tuned, press `L` (or **APPR** on the autopilot panel) and the autopilot
+couples to it: it intercepts and tracks the localizer on ground track — so the crab into
+a crosswind simply emerges — holds altitude until the glide path comes down to meet it,
+rides the 3° path at the reference speed for whatever flap you have set, flares off the
+radio altimeter, closes the throttles, and holds the centreline on the rollout with the
+autobrake on. You manage gear and flaps; touch the stick and the aircraft is yours.
+It works in every fixed-wing aircraft, from the Skylark to the A320.
+
+### Warnings
+
+A master warning watches the flight path: **PULL UP** when it meets terrain (or the sea)
+within about eight seconds, **TOO LOW — GEAR** when you are low, slow and descending with
+the wheels up, **OVERSPEED** past VNE. The landing gear is real, too: the lever is locked
+by a squat switch on the ground, and touching down with it retracted ends the flight.
+
+### Gamepad
+
+Plug in a controller and fly: left stick pitch/roll, right stick rudder, **RT/LT** throttle
+(analog — it stays where you leave it), **A** brakes/cannon, **B** speed brake, **Y** gear,
+**X** camera, **LB/RB** flaps, D-pad ▲ autopilot, ▼ APPR, ◀ HUD, ▶ nav chart, **Start** pause.
+Flight sticks with a non-standard layout get stick + trigger.
 
 The sky and the ramps are alive: **NPC aircraft** park nose-in on the
 international terminal stands and on regional aprons and strip edges (never
@@ -158,13 +192,22 @@ themselves.
   deterministic placement lists the renderer instances, so you can't fly through a
   skyscraper (cannon rounds stop on them too). Chunk generation runs in a
   **Web Worker** — payloads arrive as transferable typed arrays, so the main thread never
-  hitches while streaming nested-LOD chunks around the aircraft. Every LOD swap
-  **geomorphs**: a chunk's vertices start on the exact surface they replace (the coarser
-  chunk, or the horizon shell) and swell to full detail over a second — shape *and*
-  colour, so arriving terrain sharpens rather than pops. Beneath the chunk ring a
-  single coarse **horizon shell** (~60 km of the same heightfield, built as a conservative
-  lower envelope) carries the terrain to the horizon; the fog opens up with altitude, so
-  from 10,000 ft you see fading coastlines instead of the edge of the streamed grid.
+  hitches while streaming chunks around the aircraft.
+- **Level of detail is a function of distance, not time.** Chunks come at four nested
+  resolutions over one coarse **horizon shell** (~60–80 km of the same heightfield). Every
+  chunk carries its *parent* level's look — heights, colours and normals sampled on the
+  coarser lattice — and the vertex shader blends parent → own by each vertex's distance,
+  inside a per-level band. Mesh swaps (up *and* down a level) are scheduled in the dead
+  zones between bands, where the two meshes involved render the identical surface, so a
+  swap changes no pixel; trees and buildings ride distance bands the same way. In steady
+  flight nothing animates: terrain simply carries more detail the closer it is, and the
+  detail horizon travels with you. (Earlier builds animated each change over time —
+  however exact the start frame, an arc of tiles sharpening together is an event the eye
+  catches. The policy lives in `src/world/lod.ts` with a simulated-flight test that checks
+  every swap, arrival and removal is pixel-identical.)
+- **Airports have real approach surfaces.** Off every runway end a 2° obstacle-limitation
+  plane keeps terrain, trees and city towers out from under the 3° glide path — as at any
+  real airport — so every ILS in the procedural world is actually flyable.
 - **Flight model**: real force integration — CL(α) curve with post-stall falloff, induced
   drag from aspect ratio, sideslip weathervaning, control authority scaling with dynamic
   pressure, air density falling with altitude, ground roll with brakes/steering and crash
@@ -192,7 +235,10 @@ themselves.
 - `&world=mesa` — select the map (`archipelago`, `mesa`, `metro`)
 - `&hdg=302` — point the takeoff at a given true heading
 - `&nav=1` — open the planning chart after the fast-forward
-- `&morphhold=1` — freeze terrain chunks at their geomorph start (LOD-transition debugging)
+- `&mode=approach` — start in Final Approach (with `autofly=1` the autopilot flies the ILS to an autoland)
+- `&q=low` — graphics quality (`low`, `medium`, `high`)
+- `&lodtint=1` — tint terrain by LOD level, darkened by how far each vertex is blended toward its parent (the distance bands show as rings)
+- `&lodlog=1` — log any LOD swap that was not between identical surfaces
 
 ## Deploying
 

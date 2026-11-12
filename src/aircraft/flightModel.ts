@@ -265,7 +265,13 @@ export function stepFlight(
     // for the same reason): full trim + ground effect floats the flare
     // forever, and a landing should end with a landing
     trimTarget *= clamp(agl / 30, 0.3, 1);
-    if (st.onGround || V < 30) trimTarget = 0;
+    // (below flying speed — scaled to the airframe: a flat 30 m/s floor sat
+    // ABOVE the trainer's whole approach, so the Skylark and Islander lost
+    // their trim on final and nosed over unless held up by hand)
+    const vTrimMin = Math.min(30, 0.85 * Math.sqrt(
+      (2 * spec.mass * GRAV) / (1.225 * S * (spec.cl0 + spec.clSlope * spec.stallAoA)),
+    ));
+    if (st.onGround || V < vTrimMin) trimTarget = 0;
     const trimRate = spec.fbw ? 2.5 : 0.5; // 1/s
     st.trimAoA += (trimTarget - st.trimAoA) * Math.min(1, trimRate * dt);
   }
@@ -330,6 +336,12 @@ export function stepFlight(
     const badAttitude = _up.y < 0.7 || _euler.x < -0.45;
     if (onWater) {
       crash(st, V > 30 ? 'HIT THE WATER AT SPEED' : 'DITCHED IN THE SEA');
+      return;
+    }
+    // the wheels are either down or they are not: touching down on a
+    // retracted undercarriage writes the airframe off
+    if (spec.retractableGear && !inp.gearDown) {
+      crash(st, 'GEAR-UP LANDING — THE WHEELS WERE STILL IN THE WELLS');
       return;
     }
     if (sinkRate > 9) {
@@ -660,6 +672,106 @@ export function crash(st: FlightState, reason: string): void {
   st.crashReason = reason;
   st.vel.multiplyScalar(0.1);
   st.angVel.set(0, 0, 0);
+}
+
+/** 1g stall speed (m/s, sea level) at a flap setting 0..1. */
+export function stallSpeed(spec: AircraftSpec, flaps: number): number {
+  const clMax = spec.cl0 + spec.clSlope * spec.stallAoA + spec.flapsCl * flaps;
+  return Math.sqrt((2 * spec.mass * GRAV) / (1.225 * spec.wingArea * clMax));
+}
+
+/** Reference approach speed: 1.3 × the stall speed in the configuration. */
+export function approachSpeed(spec: AircraftSpec, flaps: number): number {
+  return stallSpeed(spec, flaps) * 1.3;
+}
+
+/** A runway end to fly to (structurally an IlsApproach — kept local so the
+ *  flight model stays free of nav imports). */
+export interface ApproachTarget {
+  course: number;
+  thrX: number;
+  thrZ: number;
+  elev: number;
+}
+
+/**
+ * Put the aircraft on final: `distance` metres from the threshold, on the
+ * 3° glide path (plus `offAlt`), `offLat` metres right of the centreline,
+ * configured and TRIMMED for the approach — gear down, the given flap, at
+ * reference speed, crabbed into the current wind so the ground track runs
+ * down the centreline, engine spooled to the power the descent needs.
+ * Returns the control settings the caller should load into its inputs.
+ * Helicopters arrive level at 60 kt, 150 m above the field.
+ */
+export function spawnOnApproach(
+  spec: AircraftSpec,
+  st: FlightState,
+  app: ApproachTarget,
+  distance: number,
+  flaps = 2 / 3,
+  offLat = 0,
+  offAlt = 0,
+): { throttle: number; flaps: number; speed: number } {
+  const dirX = Math.sin(app.course);
+  const dirZ = -Math.cos(app.course);
+  const heli = spec.engine === 'heli';
+  const gamma = heli ? 0 : -3 * Math.PI / 180;
+  if (heli || spec.flapsCl <= 0) flaps = 0;
+  const V = heli ? 31 : approachSpeed(spec, flaps);
+
+  const x = app.thrX - dirX * distance - dirZ * offLat;
+  const z = app.thrZ - dirZ * distance + dirX * offLat;
+  // glide path from the station 300 m inside the threshold (2.5 m mast)
+  const y = heli
+    ? app.elev + 150 + offAlt
+    : app.elev + 2.5 + Math.tan(-gamma) * (distance + 300) + offAlt;
+  st.pos.set(x, y, z);
+
+  // air velocity that makes the GROUND track follow the course in this wind
+  const horiz = V * Math.cos(gamma);
+  const wAlong = windX * dirX + windZ * dirZ;
+  const wSq = windX * windX + windZ * windZ;
+  const gs = wAlong + Math.sqrt(Math.max(horiz * horiz - wSq + wAlong * wAlong, 1));
+  const ax = gs * dirX - windX;
+  const az = gs * dirZ - windZ;
+  const hdg = Math.atan2(ax, -az);
+  st.vel.set(gs * dirX, V * Math.sin(gamma), gs * dirZ);
+
+  // trim: the alpha that carries the weight at this speed and flap
+  const rho = 1.225 * Math.exp(-Math.max(y, 0) / 8500);
+  const qbar = 0.5 * rho * V * V;
+  let alpha = 0;
+  let throttle = 0.62; // helicopter: just under hover collective at ETL
+  if (!heli) {
+    const clNeed = (spec.mass * GRAV * Math.cos(gamma)) / (qbar * spec.wingArea);
+    alpha = clamp(
+      (clNeed - spec.cl0 - spec.flapsCl * flaps) / spec.clSlope,
+      -0.35 * spec.stallAoA, 0.7 * spec.stallAoA,
+    );
+    const cd = spec.cd0 + (clNeed * clNeed) / (Math.PI * 0.72 * spec.aspect) +
+      spec.flapsCd * flaps + (spec.retractableGear ? spec.gearCd : 0);
+    const need = qbar * spec.wingArea * cd + spec.mass * GRAV * Math.sin(gamma);
+    const speedLoss = 1 - spec.propFalloff * clamp(V / spec.vne, 0, 1);
+    const altLoss = spec.engine === 'jet' ? 0.45 + 0.55 * (rho / 1.225) : 0.6 + 0.4 * (rho / 1.225);
+    throttle = clamp(need / (spec.maxThrust * speedLoss * altLoss), 0, 0.95);
+  }
+  st.quat.setFromEuler(new THREE.Euler(heli ? -0.06 : gamma + alpha, -hdg, 0, 'YXZ'));
+  st.angVel.set(0, 0, 0);
+  st.onGround = false;
+  st.crashed = false;
+  st.crashReason = '';
+  st.stalled = false;
+  st.gForce = 1;
+  st.spool = throttle;
+  st.gustT = 0;
+  st.trimAoA = alpha;
+  st.rotorRpm = 1;
+  st.vrs = 0;
+  st.airspeed = V;
+  st.heading = hdg;
+  st.pitchAngle = gamma + alpha;
+  st.rollAngle = 0;
+  return { throttle, flaps, speed: V };
 }
 
 /** Park the aircraft at the runway threshold, pointing down the strip.

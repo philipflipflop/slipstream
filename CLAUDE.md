@@ -63,36 +63,50 @@ Cloudflare builds with **npm 10.9.2**; local npm is 11. Two rules:
   vertex paint beneath it. Ground-plane z-stack: parallels E+0.04,
   connectors/RETs +0.048, stand pads +0.052, hold bars +0.055, runways
   +0.06 — planes in the same class must never overlap each other.
+- `src/world/lod.ts` — the terrain LOD POLICY, pure and fully tested
+  (tests/19). Detail is a function of DISTANCE, not time: each chunk level
+  (res 14/28/56/112) has a blend BAND, and swaps happen only in the dead
+  zones between bands, where the finer mesh is fully collapsed onto its
+  parent look (m = 0) and the coarser one is fully itself (m = 1) — so a
+  swap, an arrival and a removal each change no pixel. Thresholds are on
+  the chunk-CENTRE distance from the streaming centre; a transition at U
+  keeps the finer band inside U − R − MARGIN and the coarser band outside
+  U + HYST + R + MARGIN (R = chunk half-diagonal, 636 m). Consequences
+  when retuning `LOD_PRESETS`: consecutive thresholds need ≥ ~2.3 km
+  between them and the load radius ≥ ~3.2 km past `u28`, or a band
+  collapses (test 19 section 1 fails loudly). Reach varies SMOOTHLY with a
+  slew-limited AGL — never reintroduce altitude tiers: a tier flip moves
+  every threshold at once, mid-band. THE HISTORY: five rounds of making the
+  old timed geomorph more exact never removed the "pop", because arcs of
+  tiles sharpening together every 900 m of travel is a temporal event the
+  eye catches however exact the start frame is.
 - `src/world/terrainBuilder.ts` — pure payload builder (no three.js/DOM), runs in
-  `terrain.worker.ts` with a synchronous fallback. Chunk LODs nest (56/28/14) and
-  every payload carries `baseY` geomorph starts; the far horizon shell shares
-  `shellVertexHeight` so fresh chunks rise exactly off the rendered shell.
-  Payloads also carry `baseCols`/`baseNrms` colour- and normal-morph starts,
-  blended by the same `uMorph` in makeChunkMat: arriving tiles sharpen
-  gradually in shape, paint AND shading. THE RULE: a morph start must
-  reproduce EXACTLY what the replaced mesh rendered — sample colour/normal at
-  the REPLACED mesh's own lattice (its heights, its slopes, its texel) and
-  splitLerp between lattice points; re-evaluating the field at the fine
-  vertices (even at a coarse texel) starts the crossfade from an image that
-  was never on screen and the difference pops in the arrival frame. Verify
-  with `?morphhold=1` (freezes every chunk at morph start): a frozen frame
-  must show a seamless coarse landscape — any visible tile seam IS the pop.
-  `?shellonly=1` hides all chunks and skips the far-shell hole punch so the
-  shell alone can be photographed; both debug params call `forceFarBuild()`
-  after `ff` because virtual-time headless races the worker (the shell may
-  never build otherwise).
-- `src/world/terrain.ts` — streaming, LOD rings (quality-set `fineRing`/`midRing`
-  + high-altitude variants), geomorph animation, horizon shell management (shell
-  builds only when the chunk queue is idle — keep it that way). Morph rules:
-  NEVER rebuild a chunk whose morph is still running (`feed()` defers while
-  `existing.morph.t < 1`) — the replacement's morph start reproduces the old
-  mesh's FINAL surface, so a mid-morph swap snaps the unfinished fraction in
-  one frame (showed up after altitude-tier requeues at speed). Morph duration
-  scales with ring (`1.1 + min(ring, 26)·0.45`, ~12.7 s at the edge): the
-  envelope undershoots ridges between shell lattice points and the streaming
-  edge sits INSIDE fog visibility at altitude, so arrivals are watchable —
-  the fix is keeping the swell rate under ~1 px/s at tile distance, not more
-  exactness.
+  `terrain.worker.ts` with a synchronous fallback. Every payload carries its
+  PARENT look: `baseY` / `baseCols` / `baseNrms` sampled on the parent
+  level's own lattice (`prevRes = res / 2`; the far shell via
+  `shellVertexHeight` for res 14) and interpolated with the mesh's b–c
+  diagonal split. THE RULE: the parent look must reproduce EXACTLY what the
+  parent mesh renders — its heights, its slopes, its texel — with no
+  clamps or fix-ups (a waterline clamp used to live here; it made swaps
+  visible at coasts). Pinned bit-for-bit in tests/19 section 2 and tests/07.
+- `src/world/terrain.ts` — the streamer: scan → feed → finalize. `scan()`
+  re-plans the disc every 60 m of travel (or 6 m of AGL change): drops
+  chunks beyond the load radius ONLY once collapsed onto the shell, queues
+  one-level steps (`planStep` — never two levels: morph data only reaches
+  the parent), re-punches the shell hole. The vertex shader blends parent →
+  own per vertex: `tM = mix(uFade.x, 1 − smoothstep(band), uFade.y)` with
+  shared `uCenter`/`uBands` uniforms. `uFade` is an arrival time-fade that
+  only acts when a build lands LATE (inside a band) — on-time swaps skip it
+  entirely. Worker results refeed from `onmessage` and uploads are budgeted
+  by TIME, so throughput does not hang off the frame rate (it used to: at
+  20 fps the worker idled 90% of the time and streaming fell behind).
+  `stats` (swaps / late / fresh / lateFresh / dropped) is in the autofly
+  tab title as `lod=`; after the initial fill `late` must stop growing —
+  that is the in-browser proof swaps are seamless. Debug: `?lodtint=1`
+  (tint by level, darkened by collapse — bands show as rings),
+  `?lodlog=1` (console.warn each non-seamless swap), `?shellonly=1`.
+  Shell builds only when the chunk queue is idle (first build) — keep it
+  that way.
 - Distant furniture grows in: airports (airport.ts) and parked NPC rows
   (traffic.ts) built more than 8 km away rise out of the ground over ~6 s
   (smoothstep scale.y about FIELD ELEVATION — scaling about world 0 sinks
@@ -105,9 +119,14 @@ Cloudflare builds with **npm 10.9.2**; local npm is 11. Two rules:
   the renderer instances. Never place scatter outside `buildScatter`, or rendering
   and collision will disagree.
 - Scatter invariants: a lower scatter level's lists must stay an exact PREFIX of a
-  higher level's (same RNG stream, only loop bounds differ) and towers must be
-  identical at every level — chunk upgrades keep prefix instances full-size and
-  grow only the new suffix, so violating this reintroduces scatter pop-in.
+  higher level's and towers must be identical at every level. Each category
+  (trees / rocks / houses) has its OWN RNG stream for this — with one shared
+  stream, rocks and houses started from a different state after 90 vs 240
+  tree tries and re-rolled on every density change (614 of 625 mesa chunks;
+  a real pop at ~3 km). The payload's `l1` gives the level-1 prefix length
+  per list: the renderer puts prefix and suffix on different distance GROW
+  bands (shared materials per kind × band), so a density change never
+  moves, adds or removes a visible object. Pinned in tests/19 section 3.
 - Patterns painted into vertex colours must respect the `texel` param of
   `colorAt` (city street grid fades to its average tone when under-sampled) —
   otherwise coarse LODs and the far shell alias into shimmering moiré.
@@ -124,12 +143,15 @@ Cloudflare builds with **npm 10.9.2**; local npm is 11. Two rules:
   `st.trimAoA` — the 1g trim AoA for current speed/flaps (fbw airframes
   retrim at 2.5/s like the A320's normal law, others at trim-wheel 0.5/s).
   Trim washes out with bank (past ~40°) and inside 30 m AGL (so flares end
-  in landings), parks at 0 on the ground. Without it, low-G transports
-  burn ~¾ of their G-limit-capped pitch authority just holding level, nose
-  over hands-off, and the AP saturates + descends in banked climbs — the
-  "A320 doesn't fly right" bug (pinned in tests/16). Turbulence response
-  scales with gust/airspeed (55/V) and slow envelopes de-rhythmize the
-  gust sines: constant-amplitude chop at cruise reads as "rubber-banding".
+  in landings), parks at 0 on the ground and below 0.85 × clean stall speed
+  (capped at 30 m/s — a FLAT 30 m/s floor sat above the Skylark's and
+  Islander's whole approach, so they lost trim on final and nosed over).
+  Without autotrim, low-G transports burn ~¾ of their G-limit-capped pitch
+  authority just holding level, nose over hands-off, and the AP saturates +
+  descends in banked climbs — the "A320 doesn't fly right" bug (pinned in
+  tests/16). Turbulence response scales with gust/airspeed (55/V) and slow
+  envelopes de-rhythmize the gust sines: constant-amplitude chop at cruise
+  reads as "rubber-banding".
 - Ground physics: below 1.5 m/s ground speed, aero yaw moments are zeroed
   (static tire grip) — parked aircraft must not weathervane or slide in
   wind (pinned in tests/14). The parked-stance PITCH spring fades with
@@ -197,6 +219,39 @@ Cloudflare builds with **npm 10.9.2**; local npm is 11. Two rules:
   off-beam instead of the display popping (test 15). `I` toggles the
   receiver off/auto. HUD draws fly-toward diamonds; deviation signs:
   + = right of centreline / above the slope.
+- APPROACH SURFACES (heightfield.ts `approachSurface`): off every runway end
+  a 2.0° plane (glide path 3.0°, low needle 2.3°) — terrain is squashed
+  under it in `heightAt` (before flattening, so flattening wins) and
+  `approachLimitAt` keeps trees / rocks / houses / city towers out of it in
+  `buildScatter` (so collision agrees). Protected length 12 km at
+  internationals, 7 km regionals, 5 km strips. Without it the procedural
+  world parks hills ON the glide path (Meridian 36L: 98 m above it at 5 km;
+  nearly every mesa approach was blocked). Pinned in tests/20 section 1.
+- Autopilot APPR (`Autopilot.flyApproach`, `L` key / APPR button): steers
+  GROUND TRACK at a point on the centreline (crab emerges, no integrator),
+  holds altitude until the glide path arrives, rides it at 1.3 × stall for
+  the flap set, exponential flare off the radio altimeter, rollout with
+  autobrake, hands back when stopped. The path loop gain is scheduled on
+  pitch AUTHORITY (G-limit cap) with a floor of 0.1: too loose and the
+  phugoid rings against the autothrottle — a ±800 fpm porpoise down the
+  glide path that only shows in a time-series trace (tests/20 asserts the
+  sink-rate swing, not just the touchdown).
+- `src/nav/landing.ts` — pure landing rubric: sink (40) / centreline (30) /
+  touchdown zone (30). main.gradeTouchdown scores every runway touchdown
+  after a real airborne segment (> 15 m — bounces don't re-grade); Final
+  Approach mode (`save.mode === 'approach'`, `spawnOnApproach`) starts on
+  final with a head/crosswind and ends with the debrief once stopped.
+- Gear: a touchdown with retractable gear UP is a crash (flightModel), and
+  main's `gear` handler is the squat switch — the lever only moves airborne
+  and in the flying state. Scripted pilots must raise gear at positive
+  climb, not at liftoff (tests/01's old script settled back and "passed" by
+  rolling at 260 kt with the gear retracted).
+- `src/input/gamepad.ts` — pure pad mapping (dead zone, expo, button edges;
+  tests/21); InputManager polls each frame, and with dt 0 while paused so
+  Start can resume. Non-standard layouts get axes 0/1 + trigger only.
+- Audio: `sound.silence()` on pause / hangar / crash / debrief — the
+  per-frame `update` only runs while flying, so the last engine note
+  otherwise drones through every menu.
 - `src/world/traffic.ts` — NPC aircraft + airport ground vehicles. Parked:
   single-geometry planes nose-in on `INTL_STANDS` (heightfield.ts — the ONE
   stand list shared with the jet bridges and stand paint, so gates, bridges
@@ -225,11 +280,12 @@ Cloudflare builds with **npm 10.9.2**; local npm is 11. Two rules:
   inertial. Heli ground-contact checks must use GROUND speed, not air.
   main.rollWind(): random 3–15 kt in free flight, calm in races/autofly,
   `?wind=hdg,kt` override; windsock orientation via Airport.setWind.
-- Streaming is EUCLIDEAN (disc, not Chebyshev square): requeue/feed/
-  finalize all use hypot; the far shell's OUTER edge is also trimmed to a
-  disc and the below-horizon sky dome (groundGlow ≈ 0.95–0.97 of fog)
-  must stay near the fog colour or the shell edge ghosts through as a
-  colour step at altitude. Keep any new ring logic circular.
+- Streaming is EUCLIDEAN (disc, not Chebyshev square): scan, hole and
+  removal all use hypot from the continuous streaming centre; the far
+  shell's OUTER edge is also trimmed to a disc and the below-horizon sky
+  dome (groundGlow = 1) must stay at the fog colour or the shell edge
+  ghosts through as a colour step at altitude. Keep any new ring logic
+  circular.
 - far-shell cellSize MUST have a small LCM with CHUNK_SIZE (900) — the
   recenter snap grid is that LCM. 450→900, 600→1800 are fine; 380/460/680
   gave 17–30 km snap grids and the horizon lurched forward in giant jumps
@@ -244,14 +300,12 @@ Cloudflare builds with **npm 10.9.2**; local npm is 11. Two rules:
   cached supercell lookups) feeds amber rim arrows with name + distance
   to the nearest internationals (3 on the chart, 1 on the docked map) —
   without it the next hub over is invisible and the map reads hub-less.
-- The far-shell hole must NEVER outrun real coverage: rebuildFarIndex
-  clamps it to nearestGapRing() − 1.2 (closest missing chunk), and it is
-  re-punched wider when the queue drains (farHoleDirty). Punching the
-  planned radius while chunks are still baking shows sky-dome void below
-  and makes every arriving tile pop against nothing — this was the true
-  cause of the "tiles jump into frame at altitude" reports. Streaming
-  radius grows through altitude TIERS (altBonusTiers[4], hysteresis at
-  1150/3200/5200 m up), and the finalize budget triples on deep backlogs.
+- The far-shell hole must NEVER outrun real coverage: `scan()` clamps it to
+  the nearest missing chunk (minus a re-punch step) and the level-0 blend
+  band ends SHELL_SLACK inside it, so chunks sit exactly on the shell
+  wherever the shell may still be drawn. Punching the planned radius while
+  chunks are still baking shows sky-dome void below. The hole is re-punched
+  every ~190 m (16-bit index, index-only upload).
 - Conventions: -Z = north = heading 0; runway along Z at origin; heading =
   `atan2(fwd.x, -fwd.z)`.
 
@@ -259,15 +313,19 @@ Cloudflare builds with **npm 10.9.2**; local npm is 11. Two rules:
 
 - Physics/feel changes: add or extend a Node harness test in `tests/` — tune with
   time-series traces, not end-state asserts.
-- Visual changes: headless Chrome needs
-  `--headless=new --disable-frame-rate-limit --disable-gpu-vsync --virtual-time-budget=N --screenshot=...`
-  (without the frame-rate flags it pumps ~3 rAF frames and captures the boot
-  screen). Dev URL params: `?autofly=1&ff=N&ac=vector&apt=N&ap=1&tod=night`;
-  telemetry is in the tab title. Runs are occasionally flaky — retry. Dark
+- Visual changes: `--virtual-time-budget` headless captures are flaky and
+  barely advance the sim after `ff` (a 45 s budget flew ~0.3 s). For
+  anything that has to RUN — streaming, approaches, UI flows — drive a real
+  headless Chrome over the DevTools Protocol instead: launch with
+  `--headless=new --remote-debugging-port=N`, connect Node's built-in
+  WebSocket to the page target, `Page.navigate`, wait real seconds, then
+  `Runtime.evaluate('document.title')` / `Page.captureScreenshot` /
+  `Input.dispatchKeyEvent`. No dependencies needed. For a single still,
+  `--headless=new --disable-frame-rate-limit --disable-gpu-vsync
+  --virtual-time-budget=N --screenshot=...` works with retries (a ~93 kB PNG
+  is the boot screen).
+  Dev URL params: `?autofly=1&ff=N&ac=vector&apt=N&ap=1&tod=night&q=low`,
+  `&mode=approach` (autofly then flies the ILS to an autoland); telemetry
+  is in the tab title (`lod=`, `fps=`, `appr=`, `ldg=`, `warn=`). Dark
   screenshots legitimately compress below 100 kB — don't use a large
   min-size gate to detect boot-screen captures on night scenes.
-  In containers where virtual-time never advances rAF (screenshot stuck on
-  the boot screen no matter the budget), drive real time with the globally
-  installed Playwright instead: launch chromium with
-  `--use-angle=swiftshader --enable-unsafe-swiftshader`, goto the preview
-  URL, `waitForTimeout(12000+)`, then screenshot.

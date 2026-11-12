@@ -1,14 +1,16 @@
 /**
  * Unified pilot input. Keyboard keys ramp like an analog axis so the
  * controls feel like a yoke, not a light switch. Touch (mobile) writes
- * directly into the same structure via setTouchAxes/setTouchThrottle.
+ * directly into the same structure via setTouchAxes/setTouchThrottle, and
+ * a connected gamepad is polled each frame (mapping in gamepad.ts).
  */
 import type { ControlInputs } from '../aircraft/flightModel';
 import { clamp } from '../core/math';
+import { readPad, PadFrame } from './gamepad';
 
 type SimEvent =
   | 'camera' | 'pause' | 'gear' | 'flaps' | 'map' | 'reset'
-  | 'autopilot' | 'airbrake' | 'hud' | 'enginecut' | 'ils'
+  | 'autopilot' | 'airbrake' | 'hud' | 'enginecut' | 'ils' | 'approach'
   | 'nav' | 'navzoomin' | 'navzoomout';
 
 export class InputManager {
@@ -28,6 +30,11 @@ export class InputManager {
   private touchThrottle: number | null = null;
   private flapsStep = 0; // 0..3
   private flapsDir = 1;  // single-button (touch) cycle direction
+  private padPrev: boolean[] = [];
+  private padStick = false;
+  /** id of the pad last seen — set once so main can announce it */
+  padName: string | null = null;
+  onPadConnected: (name: string) => void = () => {};
 
   constructor() {
     window.addEventListener('keydown', (e) => {
@@ -44,6 +51,7 @@ export class InputManager {
         case 'KeyB': this.emit('airbrake'); break;
         case 'KeyX': this.emit('enginecut'); break;
         case 'KeyI': this.emit('ils'); break;
+        case 'KeyL': this.emit('approach'); break;
         case 'KeyH': this.emit('hud'); break;
         case 'KeyM': this.emit('map'); break;
         case 'KeyN': this.emit('nav'); break;
@@ -90,6 +98,13 @@ export class InputManager {
     this.cycleFlaps(this.flapsDir);
   }
 
+  /** Preset the flap lever (0..3) — e.g. when a flight starts on final. */
+  setFlapsStep(step: number): void {
+    this.flapsStep = clamp(Math.round(step), 0, 3);
+    this.flapsDir = this.flapsStep >= 3 ? -1 : 1;
+    this.controls.flaps = this.flapsStep / 3;
+  }
+
   /** Aircraft without flaps (helicopter): snap any cycled state back to 0. */
   resetFlaps(): void {
     this.flapsStep = 0;
@@ -103,10 +118,43 @@ export class InputManager {
   setTouchThrottle(v: number | null): void { this.touchThrottle = v; }
   setTouchBrakes(b: boolean): void { this.touchBrakes = b; }
 
+  /** First connected gamepad's state this frame (null without one). */
+  private pollPad(): PadFrame | null {
+    const getPads = (navigator as Navigator & { getGamepads?: () => (Gamepad | null)[] }).getGamepads;
+    if (!getPads) return null;
+    let pads: (Gamepad | null)[];
+    try {
+      pads = getPads.call(navigator);
+    } catch {
+      return null; // blocked by permissions policy (embedded frames)
+    }
+    for (const p of pads) {
+      if (!p || !p.connected) continue;
+      if (this.padName !== p.id) {
+        this.padName = p.id;
+        this.padPrev.length = 0;
+        this.onPadConnected(p.id);
+      }
+      return readPad(p.axes, p.buttons, p.mapping === 'standard', this.padPrev);
+    }
+    this.padName = null;
+    return null;
+  }
+
   /** Ramp axes toward targets; call once per frame. */
   update(dt: number): void {
     const c = this.controls;
     const k = this.keys;
+    const pad = this.pollPad();
+    this.padStick = !!pad && pad.stick;
+    if (pad) {
+      for (const a of pad.actions) {
+        if (a === 'gear') this.toggleGear();
+        else if (a === 'flapsDown') this.cycleFlaps(1);
+        else if (a === 'flapsUp') this.cycleFlaps(-1);
+        else this.emit(a);
+      }
+    }
 
     const axis = (cur: number, target: number): number => {
       const rate = target !== 0 ? 4.2 : 5.5;
@@ -117,11 +165,14 @@ export class InputManager {
 
     let pT = (k.has('KeyW') || k.has('ArrowUp') ? -1 : 0) + (k.has('KeyS') || k.has('ArrowDown') ? 1 : 0);
     let rT = (k.has('KeyA') || k.has('ArrowLeft') ? -1 : 0) + (k.has('KeyD') || k.has('ArrowRight') ? 1 : 0);
-    const yT = (k.has('KeyQ') ? -1 : 0) + (k.has('KeyE') ? 1 : 0) + this.touchYaw;
+    const yT = (k.has('KeyQ') ? -1 : 0) + (k.has('KeyE') ? 1 : 0) + this.touchYaw + (pad ? pad.yaw : 0);
 
     if (this.touchAxes) {
       rT = this.touchAxes.x;
       pT = this.touchAxes.y;
+    } else if (pad && pad.stick) {
+      rT = pad.roll;
+      pT = pad.pitch;
     }
     if (this.invertY) pT = -pT;
     pT *= this.sensitivity;
@@ -137,17 +188,18 @@ export class InputManager {
     } else {
       if (k.has('ShiftLeft') || k.has('ShiftRight') || k.has('Equal')) c.throttle += 0.45 * dt;
       if (k.has('ControlLeft') || k.has('ControlRight') || k.has('Minus')) c.throttle -= 0.45 * dt;
+      if (pad) c.throttle += pad.throttleRate * 0.6 * dt;
       c.throttle = clamp(c.throttle, 0, 1);
     }
 
-    c.brakes = k.has('Space') || this.touchBrakes;
+    c.brakes = k.has('Space') || this.touchBrakes || (!!pad && pad.brakes);
   }
 
   /** True when the pilot is actively deflecting pitch/roll (used to kick off the autopilot). */
   hasManualStick(): boolean {
     const k = this.keys;
     return (
-      this.touchAxes !== null ||
+      this.touchAxes !== null || this.padStick ||
       k.has('KeyW') || k.has('KeyS') || k.has('KeyA') || k.has('KeyD') ||
       k.has('ArrowUp') || k.has('ArrowDown') || k.has('ArrowLeft') || k.has('ArrowRight')
     );

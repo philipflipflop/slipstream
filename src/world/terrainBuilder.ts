@@ -17,10 +17,11 @@ export interface ChunkPayload {
   positions: Float32Array;
   normals: Float32Array;
   colors: Float32Array;
-  /** per-vertex geomorph start height: the exact surface this chunk replaces */
+  /** per-vertex PARENT-look height: the coarser level's surface (the far
+   *  shell for res 14) — the shader blends parent → own by distance */
   baseY: Float32Array;
   /** per-vertex colour-morph start: the REPLACED surface's palette (coarse
-   *  texel — parent LOD or shell), blended to `colors` by the same uMorph so
+   *  texel — parent LOD or shell), blended to `colors` by the same factor so
    *  a fresh tile sharpens gradually instead of snapping to fine paint */
   baseCols: Float32Array;
   /** per-vertex normal-morph start: normals of the morph-start surface, so
@@ -40,6 +41,10 @@ export interface ChunkPayload {
   towerTints: Float32Array;
   glassMats: Float32Array;  // city buildings, glass curtain-wall
   glassTints: Float32Array;
+  /** per list (tree, leaf, rock, house, tower, glass): how many leading
+   *  instances belong to scatter level ≤ 1 — the renderer shrinks the denser
+   *  level-2 suffix away at a nearer distance than the level-1 prefix */
+  l1: number[];
 }
 
 /**
@@ -118,7 +123,7 @@ export function buildChunkPayload(
   }
   const latH = (ci: number, cj: number) => lat[(cj + 2) * latN + (ci + 2)];
 
-  // geomorph start surface: either the coarser chunk being replaced
+  // parent-look surface: either the coarser level's mesh
   // (LOD grids nest, so its surface can be reproduced exactly), or the far
   // shell for a brand-new chunk (+0.5 m so morph start isn't coplanar)
   const shellCache = new Map<string, number>();
@@ -248,11 +253,12 @@ export function buildChunkPayload(
       const isSkirt = isSkirtJ || i !== ci;
       const wx = x0 + ci * step;
       let h = latH(ci, cj);
-      let b = startH(ci, cj);
-      // never morph dry land up through the water sheet: coastal chunks
-      // otherwise sweep their shoreline across the plane for the whole
-      // swell animation, which reads as water-edge flicker
-      if (h > WATER_LEVEL + 0.5 && b < WATER_LEVEL + 0.7) b = Math.min(WATER_LEVEL + 0.7, h);
+      // the parent look must be EXACT (no waterline clamp): swaps between
+      // levels are only invisible because this surface equals the parent
+      // mesh's. Shorelines therefore refine with distance inside the blend
+      // band — a stationary gradient, not the timed sweep that used to read
+      // as water-edge flicker.
+      const b = startH(ci, cj);
       baseY[v] = b - (isSkirt ? skirtDrop : 0);
       if (isSkirt) h -= skirtDrop;
       positions[v * 3] = wx - x0;
@@ -346,6 +352,10 @@ export function buildChunkPayload(
     towerTints: Float32Array.from(sc.towerTints),
     glassMats: Float32Array.from(sc.glassMats),
     glassTints: Float32Array.from(sc.glassTints),
+    l1: [
+      sc.l1.tree, sc.l1.leaf, sc.l1.rock, sc.l1.house,
+      sc.towerMats.length / 16, sc.glassMats.length / 16,
+    ],
   };
 }
 
@@ -357,6 +367,8 @@ export interface ScatterLists {
   houseMats: number[]; houseTints: number[];
   towerMats: number[]; towerTints: number[];
   glassMats: number[]; glassTints: number[];
+  /** instance counts each list would have at scatter level 1 (its prefix) */
+  l1: { tree: number; leaf: number; rock: number; house: number };
 }
 
 /**
@@ -378,6 +390,7 @@ export function buildScatter(
     treeMats: [], treeTints: [], leafMats: [], leafTints: [],
     rockMats: [], rockTints: [], houseMats: [], houseTints: [],
     towerMats: [], towerTints: [], glassMats: [], glassTints: [],
+    l1: { tree: 0, leaf: 0, rock: 0, house: 0 },
   };
 
   // ---- city towers (metro theme) ----
@@ -412,8 +425,15 @@ export function buildScatter(
         const h2 = hash2(bx + 11, bz - 17);
         let ht = 10 + hsh * hsh * 28 + dt * (36 + h2 * 200);
         // a few genuine supertalls anchor the downtown cores
-        const supertall = dt > 0.5 && hash2(bx * 53, bz * 59 + 13) > 0.94;
+        let supertall = dt > 0.5 && hash2(bx * 53, bz * 59 + 13) > 0.94;
         if (supertall) ht = 260 + h2 * 190;
+        // nothing stands in a runway's approach path: under a corridor the
+        // skyline steps down with the approach surface, low-rise only
+        const room = gen.approachLimitAt(wcx, wcz) - h;
+        if (room < 60000) {
+          if (room < 14) continue;
+          if (ht > room * 0.9) { ht = room * 0.9; supertall = false; }
+        }
 
         const w = 22 + hash2(bx - 5, bz + 9) * 26;
         const d = 22 + hash2(bx + 19, bz + 23) * 26;
@@ -457,7 +477,7 @@ export function buildScatter(
             mats.length = o + 16;
             composeYRot(
               mats, o, 2 * wcx - wx, h - 0.5, 2 * wcz - wz, 0,
-              w * 0.8, ht * (0.55 + hsh * 0.5), d * 0.8,
+              w * 0.8, ht * Math.min(0.55 + hsh * 0.5, 1), d * 0.8,
             );
             tints.push(tr * 0.94, tg * 0.94, tb);
           }
@@ -465,7 +485,7 @@ export function buildScatter(
         // a low annex beside the main tower fills out the block
         if (hsh > 0.45) {
           const aw = 14 + hash2(bx * 13, bz) * 14;
-          const ah = 6 + hash2(bx, bz * 17) * 10;
+          const ah = Math.min(6 + hash2(bx, bz * 17) * 10, ht);
           const o2 = s.towerMats.length;
           s.towerMats.length = o2 + 16;
           composeYRot(
@@ -480,10 +500,17 @@ export function buildScatter(
   }
 
   if (scatterLevel > 0) {
-    const rng = makeRng(Math.floor(hash2(cx, cz) * 0xffffffff));
+    // One RNG stream PER CATEGORY: a lower level's list is then an exact
+    // prefix of the higher level's for every category. (A single shared
+    // stream left rocks and houses starting from a different state after
+    // 90 vs 240 tree tries — boulders, hoodoos and cottages re-rolled the
+    // moment a chunk upgraded: a real pop at ~3 km.)
+    const seed = Math.floor(hash2(cx, cz) * 0xffffffff);
+    let rng = makeRng(seed);
 
     const treeTries = scatterLevel === 2 ? 240 : 90;
     for (let t = 0; t < treeTries; t++) {
+      if (t === 90) { s.l1.tree = s.treeMats.length / 16; s.l1.leaf = s.leafMats.length / 16; }
       const wx = x0 + rng() * CHUNK_SIZE;
       const wz = z0 + rng() * CHUNK_SIZE;
       if (gen.isOnApron(wx, wz)) continue;
@@ -500,6 +527,8 @@ export function buildScatter(
       // broadleaf in moist lowland, conifers everywhere else
       const broadleaf = h < 210 && gen.drynessAt(wx, wz) < 0.52 && rng() < 0.65;
       const k = 0.82 + rng() * 0.36; // per-tree brightness variation
+      // approach lanes are kept clear of anything tall (cypress: ×1.8)
+      if (h + sy * 24 > gen.approachLimitAt(wx, wz)) continue;
       if (broadleaf) {
         const o = s.leafMats.length;
         s.leafMats.length = o + 16;
@@ -519,10 +548,15 @@ export function buildScatter(
       }
     }
 
+    if (treeTries <= 90) { s.l1.tree = s.treeMats.length / 16; s.l1.leaf = s.leafMats.length / 16; }
+
     // boulders on steep faces and high ground, half-buried
-    const rockBase = scatterLevel === 2 ? 70 : 26;
-    const rockTries = gen.theme === 'mesa' ? Math.round(rockBase * 1.8) : rockBase;
+    rng = makeRng((seed ^ 0x9e3779b9) >>> 0);
+    const rockMul = gen.theme === 'mesa' ? 1.8 : 1;
+    const rockL1 = Math.round(26 * rockMul);
+    const rockTries = scatterLevel === 2 ? Math.round(70 * rockMul) : rockL1;
     for (let t = 0; t < rockTries; t++) {
+      if (t === rockL1) s.l1.rock = s.rockMats.length / 16;
       const wx = x0 + rng() * CHUNK_SIZE;
       const wz = z0 + rng() * CHUNK_SIZE;
       if (gen.isOnApron(wx, wz)) continue;
@@ -540,6 +574,7 @@ export function buildScatter(
       const hoodoo = gen.theme === 'mesa' && steep < 0.22 && rng() < 0.3;
       const sy = hoodoo ? sc * (2.8 + rng() * 2.6) : sc * (0.7 + rng() * 0.5);
       const sxz = hoodoo ? sc * 0.75 : sc;
+      if (h + sy > gen.approachLimitAt(wx, wz)) continue;
       const o = s.rockMats.length;
       s.rockMats.length = o + 16;
       composeYRot(s.rockMats, o, wx, h - sc * 0.35, wz, theta, sxz, sy, sxz);
@@ -548,8 +583,12 @@ export function buildScatter(
       else s.rockTints.push(k, k * 0.97, k * 0.93);
     }
 
+    if (rockTries <= rockL1) s.l1.rock = s.rockMats.length / 16;
+
+    rng = makeRng((seed ^ 0x51ed270b) >>> 0);
     const houseTries = scatterLevel === 2 ? 50 : 16;
     for (let t = 0; t < houseTries; t++) {
+      if (t === 16) s.l1.house = s.houseMats.length / 16;
       const wx = x0 + rng() * CHUNK_SIZE;
       const wz = z0 + rng() * CHUNK_SIZE;
       if (gen.isOnApron(wx, wz)) continue;
@@ -563,12 +602,14 @@ export function buildScatter(
       const d = 7 + rng() * 10;
       const ht = 4 + rng() * (6 + rng() * 7); // cottages through low blocks
       const theta = Math.floor(rng() * 4) * (Math.PI / 2) + (rng() - 0.5) * 0.3;
+      if (h + ht * 1.5 > gen.approachLimitAt(wx, wz)) continue;
       const o = s.houseMats.length;
       s.houseMats.length = o + 16;
       composeYRot(s.houseMats, o, wx, h - 0.3, wz, theta, w, ht, d);
       const k = 0.7 + rng() * 0.3;
       s.houseTints.push(0.85 * k, 0.8 * k, 0.72 * k);
     }
+    if (houseTries <= 16) s.l1.house = s.houseMats.length / 16;
   }
 
   return s;

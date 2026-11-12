@@ -370,6 +370,15 @@ html, body {
   font-family: var(--font-ui); font-weight: 700; font-size: 14px;
 }
 #appanel button:active { background: var(--amber); color: #1d1304; }
+/* APPR lives in the title row: an extra row made the panel tall enough to
+   sit over the speed readout on short windows */
+#appanel .ap-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+#appanel button.ap-appr {
+  width: auto; height: 22px; padding: 0 8px; font-size: 10px; letter-spacing: .14em; white-space: nowrap;
+}
+#appanel button.ap-appr.on { background: var(--amber); color: #1d1304; border-color: var(--amber); }
+.panel .v-note { color: var(--fog); font-size: 12px; letter-spacing: .06em; margin: -4px 0 0; }
+.panel .v-note:empty { display: none; }
 @media (max-height: 520px) {
   #appanel { top: calc(60px + var(--sat)); padding: 6px 8px; }
   #appanel button { width: 34px; height: 30px; }

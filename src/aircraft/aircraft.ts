@@ -7,7 +7,8 @@ import * as THREE from 'three';
 import type { AircraftSpec } from './types';
 import { buildAircraftModel } from './models';
 import {
-  ControlInputs, FlightState, createState, stepFlight, spawnOnRunway, HeightFn,
+  ControlInputs, FlightState, createState, stepFlight, spawnOnRunway, spawnOnApproach,
+  ApproachTarget, HeightFn,
 } from './flightModel';
 import type { AirfieldDef } from '../world/heightfield';
 import { damp, clamp } from '../core/math';
@@ -95,6 +96,18 @@ export class Aircraft {
     this.gearAnim = 1;
     this.rotorSpin = 0;
     this.syncModel();
+  }
+
+  /** Start airborne on final (see spawnOnApproach); returns the control
+   *  settings the cockpit should be preset to. */
+  resetOnApproach(
+    app: ApproachTarget, distance: number, flaps: number, offLat: number, offAlt: number,
+  ): { throttle: number; flaps: number; speed: number } {
+    const set = spawnOnApproach(this.spec, this.state, app, distance, flaps, offLat, offAlt);
+    this.gearAnim = 1;
+    this.rotorSpin = 1;
+    this.syncModel();
+    return set;
   }
 
   update(inp: ControlInputs, dt: number, heightAt: HeightFn): void {

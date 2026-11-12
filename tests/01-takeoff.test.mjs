@@ -29,8 +29,14 @@ for (const spec of CATALOG) {
       const pull = Math.min(0.85, 0.3 + spec.mass / (spec.wingArea * 1500));
       inp.pitch = st.airspeed > vr && st.pitchAngle < 0.16 ? pull : 0;
       if (liftoffT > 0) {
-        inp.gearDown = false;
-        inp.flaps = 0;
+        // positive climb, THEN gear up — a retracted undercarriage is no
+        // longer something you can settle back onto
+        if (st.pos.y > 8 + spec.gearHeight + 15) inp.gearDown = false;
+        // …and clean up at a safe height: dumping take-off flap at two
+        // metres settles a heavy straight back onto the runway (this script
+        // used to do exactly that — the airliner then "passed" by thundering
+        // along the ground at 260 kt with its gear retracted)
+        if (st.pos.y > 8 + spec.gearHeight + 150) inp.flaps = 0;
         const targetPitch = st.pos.y > 800 ? 0.02 : 0.12;
         inp.pitch = (targetPitch - st.pitchAngle) * 6 - st.angVel.x * 1.2;
       }
@@ -42,6 +48,7 @@ for (const spec of CATALOG) {
   }
 
   assert.ok(!st.crashed, `${spec.id}: crashed (${st.crashReason})`);
+  assert.ok(heli || (!st.onGround && st.pos.y > 300), `${spec.id}: never climbed away (y=${st.pos.y.toFixed(0)})`);
   assert.ok(liftoffT > 0 && liftoffT < 60, `${spec.id}: failed to lift off (t=${liftoffT})`);
   const maxKt = maxV * KT;
   assert.ok(maxKt > spec.topSpeedKt * 0.55, `${spec.id}: too slow (${maxKt.toFixed(0)}kt)`);

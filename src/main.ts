@@ -17,11 +17,12 @@ import { RingCourse, RING_COUNT } from './world/rings';
 import { Traffic } from './world/traffic';
 import { GunneryRange } from './combat/range';
 import { ObstacleField } from './world/obstacles';
-import { setTurbulence, setWind, crash } from './aircraft/flightModel';
+import { setTurbulence, setWind, crash, approachSpeed, stallSpeed } from './aircraft/flightModel';
 import { Route, bearingTo, distanceTo } from './nav/route';
 import {
-  IlsApproach, tuneIls, solveIls, LOC_FULL_SCALE, GS_FULL_SCALE,
+  IlsApproach, tuneIls, solveIls, approachesOf, LOC_FULL_SCALE, GS_FULL_SCALE,
 } from './nav/ils';
+import { runwayUnder, scoreLanding, LandingScore, RunwayContact } from './nav/landing';
 import { Aircraft } from './aircraft/aircraft';
 import { specById } from './aircraft/catalog';
 import { Autopilot } from './aircraft/autopilot';
@@ -31,7 +32,7 @@ import { FlightCamera } from './camera';
 import { SoundEngine } from './audio/sound';
 import { Hud, HudData } from './ui/hud';
 import { Minimap } from './ui/minimap';
-import { Screens, DebriefStats } from './ui/screens';
+import { Screens, DebriefStats, LandingReport } from './ui/screens';
 import { loadSave, persist, Quality } from './save';
 import { clamp, damp, MS_TO_KT, M_TO_FT, wrapAngle } from './core/math';
 
@@ -107,7 +108,26 @@ class Game {
   private ilsFieldScratch: AirfieldDef[] = [];
   private ilsScratch: IlsApproach[] = [];
 
+  // landing grading: every runway touchdown after a real airborne segment
+  // is scored (sink / centreline / touchdown zone); Final Approach mode ends
+  // with the debrief once the aircraft has stopped
+  private airMaxAgl = 0;      // highest AGL since the wheels last left the ground
+  private touchedDown = false;
+  private stopTimer = 0;
+  private lastLanding: { score: LandingScore; rw: RunwayContact } | null = null;
+  private landingFields: AirfieldDef[] = [];
+  private landingScratch: IlsApproach[] = [];
+
+  // master warning (terrain ahead / gear / overspeed), latched briefly
+  private warn: string | null = null;
+  private warnHold = 0;
+  private lastApprPhase = 'off';
+
   private daylight: DaylightPreset;
+  private lodTint = false;
+  private fps = 0;
+  private fpsFrames = 0;
+  private fpsT0 = 0;
 
   constructor() {
     const touch = isTouchDevice();
@@ -123,6 +143,10 @@ class Game {
       todParam && DAYLIGHTS.some((d) => d.id === todParam) ? todParam : this.save.tod,
     );
     this.save.tod = this.daylight.id; // menu chips reflect the active preset
+
+    // graphics quality: ?q=low|medium|high overrides the saved choice (smoke tests)
+    const qParam = new URLSearchParams(location.search).get('q');
+    if (qParam === 'low' || qParam === 'medium' || qParam === 'high') this.save.quality = qParam;
 
     // uniform relative depth precision at any distance — kills shoreline
     // z-fighting without biasing the water. It defeats early-Z, so the only
@@ -179,13 +203,16 @@ class Game {
 
     const params = new URLSearchParams(location.search);
     this.autoFly = params.get('autofly') === '1';
-    // ?morphhold=1 — freeze chunks at geomorph start (debug: any visible tile
-    // seam in a still frame = the pop players would see at tile arrival)
-    this.terrain.morphHold = params.get('morphhold') === '1';
-    // ?shellonly=1 — hide all chunks, render the shell everywhere (debug:
-    // this is the pre-arrival image; diff against morphhold for the pop)
+    // ?lodtint=1 — tint chunks by LOD level, darkened by how far each vertex
+    // is collapsed toward its parent look (debug: the distance blend bands
+    // become rings; level boundaries must sit where fine = dark, coarse = lit)
+    this.lodTint = params.get('lodtint') === '1';
+    this.terrain.lodTint = this.lodTint;
+    this.terrain.logLate = params.get('lodlog') === '1';
+    // ?shellonly=1 — hide all chunks, render the shell everywhere (debug)
     this.terrain.shellOnly = params.get('shellonly') === '1';
     if (params.get('mode') === 'race') this.save.mode = 'race';
+    if (params.get('mode') === 'approach') this.save.mode = 'approach';
     const aptParam = Number(params.get('apt') ?? '0');
     if (aptParam > 0 && aptParam < AIRPORTS.length) this.spawnField = AIRPORTS[aptParam];
     const acParam = params.get('ac');
@@ -272,6 +299,7 @@ class Game {
     s.onRestart = () => { this.sound.uiClick(); this.startFlight(); };
     s.onHangar = () => this.toHangar();
     s.onApAdjust = (kind, dir) => this.apAdjust(kind, dir);
+    s.onApproach = () => this.toggleApproach();
 
     // desktop AP bug hotkeys (repeat allowed — hold to slew)
     window.addEventListener('keydown', (e) => {
@@ -303,7 +331,15 @@ class Game {
       this.screens.toast(mode === 'chase' ? 'CHASE CAMERA' : mode === 'cockpit' ? 'COCKPIT VIEW' : 'CINEMATIC ORBIT');
     });
     this.input.on('gear', () => {
-      if (this.state !== 'flying' || !this.aircraft.spec.retractableGear) return;
+      // squat switch: the lever only moves in flight — never on the ground,
+      // in a menu or while paused (a gear-up touchdown is now a write-off)
+      const c = this.input.controls;
+      if (this.state !== 'flying' || !this.aircraft.spec.retractableGear || this.aircraft.state.onGround) {
+        const blocked = this.state === 'flying' && this.aircraft.spec.retractableGear && !c.gearDown;
+        c.gearDown = true;
+        if (blocked) this.screens.toast('GEAR LOCKED DOWN — WEIGHT ON WHEELS');
+        return;
+      }
       this.sound.gearThunk();
       this.screens.toast(this.input.controls.gearDown ? 'GEAR DOWN' : 'GEAR UP');
     });
@@ -321,6 +357,10 @@ class Game {
       if (this.state === 'flying' || this.state === 'crashed') this.startFlight();
     });
     this.input.on('autopilot', () => this.toggleAutopilot());
+    this.input.on('approach', () => this.toggleApproach());
+    this.input.onPadConnected = () => {
+      if (this.state === 'flying') this.screens.toast('GAMEPAD CONNECTED — SEE CONTROLS FOR THE LAYOUT', 2600);
+    };
     this.input.on('airbrake', () => this.toggleAirbrake());
     this.input.on('enginecut', () => this.toggleEngineCut());
     this.input.on('hud', () => {
@@ -405,6 +445,38 @@ class Game {
     }
   }
 
+  /**
+   * APPR: couple the autopilot to the tuned ILS — localizer, glideslope,
+   * flare, rollout (see Autopilot.flyApproach). Pressing it again drops
+   * back to plain heading/altitude hold.
+   */
+  private toggleApproach(): void {
+    if (this.state !== 'flying') return;
+    const st = this.aircraft.state;
+    if (this.aircraft.spec.engine === 'heli') {
+      this.screens.toast('APPR IS FIXED-WING ONLY — FLY THE DIAMONDS');
+      return;
+    }
+    if (this.autopilot.approach) {
+      this.autopilot.cancelApproach(st);
+      this.screens.toast('APPR OFF — HOLDING HEADING AND ALTITUDE', 2200);
+      return;
+    }
+    if (st.onGround) {
+      this.screens.toast('AP UNAVAILABLE ON THE GROUND');
+      return;
+    }
+    if (!this.ilsTuned) {
+      this.screens.toast('NO ILS TUNED — POINT AT A RUNWAY FIRST', 2400);
+      return;
+    }
+    if (!this.autopilot.engaged) this.autopilot.engage(st, this.input.controls.throttle, 30);
+    this.autopilot.armApproach(this.ilsTuned);
+    this.route.engaged = false;
+    this.lastApprPhase = 'loc';
+    this.screens.toast(`APPR ARMED — ILS ${this.ilsTuned.ident} ${this.ilsTuned.fieldName}`, 2600);
+  }
+
   /** Slew an autopilot target bug: hdg ±5°, alt ±500 ft, spd ±10 kt, V/S ±200 fpm. */
   private apAdjust(kind: 'hdg' | 'alt' | 'spd' | 'vs', dir: number): void {
     if (!this.autopilot.engaged) return;
@@ -449,7 +521,6 @@ class Game {
       this.renderer.setPixelRatio(Math.min(dpr, 1));
       this.renderer.shadowMap.enabled = false;
       this.sky.setShadows(false);
-      this.terrain.radius = 4;
       this.terrain.buildBudget = 1;
     } else if (q === 'medium') {
       // phones run dpr 3 — capping lower upscales shorelines into sub-pixel
@@ -457,42 +528,37 @@ class Game {
       this.renderer.setPixelRatio(Math.min(dpr, 2));
       this.renderer.shadowMap.enabled = true;
       this.sky.setShadows(true);
-      this.terrain.radius = 6;
       this.terrain.buildBudget = 2;
     } else {
       this.renderer.setPixelRatio(Math.min(dpr, 2));
       this.renderer.shadowMap.enabled = true;
       this.sky.setShadows(true);
-      this.terrain.radius = 8;
       this.terrain.buildBudget = 2;
     }
-    // circular streaming holds ~27% fewer chunks than the old square at the
-    // same radius — spent here on wider high-altitude reach, growing with
-    // altitude tiers so 20k ft still has terrain streaming ahead of the seam
-    this.terrain.altBonusTiers =
-      q === 'low' ? [0, 4, 5, 6] : q === 'medium' ? [0, 7, 9, 11] : [0, 8, 11, 14];
-    // far horizon shell density, how far each LOD reaches (in rings), and
-    // how far the fog may open up at altitude (cap stays well inside the
-    // shell so its edge is never visible)
+    // LOD reach and load radius per quality live in world/lod.ts (detail is
+    // a continuous function of distance and altitude — no rings, no tiers)
     const t = this.terrain;
-    // shell cellSize MUST share a small LCM with CHUNK_SIZE (900): the
+    t.setQuality(q);
+    // far horizon shell density, and how far the fog may open up at altitude
+    // (the cap stays well inside the shell so its edge is never visible).
+    // Shell cellSize MUST share a small LCM with CHUNK_SIZE (900): the
     // recenter grid is that LCM, so 380/460/680-m cells made the horizon
     // lurch forward in 17–30 km jumps ("deficit builds, then the edge pops
     // in one go") — 450/600 recenter every 900–1800 m, imperceptibly
+    let view: number; // ground-level visibility the fog is tuned to, m
     if (q === 'low') {
       t.configureFar(90, 600); // 54 km shell
-      [t.ultraRing, t.fineRing, t.midRing, t.fineRingHigh, t.midRingHigh] = [-1, 2, 5, 3, 6];
       this.fogFarCap = 15000;
+      view = 4 * CHUNK_SIZE;
     } else if (q === 'medium') {
       t.configureFar(150, 450); // 67.5 km shell
-      [t.ultraRing, t.fineRing, t.midRing, t.fineRingHigh, t.midRingHigh] = [0, 3, 6, 4, 7];
       this.fogFarCap = 23000;
+      view = 6 * CHUNK_SIZE;
     } else {
       t.configureFar(180, 450); // 81 km shell
-      [t.ultraRing, t.fineRing, t.midRing, t.fineRingHigh, t.midRingHigh] = [1, 4, 6, 5, 9];
       this.fogFarCap = 30000;
+      view = 8 * CHUNK_SIZE;
     }
-    const view = this.terrain.radius * CHUNK_SIZE;
     this.baseFogNear = view * 0.38;
     this.baseFogFar = view * 0.96;
     const fog = this.scene.fog as THREE.Fog;
@@ -531,12 +597,19 @@ class Game {
    * so no two approaches are the same; races and autofly smoke tests stay
    * calm so times and trajectories are comparable. ?wind=hdg,kt overrides.
    */
-  private rollWind(): void {
+  private rollWind(appr: IlsApproach | null = null): void {
     const p = new URLSearchParams(location.search).get('wind');
     if (p) {
       const [h, k] = p.split(',').map(Number);
       this.windFromDeg = ((h || 0) % 360 + 360) % 360;
       this.windKt = Math.max(0, k || 0);
+    } else if (appr && !this.autoFly) {
+      // Final Approach: always something to fly — a head/crosswind from
+      // 25–110° off the runway heading, either side (never a tailwind)
+      const off = (25 + Math.random() * 85) * (Math.random() < 0.5 ? -1 : 1);
+      const from = (appr.course * 180) / Math.PI + off;
+      this.windFromDeg = Math.round(((from % 360) + 360) % 360);
+      this.windKt = Math.round(4 + Math.random() * 12);
     } else if (this.save.mode === 'race' || this.autoFly) {
       this.windFromDeg = 0;
       this.windKt = 0;
@@ -554,14 +627,41 @@ class Game {
   private startFlight(): void {
     this.sound.init();
     this.input.resetForFlight();
-    this.rollWind();
-    this.aircraft.resetOnRunway(this.heightFn, this.spawnField);
+    // Final Approach: one of the spawn field's runway ends, a few
+    // kilometres out, a little off the centreline and the glide path
+    let appr: IlsApproach | null = null;
+    if (this.save.mode === 'approach') {
+      const apps: IlsApproach[] = [];
+      approachesOf(this.spawnField, apps);
+      appr = apps[this.autoFly ? 0 : Math.floor(Math.random() * apps.length)];
+    }
+    this.rollWind(appr);
+    if (appr) {
+      const spec = this.aircraft.spec;
+      const heli = spec.engine === 'heli';
+      const dist = heli ? 1800 : clamp(approachSpeed(spec, 2 / 3) * 70, 3500, 8000);
+      const jitter = this.autoFly ? 0 : 1;
+      const set = this.aircraft.resetOnApproach(
+        appr, dist, 2 / 3,
+        (Math.random() - 0.5) * dist * 0.05 * jitter,
+        (Math.random() - 0.5) * 40 * jitter,
+      );
+      this.input.controls.throttle = set.throttle;
+      this.input.setFlapsStep(Math.round(set.flaps * 3));
+    } else {
+      this.aircraft.resetOnRunway(this.heightFn, this.spawnField);
+    }
     this.sound.setEngineKind(this.aircraft.spec.engine);
     this.flightCam.set('chase');
     this.stats = { flightTime: 0, distanceKm: 0, maxAltFt: 0, maxSpdKt: 0 };
     this.raceTime = 0;
     this.raceRunning = false;
-    this.wasOnGround = true;
+    this.wasOnGround = !appr;
+    this.airMaxAgl = appr ? 999 : 0;
+    this.touchedDown = false;
+    this.stopTimer = 0;
+    this.lastLanding = null;
+    this.warn = null;
     this.range.reset();
     if (this.save.mode === 'race') {
       this.rings.start(this.aircraft.state.pos);
@@ -569,27 +669,34 @@ class Game {
       this.rings.stop();
     }
     this.autopilot.disengage();
-    this.ilsTuned = null;
-    this.ilsTimer = 0;
+    this.screens.setApPanel(false);
+    this.ilsTuned = appr; // on final the receiver is already on the runway
+    this.ilsTimer = appr ? 1 : 0;
     this.state = 'flying';
     this.screens.show(null);
     this.hud.visible = true;
     this.minimap.show(true);
     this.touch?.show(true);
-    this.touch?.setThrottle(0);
+    this.touch?.setThrottle(this.input.controls.throttle);
+    const windTxt = this.windKt > 0
+      ? `WIND ${String(this.windFromDeg).padStart(3, '0')}° AT ${this.windKt} KT`
+      : 'WIND CALM';
     this.screens.toast(
-      this.save.mode === 'race'
+      appr
+        ? `FINAL APPROACH — RWY ${appr.ident} · ${windTxt} · LAND AND STOP`
+        : this.save.mode === 'race'
         ? 'RING RUSH — GO!'
         : this.windKt > 0
           ? `CLEARED FOR TAKEOFF — WIND ${String(this.windFromDeg).padStart(3, '0')}° AT ${this.windKt} KT`
           : 'CLEARED FOR TAKEOFF',
-      2800,
+      appr ? 4200 : 2800,
     );
   }
 
   private pause(): void {
     if (this.state !== 'flying') return;
     this.state = 'paused';
+    this.sound.silence();
     this.screens.show('pause');
     this.minimap.show(false);
     this.touch?.show(false);
@@ -606,6 +713,8 @@ class Game {
 
   private toHangar(): void {
     this.sound.uiClick();
+    this.sound.silence();
+    this.autopilot.disengage();
     this.state = 'menu';
     this.hud.visible = false;
     this.hud.clear();
@@ -627,8 +736,131 @@ class Game {
     this.touch?.show(false);
   }
 
+  /** Final Approach: stopped — grade the landing and show the debrief. */
+  private finishApproach(): void {
+    this.state = 'victory';
+    this.sound.silence();
+    this.autopilot.disengage();
+    this.screens.setApPanel(false);
+    this.hud.visible = false;
+    this.hud.clear();
+    this.minimap.show(false);
+    this.touch?.show(false);
+    const id = this.aircraft.spec.id;
+    const wind = this.windKt > 0
+      ? `${String(this.windFromDeg).padStart(3, '0')}° / ${this.windKt} KT`
+      : 'CALM';
+    const l = this.lastLanding;
+    if (!l) {
+      this.screens.showLanding({
+        runway: '', score: 0, grade: '—', verdict: '', fpm: 0, cross: 0, past: 0, aim: 0,
+        wind, best: this.save.bestLandings[id] ?? null, isRecord: false,
+      }, this.debrief());
+      return;
+    }
+    if (l.score.score >= 88) this.sound.finishFanfare();
+    const report: LandingReport = {
+      runway: `${l.rw.ident} · ${l.rw.fieldName}`,
+      score: l.score.score, grade: l.score.grade, verdict: l.score.verdict,
+      fpm: l.score.fpm, cross: l.rw.cross, past: l.rw.past, aim: l.score.aim,
+      wind, best: this.save.bestLandings[id] ?? null,
+      isRecord: this.landingWasRecord,
+    };
+    this.screens.showLanding(report, this.debrief());
+  }
+
+  private landingWasRecord = false;
+
+  /**
+   * Wheels just touched after a real airborne segment: find the runway
+   * under them and grade the arrival. Hops and bounces (never above 15 m)
+   * are not landings; neither is Ring Rush.
+   */
+  private gradeTouchdown(sink: number): void {
+    const st = this.aircraft.state;
+    const spec = this.aircraft.spec;
+    const real = this.airMaxAgl > 15;
+    this.airMaxAgl = 0;
+    if (!real || this.rings.active) return;
+    this.touchedDown = true;
+    // helicopters land anywhere — only Final Approach grades them
+    if (spec.engine === 'heli' && this.save.mode !== 'approach') return;
+    const gs = Math.hypot(st.vel.x, st.vel.z);
+    const track = gs > 3 ? Math.atan2(st.vel.x, -st.vel.z) : st.heading;
+    this.gen.airfieldsNear(st.pos.x, st.pos.z, 6000, this.landingFields);
+    const rw = runwayUnder(this.landingFields, st.pos.x, st.pos.z, track, this.landingScratch);
+    if (!rw) {
+      this.lastLanding = null;
+      if (sink < 1.6) this.screens.toast('SMOOTH — BUT THAT IS NOT A RUNWAY', 2400);
+      return;
+    }
+    const score = scoreLanding({
+      sink, cross: rw.cross, past: rw.past, length: rw.length, width: rw.width,
+    });
+    this.lastLanding = { score, rw };
+    const prev = this.save.bestLandings[spec.id];
+    this.landingWasRecord = prev === undefined || score.score > prev;
+    if (this.landingWasRecord) this.save.bestLandings[spec.id] = score.score;
+    this.save.landings++;
+    persist(this.save);
+    const side = Math.abs(rw.cross) < 0.5 ? 'ON THE LINE'
+      : `${Math.abs(rw.cross).toFixed(0)} m ${rw.cross > 0 ? 'RIGHT' : 'LEFT'}`;
+    this.screens.toast(
+      `${score.grade === 'A+' ? 'GREASED IT' : 'LANDING'} · ${score.grade} (${score.score}) · ` +
+      `${Math.round(score.fpm)} FPM · ${side} · ${Math.round(rw.past)} m IN`,
+      4200,
+    );
+  }
+
+  /**
+   * Master warning. PULL UP: the flight path, held straight, meets terrain
+   * (or the sea) within ~8 s — unless that is a configured arrival at an
+   * airfield, or a slow deliberate off-field landing. TOO LOW — GEAR: low,
+   * slow and descending with the wheels up. OVERSPEED: past VNE.
+   */
+  private checkWarnings(radar: number, dt: number): void {
+    const st = this.aircraft.state;
+    const spec = this.aircraft.spec;
+    const c = this.input.controls;
+    let w: string | null = null;
+    if (!st.onGround && !st.crashed) {
+      const heli = spec.engine === 'heli';
+      const gearOk = c.gearDown || !spec.retractableGear;
+      if (st.airspeed > spec.vne * 1.01) w = 'OVERSPEED';
+      // slow, configured, gentle sink close to the ground = landing on purpose
+      const settling = gearOk && radar < 70 && st.vel.y > -4.5 &&
+        (heli ? st.airspeed < 26 : st.airspeed < stallSpeed(spec, 0) * 1.45);
+      if (!settling) {
+        for (let t = 2; t <= 8; t += 2) {
+          const x = st.pos.x + st.vel.x * t;
+          const z = st.pos.z + st.vel.z * t;
+          const y = st.pos.y + st.vel.y * t - spec.gearHeight;
+          if (y < Math.max(this.gen.heightAt(x, z), 0) + 8) {
+            const arriving = gearOk && st.vel.y > -9 &&
+              this.gen.airfieldsNear(x, z, 3200, this.landingFields).length > 0;
+            if (!arriving) w = 'PULL UP';
+            break;
+          }
+        }
+      }
+      if (!w && spec.retractableGear && !c.gearDown && radar < 150 && st.vel.y < -0.5 &&
+          st.airspeed < stallSpeed(spec, 0) * 1.7) {
+        w = 'TOO LOW — GEAR';
+      }
+    }
+    // latch for half a second so a marginal trigger reads as a call, not a flicker
+    if (w) {
+      this.warn = w;
+      this.warnHold = 0.5;
+    } else if (this.warn) {
+      this.warnHold -= dt;
+      if (this.warnHold <= 0) this.warn = null;
+    }
+  }
+
   private finishRace(): void {
     this.state = 'victory';
+    this.sound.silence();
     this.sound.finishFanfare();
     this.hud.visible = false;
     this.minimap.show(false);
@@ -656,6 +888,14 @@ class Game {
 
   private frame(): void {
     this.timer.update();
+    // frame-rate telemetry (autofly title)
+    this.fpsFrames++;
+    const now = performance.now();
+    if (now - this.fpsT0 >= 1000) {
+      this.fps = Math.round((this.fpsFrames * 1000) / (now - this.fpsT0));
+      this.fpsFrames = 0;
+      this.fpsT0 = now;
+    }
     // tight clamp: a dropped frame slows the sim a hair instead of letting
     // the world visibly jump ("rubber banding")
     const dt = clamp(this.timer.getDelta(), 0, 0.04);
@@ -674,7 +914,7 @@ class Game {
     // the far shell carries the horizon out to ~30 km, so the higher you fly
     // the further the eye is allowed to reach before the haze closes in
     const fog = this.scene.fog as THREE.Fog;
-    const scale = this.terrain.effRadius() / this.terrain.radius;
+    const scale = this.terrain.fogScale();
     const farT = Math.min(this.baseFogFar * scale + Math.max(agl - 400, 0) * 6, this.fogFarCap);
     const nearT = farT * (this.baseFogNear / this.baseFogFar);
     fog.near = clamp(damp(fog.near, nearT, 0.8, dt), 100, 40000);
@@ -721,6 +961,10 @@ class Game {
         this.crashFrame(dt);
         break;
       case 'paused':
+        // keep polling a gamepad while paused so Start can resume (dt 0:
+        // nothing moves, button edges still fire)
+        this.input.update(0);
+        break;
       case 'victory':
         break;
     }
@@ -761,13 +1005,20 @@ class Game {
           for (let t = 0; t < ff; t += step) {
             this.applyAutoFly();
             this.input.update(step);
+            if (this.autopilot.engaged) {
+              const s = this.aircraft.state;
+              this.autopilot.update(
+                this.aircraft.spec, s, this.input.controls, step,
+                s.pos.y - Math.max(this.gen.heightAt(s.pos.x, s.pos.z), 0) - this.aircraft.spec.gearHeight,
+              );
+            }
             this.aircraft.update(this.input.controls, step, this.heightFn);
             if (this.aircraft.state.crashed) break;
           }
           this.wasOnGround = this.aircraft.state.onGround;
           // debug captures need the shell NOW — virtual-time headless runs
           // race the worker build, and both comparisons are shell-relative
-          if (this.terrain.morphHold || this.terrain.shellOnly) {
+          if (this.lodTint || this.terrain.shellOnly) {
             const p = this.aircraft.state.pos;
             this.terrain.forceFarBuild(p.x, p.z);
           }
@@ -823,10 +1074,12 @@ class Game {
       if (want === null) {
         this.route.engaged = false;
         this.screens.toast('FLIGHT PLAN COMPLETE — HOLDING HEADING', 3000);
-      } else if (this.autopilot.engaged) {
+      } else if (this.autopilot.engaged && !this.autopilot.approach) {
         this.autopilot.targetHdg = want;
       }
     }
+
+    const radar = st.pos.y - Math.max(this.gen.heightAt(st.pos.x, st.pos.z), 0) - this.aircraft.spec.gearHeight;
 
     // autopilot: manual stick input kicks it off, like the real thing
     if (this.autopilot.engaged) {
@@ -835,16 +1088,38 @@ class Game {
         this.screens.setApPanel(false);
         this.screens.toast('AP DISENGAGED — MANUAL INPUT');
       } else {
-        this.autopilot.update(this.aircraft.spec, st, this.input.controls, dt);
+        const ap = this.autopilot;
+        ap.update(this.aircraft.spec, st, this.input.controls, dt, radar);
         this.touch?.setThrottle(this.input.controls.throttle);
-        const hdg = ((this.autopilot.targetHdg * 180 / Math.PI) % 360 + 360) % 360;
-        this.screens.setApPanel(
-          true,
-          `${String(Math.round(hdg)).padStart(3, '0')}°`,
-          `${Math.round(this.autopilot.targetAlt * M_TO_FT / 50) * 50} FT`,
-          `${Math.round(this.autopilot.targetSpd * MS_TO_KT)} KT`,
-          `${Math.round(this.autopilot.targetVs * 196.85 / 100) * 100} FPM`,
-        );
+        const appr = ap.approach;
+        // call the approach phases as they change
+        if (appr && ap.apprPhase !== this.lastApprPhase) {
+          this.lastApprPhase = ap.apprPhase;
+          if (ap.apprPhase === 'gs') {
+            const cfg = this.aircraft.spec.retractableGear && !this.input.controls.gearDown
+              ? 'GEAR DOWN, SET FLAPS' : 'SET LANDING FLAPS';
+            this.screens.toast(`GLIDESLOPE CAPTURED — ${cfg}`, 3200);
+          } else if (ap.apprPhase === 'flare') this.screens.toast('FLARE — RETARD', 1600);
+          else if (ap.apprPhase === 'rollout') this.screens.toast('ROLLOUT — AUTOBRAKE', 2200);
+        }
+        if (!ap.engaged) {
+          // the approach mode hands the aircraft back once it has stopped
+          this.screens.setApPanel(false);
+          this.screens.toast('AUTOLAND COMPLETE — YOUR AIRCRAFT', 2800);
+        } else {
+          const hdg = ((ap.targetHdg * 180 / Math.PI) % 360 + 360) % 360;
+          this.screens.setApPanel(
+            true,
+            appr ? `LOC ${appr.ident}` : `${String(Math.round(hdg)).padStart(3, '0')}°`,
+            appr && ap.apprPhase !== 'loc' ? 'G/S' : `${Math.round(ap.targetAlt * M_TO_FT / 50) * 50} FT`,
+            `${Math.round(ap.targetSpd * MS_TO_KT)} KT`,
+            `${Math.round(ap.targetVs * 196.85 / 100) * 100} FPM`,
+          );
+          this.screens.setApAppr(
+            this.aircraft.spec.engine !== 'heli', !!appr,
+            appr ? `APPR · ${ap.apprPhase === 'gs' ? 'G/S' : ap.apprPhase.toUpperCase()}` : 'APPR',
+          );
+        }
       }
     }
 
@@ -852,7 +1127,13 @@ class Game {
 
     // ILS receiver: retune to the best approach ahead about once a second
     this.ilsTimer -= dt;
-    if (this.ilsTimer <= 0 && this.ilsOn) {
+    if (this.autopilot.approach) {
+      // coupled: the receiver stays on the approach being flown
+      this.ilsTuned = this.autopilot.approach;
+    } else if (this.ilsTimer <= 0 && this.ilsOn && !st.onGround) {
+      // (airborne only: sitting on the runway it would "capture" the strip
+      // under the wheels and its toast wiped the take-off clearance and
+      // wind call a second after they appeared)
       this.ilsTimer = 1;
       const hadIls = this.ilsTuned;
       this.gen.airfieldsNear(st.pos.x, st.pos.z, 36000, this.ilsFieldScratch);
@@ -882,22 +1163,34 @@ class Game {
 
     // landing / takeoff transitions
     if (!st.crashed) {
+      if (!st.onGround && radar > this.airMaxAgl) this.airMaxAgl = radar;
       if (this.wasOnGround && !st.onGround) {
-        this.screens.toast('POSITIVE CLIMB', 1500);
+        if (!this.touchedDown) this.screens.toast('POSITIVE CLIMB', 1500);
       } else if (!this.wasOnGround && st.onGround) {
         this.sound.touchdown();
         this.flightCam.addShake(clamp(this.prevSinkRate * 0.12, 0.1, 0.8));
-        if (this.prevSinkRate < 1.6 && this.gen.isOnRunway(st.pos.x, st.pos.z)) {
-          this.screens.toast('GREASED IT — BEAUTIFUL LANDING', 2400);
-        }
+        this.gradeTouchdown(this.prevSinkRate);
       }
       this.prevSinkRate = -st.vel.y;
       this.wasOnGround = st.onGround;
-    }
 
-    // stats
+      // Final Approach ends once the aircraft has come to rest
+      if (this.save.mode === 'approach' && this.touchedDown && st.onGround &&
+          Math.hypot(st.vel.x, st.vel.z) < 1.2) {
+        this.stopTimer += dt;
+        if (this.stopTimer > 0.9) {
+          this.finishApproach();
+          return;
+        }
+      } else {
+        this.stopTimer = 0;
+      }
+    }
+    this.checkWarnings(radar, dt);
+
+    // stats (distance over the GROUND — airspeed counted a headwind as progress)
     this.stats.flightTime += dt;
-    this.stats.distanceKm += (st.airspeed * dt) / 1000;
+    this.stats.distanceKm += (Math.hypot(st.vel.x, st.vel.z) * dt) / 1000;
     this.stats.maxAltFt = Math.max(this.stats.maxAltFt, st.pos.y * M_TO_FT);
     this.stats.maxSpdKt = Math.max(this.stats.maxSpdKt, st.airspeed * MS_TO_KT);
 
@@ -930,6 +1223,7 @@ class Game {
       this.input.controls.throttle, st.thrustFrac, st.airspeed, st.stalled, this.simTime,
       heli ? st.rotorRpm : 1,
       heli && !st.onGround && st.rotorRpm < 0.9, // low-rotor-RPM horn
+      this.warn !== null,
     );
     this.hud.draw(this.hudData(), dt);
     this.minimap.update(
@@ -954,13 +1248,23 @@ class Game {
   private applyAutoFly(): void {
     const st = this.aircraft.state;
     const c = this.input.controls;
-    c.throttle = 1;
     const radar = st.pos.y - this.gen.heightAt(st.pos.x, st.pos.z);
-    if (this.aircraft.spec.engine === 'heli') {
+    if (this.save.mode === 'approach') {
+      // smoke test: let the autopilot fly the ILS to a full autoland
+      if (this.aircraft.spec.engine !== 'heli') {
+        if (!this.touchedDown && !st.onGround && !this.autopilot.approach && this.ilsTuned) {
+          this.autopilot.engage(st, c.throttle, 30);
+          this.autopilot.armApproach(this.ilsTuned);
+        }
+        if (this.autopilot.apprPhase === 'gs' && c.flaps < 1) this.input.setFlapsStep(3);
+      }
+    } else if (this.aircraft.spec.engine === 'heli') {
+      c.throttle = 1;
       // vertical climb-out, then nose over to accelerate into cruise
       c.pitch = radar > 30 && st.airspeed < 40 ? -0.5 : 0;
       c.roll = 0;
     } else {
+      c.throttle = 1;
       const spec = this.aircraft.spec;
       const rotateSpeed = Math.sqrt((2 * spec.mass * 9.81) /
         (1.225 * spec.wingArea * 1.1)) * 0.85;
@@ -972,20 +1276,24 @@ class Game {
       c.roll = 0;
       if (!st.onGround && radar > 150) c.flaps = 0;
     }
-    if (!st.onGround && radar > 50) c.gearDown = false;
+    if (this.save.mode !== 'approach' && !st.onGround && radar > 50) c.gearDown = false;
+    const ts = this.terrain.stats; // swaps / late swaps / arrivals / late arrivals / dropped
     const apDbg = (this.airport as unknown as { built: Map<string, { aeroBeacon: unknown }> }).built;
     let beacons = 0;
     for (const f of apDbg.values()) if (f.aeroBeacon) beacons++;
     document.title =
       `v=${st.airspeed.toFixed(1)} x=${st.pos.x.toFixed(0)} y=${st.pos.y.toFixed(1)} z=${st.pos.z.toFixed(0)} ` +
       `gnd=${st.onGround} thr=${c.throttle.toFixed(2)} tf=${st.thrustFrac.toFixed(2)} ` +
-      `pit=${st.pitchAngle.toFixed(2)} crash=${st.crashed} flds=${apDbg.size} bcn=${beacons}`;
+      `pit=${st.pitchAngle.toFixed(2)} crash=${st.crashed} flds=${apDbg.size} bcn=${beacons} ` +
+      `lod=${ts.swaps}/${ts.late}/${ts.fresh}/${ts.lateFresh}/${ts.dropped} fps=${this.fps} ` +
+      `appr=${this.autopilot.apprPhase} ldg=${this.lastLanding ? this.lastLanding.score.score : '-'} ` +
+      `warn=${this.warn ?? '-'} state=${this.state}`;
   }
 
   private crashFrame(dt: number): void {
     this.crashTimer -= dt;
     this.flightCam.update(this.aircraft, dt, this.heightFn);
-    this.sound.update(0, 0, 0, false, this.simTime);
+    this.sound.silence(); // the engine is not idling in the wreckage
     if (this.crashTimer <= 0 && this.screens.current !== 'crash') {
       this.screens.showCrash(this.aircraft.state.crashReason, this.debrief());
     }
@@ -1032,6 +1340,11 @@ class Game {
       brakes: c.brakes,
       airbrake: c.airbrake,
       autopilot: this.autopilot.engaged,
+      apMode: this.autopilot.approach
+        ? ({ loc: 'AP · LOC', gs: 'AP · G/S', flare: 'FLARE', rollout: 'ROLLOUT' } as Record<string, string>)[
+            this.autopilot.apprPhase] ?? 'AP'
+        : this.route.engaged ? 'AP · NAV' : 'AP',
+      warn: this.warn,
       stalled: st.stalled,
       afterburner: !!spec.afterburner && c.throttle >= 0.995,
       vne: spec.vne,
