@@ -8,6 +8,7 @@
 import { WorldGen, AirfieldDef, AIRPORTS, WATER_LEVEL } from '../world/heightfield';
 import type { RingCourse } from '../world/rings';
 import type { Route, Waypoint } from '../nav/route';
+import type { TrafficBlip } from '../world/traffic';
 import { MS_TO_KT, RAD2DEG } from '../core/math';
 
 const GRID = 52;          // terrain sample grid
@@ -40,6 +41,10 @@ export class Minimap {
   private centerZ = 0;
   private sampleRange = 0;
   private fields: AirfieldDef[] = [];
+  private blips: readonly TrafficBlip[] = [];
+  private nBlips = 0;
+  private ownY = 0;
+  private dest: { x: number; z: number } | null = null;
   /** nearest internationals from a wide (480 km) scan: always findable */
   private hubs: AirfieldDef[] = [];
   private fieldTimer = 0;
@@ -191,6 +196,18 @@ export class Minimap {
   }
 
   private range(): number { return RANGES[this.rangeIdx]; }
+
+  /** Other traffic to plot (traffic.blips), and the player's altitude. */
+  setTraffic(blips: readonly TrafficBlip[], n: number, ownY: number): void {
+    this.blips = blips;
+    this.nBlips = n;
+    this.ownY = ownY;
+  }
+
+  /** Destination to ring on the map (a job), or null. */
+  setDestination(d: { x: number; z: number } | null): void {
+    this.dest = d;
+  }
 
   zoom(dir: number): void {
     const next = Math.min(Math.max(this.rangeIdx + dir, 0), RANGES.length - 1);
@@ -505,6 +522,69 @@ export class Minimap {
         ctx.fillText(ap.name, R + 5, 0.5);
       }
       ctx.restore();
+    }
+
+    // traffic: airborne aircraft as cyan arrowheads with their height
+    // relative to yours in hundreds of feet (the TCAS convention: +12 is
+    // 1,200 ft above), aircraft on a runway hollow, ships as grey ticks
+    for (let i = 0; i < this.nBlips; i++) {
+      const b = this.blips[i];
+      const bx = (b.x - vx) * toMap;
+      const bz = (b.z - vz) * toMap;
+      if (Math.hypot(bx, bz) > c - 9) continue;
+      ctx.save();
+      ctx.translate(bx, bz);
+      if (b.kind === 2) {
+        ctx.rotate(b.hdg);
+        ctx.fillStyle = 'rgba(200, 212, 226, 0.85)';
+        ctx.fillRect(-1.5, -4, 3, 8);
+      } else {
+        ctx.save();
+        ctx.rotate(b.hdg);
+        ctx.beginPath();
+        ctx.moveTo(0, -6);
+        ctx.lineTo(4, 4.5);
+        ctx.lineTo(0, 2.2);
+        ctx.lineTo(-4, 4.5);
+        ctx.closePath();
+        ctx.fillStyle = 'rgba(7, 13, 24, 0.9)';
+        ctx.fill();
+        ctx.strokeStyle = '#6fdcff';
+        ctx.lineWidth = 1.3;
+        ctx.stroke();
+        if (b.kind === 0) {
+          ctx.fillStyle = '#6fdcff';
+          ctx.fill();
+        }
+        ctx.restore();
+        if (b.kind === 0) {
+          const hundreds = Math.round(((b.y - this.ownY) * 3.28084) / 100);
+          ctx.rotate(-rot);
+          ctx.fillStyle = '#6fdcff';
+          ctx.font = `700 8px 'Chakra Petch', monospace`;
+          ctx.textAlign = 'left';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(`${hundreds >= 0 ? '+' : '−'}${String(Math.abs(hundreds)).padStart(2, '0')}`, 7, 0);
+        }
+      }
+      ctx.restore();
+    }
+
+    // the job's destination: a pulsing amber ring you cannot miss
+    if (this.dest) {
+      let dx = (this.dest.x - vx) * toMap;
+      let dz = (this.dest.z - vz) * toMap;
+      const d = Math.hypot(dx, dz);
+      const maxR = c - 16;
+      if (d > maxR) { dx = (dx / d) * maxR; dz = (dz / d) * maxR; }
+      const pulse = 11 + Math.sin(performance.now() / 260) * 2.5;
+      ctx.strokeStyle = '#ffb340';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([5, 4]);
+      ctx.beginPath();
+      ctx.arc(dx, dz, pulse, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
     }
 
     // directional pointers to the nearest internationals BEYOND the field

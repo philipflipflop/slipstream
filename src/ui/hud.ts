@@ -26,6 +26,8 @@ export interface HudData {
   apMode: string;
   /** master warning text (terrain / gear / overspeed), null when quiet */
   warn: string | null;
+  /** fixed-wing engine failure caption ("ENG 1 OUT", "ENG OUT · GLIDE 72"), or null */
+  engFail: string | null;
   stalled: boolean;
   afterburner: boolean;
   vne: number;        // m/s
@@ -582,6 +584,7 @@ export class Hud {
     if (!safetyOnly) {
       const items: Array<[string, string]> = [];
       if (d.heli?.engineOut) items.push(['ENG OUT', `rgba(${RED},0.95)`]);
+      if (d.engFail) items.push([d.engFail, `rgba(${RED},0.95)`]);
       if (d.autopilot) items.push([d.apMode || 'AP', `rgba(${AMBER},0.95)`]);
       if (d.retractable) items.push(d.gearDown ? ['GEAR ▼', this.g(0.9)] : ['GEAR ▲', this.g(0.45)]);
       if (d.flaps > 0.01) items.push([`FLAPS ${Math.round(d.flaps * 3)}`, this.g(0.9)]);

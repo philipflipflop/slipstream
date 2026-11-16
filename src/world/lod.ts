@@ -246,3 +246,134 @@ export function planStep(
 export function morphAt(band: readonly [number, number], d: number): number {
   return 1 - sstep(band[0], band[1], d);
 }
+
+/* ------------------------------------------------------------ shells ---- */
+
+/**
+ * Beyond the chunk disc the world is two nested coarse lattices:
+ *
+ *   S — the far shell: 450/600 m cells out to 27–40 km. Level-0 chunks
+ *       collapse onto it (above).
+ *   H — the horizon shell: 1800 m cells out to 90–216 km. It is what lets
+ *       the eye meet terrain almost to the true horizon at altitude; before
+ *       it existed the world ended ~35 km out, so at 39,000 ft the "horizon"
+ *       sat 17° below eye level and most of the screen was haze-coloured sky.
+ *
+ * S hands over to H exactly the way chunks hand over to S: every S vertex
+ * carries H's look and blends to it by distance from the streaming centre
+ * inside `band`. Outside that band S renders H's surface exactly, so
+ * re-centring S (a mesh swap) changes no pixel, and H's inner hole can be
+ * cut anywhere S is collapsed.
+ *
+ * H's own rim is the only edge left in the world, and nothing morphs there:
+ * it must sit beyond full haze. `fogCap` is therefore bounded by
+ * (H radius − H_DRIFT − STREAM_LEAD) — asserted in tests/19.
+ */
+export interface ShellPreset {
+  /** far shell S: cells per side, cell size (m) */
+  cells: number;
+  cell: number;
+  /** horizon shell H */
+  hCells: number;
+  hCell: number;
+  /** the farthest the haze may open, m */
+  fogCap: number;
+}
+
+export const SHELL_PRESETS: Record<LodQuality, ShellPreset> = {
+  low:    { cells: 90,  cell: 600, hCells: 100, hCell: 1800, fogCap: 74000 },
+  medium: { cells: 150, cell: 450, hCells: 176, hCell: 1800, fogCap: 142000 },
+  high:   { cells: 180, cell: 450, hCells: 240, hCell: 1800, fogCap: 200000 },
+};
+
+/**
+ * Visibility at ground level (where full haze closes), m. It used to be the
+ * chunk load radius — 3.5 / 5 / 7 km — because the haze had to hide the edge
+ * of the streamed disc. Nothing needs hiding there any more (level-0 chunks
+ * sit collapsed on the far shell, which carries on to 27–40 km), so the
+ * ground view is simply as far as a clear day should look and the far shell
+ * can afford: it must stay inside S's own limit (asserted in tests/22).
+ */
+export const GROUND_VIEW: Record<LodQuality, number> = { low: 7000, medium: 11500, high: 16500 };
+/** haze starts at this fraction of the visibility */
+export const HAZE_NEAR = 0.4;
+
+/** S re-centres once the streaming centre is this far from its mesh centre
+ *  (when the chunk queue is idle / regardless). Rebuilds are cheap: the
+ *  builder reuses every lattice point the previous shell already had. */
+export const S_RECENTRE_IDLE = 1800;
+export const S_RECENTRE = 2700;
+/** worst-case S drift the nominal geometry allows for: the trigger plus the
+ *  distance flown while the rebuild is in the worker */
+export const S_DRIFT = 3600;
+export const H_RECENTRE_IDLE = 5400;
+export const H_RECENTRE = 9000;
+export const H_DRIFT = 10800;
+/** H's hole is re-punched once the streaming centre has moved this far */
+export const H_HOLE_STEP = 450;
+/** the streaming centre leads the aircraft by up to this much (main.ts) */
+export const STREAM_LEAD = 4500;
+/** width of S's blend band toward H */
+const S_BAND_W = 6000;
+/** A collapsed far shell sits EXACTLY on the horizon shell — no lift. The
+ *  two then z-fight wherever both are drawn, which is invisible because
+ *  they are the same surface with the same paint; whereas even 1.5 m of
+ *  lift re-drew every low coast (land within the lift of the waterline
+ *  flipped between sea and shore as the overlap moved — caught by the
+ *  in-browser shell-shift pixel diff, see CLAUDE.md "Verification"). */
+export const SHELL_LIFT = 0;
+
+/** H quads survive until FULLY inside the hole (one cell diagonal) and the
+ *  punched hole trails the streaming centre by up to H_HOLE_STEP: S must be
+ *  collapsed this far inside H's hole radius */
+export const hSlack = (hCell: number): number => hCell * Math.SQRT2 + H_HOLE_STEP + 60;
+
+/**
+ * The largest hole H may carry — the disc S really covers around the
+ * streaming centre — for S radius `rS` and the current S `drift` (distance
+ * between the streaming centre and S's mesh centre). In steady flight
+ * drift ≤ S_DRIFT and this is constant; a late S rebuild shrinks it rather
+ * than letting H's hole outrun S (sky-dome void).
+ */
+export function shellHole(rS: number, drift: number): number {
+  return rS - Math.max(drift, S_DRIFT) - 100;
+}
+
+/** S collapse edge wanted for a given H hole: S renders H's look beyond it. */
+export function shellEdge(holeH: number, hCell: number): number {
+  return Math.max(holeH - hSlack(hCell), 100);
+}
+
+/**
+ * Slew the S collapse edge toward its target. When a rebuilt S lands, its
+ * drift drops by kilometres at once and the band must walk back out rather
+ * than jump (outward: brisk). While a rebuild is LATE, coverage shrinks at
+ * flight speed and the edge has to keep up exactly, or H would be drawn
+ * under un-collapsed S (inward: faster than anything here flies).
+ */
+export function slewShellEdge(edge: number, target: number, dt: number): number {
+  const d = target - edge;
+  const lim = (d > 0 ? Math.max(1500, d * 0.8) : 900) * dt;
+  return edge + (d > lim ? lim : d < -lim ? -lim : d);
+}
+
+/** The hole to punch in H: never beyond S's real coverage (void), and never
+ *  further out than the slewed edge allows (the hole follows the blend, not
+ *  the other way round). */
+export function horizonHole(cover: number, edge: number, hCell: number): number {
+  return Math.min(cover, edge + hSlack(hCell));
+}
+
+/** S blend band for a (slewed) collapse edge: own look inside band[0]. */
+export function shellBand(edge: number): [number, number] {
+  return [Math.max(edge - S_BAND_W, 50), edge];
+}
+
+/** Altitude-driven visibility: how far the haze opens, before the cap.
+ *  `base` is the ground visibility × the preset's fogScale. Unchanged from
+ *  the pre-horizon law below 1200 m, then ~17 m per metre of height: the
+ *  full-haze line stays ~3.5° below eye level, about where the real horizon
+ *  (2.5° at 20,000 ft, 3.5° at 39,000 ft) sits. */
+export function visibility(base: number, agl: number, cap: number): number {
+  return Math.min(base + Math.max(agl - 400, 0) * 6 + Math.max(agl - 1200, 0) * 11, cap);
+}

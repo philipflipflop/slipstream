@@ -39,9 +39,10 @@ export class FlightCamera {
     // near=1 doubles far-field depth precision vs 0.5 — kills shoreline
     // z-fighting (the airframe is hidden in cockpit view, so nothing sits
     // closer than ~1 m anyway)
-    // far plane reaches past the corners of the far terrain shell; raising
-    // far barely costs depth precision (that's governed by near)
-    this.camera = new THREE.PerspectiveCamera(62, aspect, 1.0, 60000);
+    // far plane reaches past the rim of the horizon shell (216 km + drift,
+    // seen from altitude); raising far barely costs depth precision (that's
+    // governed by near)
+    this.camera = new THREE.PerspectiveCamera(62, aspect, 1.0, 260000);
   }
 
   cycle(): CameraMode {

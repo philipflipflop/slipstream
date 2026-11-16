@@ -33,18 +33,38 @@ export class RingCourse {
     let x = home.x + home.cosH * across;
     let z = home.z + home.sinH * across - home.length / 2 - 700;
     let heading = 0; // radians, 0 = flying toward -Z
-    let y = 140;
+    // lay the track out first, then the heights: every gate clears the
+    // highest ground near it, and a climb the course cannot make in one leg
+    // (160 m) starts a gate or two EARLIER — a gate may never end up inside
+    // the hill it was supposed to lead over
+    const track: Array<{ x: number; z: number; heading: number; y: number }> = [];
     for (let i = 0; i < RING_COUNT; i++) {
-      const dirX = -Math.sin(heading);
-      const dirZ = -Math.cos(heading);
-
-      // keep clearance over the highest ground near the gate
       let ground = -100;
       for (let dx = -150; dx <= 150; dx += 150)
         for (let dz = -150; dz <= 150; dz += 150)
           ground = Math.max(ground, gen.heightAt(x + dx, z + dz));
-      const targetY = Math.max(ground + 110, 120);
-      y += THREE.MathUtils.clamp(targetY - y, -120, 160);
+      track.push({ x, z, heading, y: Math.max(ground + 110, 120) });
+      // advance with a sweeping S-curve
+      heading += Math.sin(i * 0.82 + 0.6) * 0.46;
+      const step = 760 + (i % 3) * 140;
+      x += -Math.sin(heading) * step;
+      z += -Math.cos(heading) * step;
+    }
+    let y = 140;
+    for (const g of track) {
+      y = Math.max(g.y, y - 120);   // descend gently, never below clearance
+      g.y = y;
+    }
+    for (let i = RING_COUNT - 2; i >= 0; i--) {
+      track[i].y = Math.max(track[i].y, track[i + 1].y - 160);
+    }
+
+    for (let i = 0; i < RING_COUNT; i++) {
+      x = track[i].x;
+      z = track[i].z;
+      y = track[i].y;
+      const dirX = -Math.sin(track[i].heading);
+      const dirZ = -Math.cos(track[i].heading);
 
       const mat = new THREE.MeshStandardMaterial({
         color: 0x153041,
@@ -61,12 +81,6 @@ export class RingCourse {
       mesh.lookAt(mesh.position.clone().add(axis));
       this.group.add(mesh);
       this.rings.push({ pos: mesh.position.clone(), axis, mesh, mat });
-
-      // advance with a sweeping S-curve
-      heading += Math.sin(i * 0.82 + 0.6) * 0.46;
-      const step = 760 + (i % 3) * 140;
-      x += -Math.sin(heading) * step;
-      z += -Math.cos(heading) * step;
     }
 
     this.group.visible = false;

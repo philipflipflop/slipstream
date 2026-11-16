@@ -16,7 +16,7 @@ type SimEvent =
 export class InputManager {
   readonly controls: ControlInputs = {
     pitch: 0, roll: 0, yaw: 0, throttle: 0, flaps: 0,
-    gearDown: true, brakes: false, airbrake: false, engineCut: false,
+    gearDown: true, brakes: false, airbrake: false, engineCut: false, enginesOut: 0,
   };
 
   invertY = false;
@@ -221,6 +221,7 @@ export class InputManager {
     this.controls.brakes = false;
     this.controls.airbrake = false;
     this.controls.engineCut = false;
+    this.controls.enginesOut = 0;
     this.flapsStep = 0;
     this.flapsDir = 1;
     this.touchYaw = 0;

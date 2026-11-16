@@ -6,6 +6,7 @@
 import { CATALOG } from '../aircraft/catalog';
 import { WORLDS, WorldTheme } from '../world/heightfield';
 import { DAYLIGHTS, TimeOfDay } from '../world/daylight';
+import { WEATHERS, WeatherId } from '../world/weather';
 import type { SaveData, Quality, GameMode } from '../save';
 import { formatTime } from '../core/math';
 
@@ -31,7 +32,37 @@ export interface LandingReport {
   isRecord: boolean;
 }
 
-type ScreenName = 'menu' | 'pause' | 'crash' | 'victory' | null;
+type ScreenName = 'menu' | 'pause' | 'crash' | 'victory' | 'jobs' | null;
+
+/** one line of the job board */
+export interface JobCard {
+  kind: string;
+  title: string;
+  to: string;
+  km: number;
+  bearing: number;
+  par: string;
+  pay: number;
+  note: string;
+}
+
+/** arrival debrief of a job */
+export interface JobReport {
+  title: string;
+  to: string;
+  grade: string;
+  fee: number;
+  pay: number;
+  time: string;
+  par: string;
+  timePct: number;
+  landing: string;
+  landPct: number;
+  comfort: string | null;
+  comfortPct: number;
+  credits: number;
+  jobs: number;
+}
 
 export class Screens {
   // callbacks wired by main.ts
@@ -43,6 +74,7 @@ export class Screens {
   onMode: (mode: GameMode) => void = () => {};
   onWorld: (world: WorldTheme) => void = () => {};
   onTod: (tod: TimeOfDay) => void = () => {};
+  onWeather: (wx: WeatherId) => void = () => {};
   onSettings: () => void = () => {};
   onAnyClick: () => void = () => {};
   /** kind: 'hdg' | 'alt' | 'spd' | 'vs'; dir: -1 | 1 */
@@ -58,6 +90,8 @@ export class Screens {
   private helpEl!: HTMLDivElement;
   private settingsEl!: HTMLDivElement;
   private toastEl!: HTMLDivElement;
+  private jobsEl!: HTMLDivElement;
+  private jobLine!: HTMLDivElement;
   private pauseBtn!: HTMLButtonElement;
   private rotateHint!: HTMLDivElement;
   private apPanel!: HTMLDivElement;
@@ -75,6 +109,7 @@ export class Screens {
     this.buildPause();
     this.buildCrash();
     this.buildVictory();
+    this.buildJobs();
     this.buildHelp();
     this.buildSettings();
     this.buildMisc();
@@ -95,6 +130,7 @@ export class Screens {
     this.pauseEl.classList.toggle('on', name === 'pause');
     this.crashEl.classList.toggle('on', name === 'crash');
     this.victoryEl.classList.toggle('on', name === 'victory');
+    this.jobsEl.classList.toggle('on', name === 'jobs');
     this.pauseBtn.classList.toggle('show', name === null && this.isTouch);
     if (name !== null) {
       this.helpEl.classList.remove('on');
@@ -154,9 +190,14 @@ export class Screens {
                   <div class="mc-name">Final Approach</div>
                   <div class="mc-desc">Start on final. Land it, get graded</div>
                 </button>
+                <button class="mode-chip" data-mode="job">
+                  <div class="mc-name">Charter</div>
+                  <div class="mc-desc">Fly paying jobs, field to field</div>
+                </button>
               </div>
               <div class="world-row"></div>
               <div class="tod-row"></div>
+              <div class="tod-row wx-row"></div>
               <div class="best-time"></div>
             </div>
           </div>
@@ -218,6 +259,18 @@ export class Screens {
       });
     });
 
+    // weather selector (same chips; the description is the briefing)
+    const xRow = m.querySelector('.wx-row')!;
+    xRow.innerHTML = WEATHERS.map(
+      (w) => `<button class="tod-chip wx-chip" data-wx="${w.id}" title="${w.desc}">${w.name}</button>`,
+    ).join('');
+    xRow.querySelectorAll<HTMLButtonElement>('.wx-chip').forEach((chip) => {
+      chip.addEventListener('click', () => {
+        const id = chip.dataset.wx as WeatherId;
+        if (id !== this.save.wx) this.onWeather(id);
+      });
+    });
+
     window.addEventListener('keydown', (e) => {
       if (this.current !== 'menu') return;
       if (e.code === 'ArrowLeft') this.stepAircraft(-1);
@@ -268,8 +321,11 @@ export class Screens {
     m.querySelectorAll<HTMLButtonElement>('.world-chip').forEach((chip) => {
       chip.classList.toggle('on', chip.dataset.world === this.save.world);
     });
-    m.querySelectorAll<HTMLButtonElement>('.tod-chip').forEach((chip) => {
+    m.querySelectorAll<HTMLButtonElement>('.tod-chip:not(.wx-chip)').forEach((chip) => {
       chip.classList.toggle('on', chip.dataset.tod === this.save.tod);
+    });
+    m.querySelectorAll<HTMLButtonElement>('.wx-chip').forEach((chip) => {
+      chip.classList.toggle('on', chip.dataset.wx === this.save.wx);
     });
 
     const best = this.save.bestTimes[spec.id];
@@ -279,6 +335,10 @@ export class Screens {
         ? best
           ? `RING RUSH BEST — <b>${formatTime(best)}</b>`
           : 'RING RUSH — no time set in this aircraft'
+        : this.save.mode === 'job'
+          ? this.save.jobs > 0
+            ? `CHARTER — <b>${this.save.credits.toLocaleString('en-US')} cr</b> earned over ${this.save.jobs} job${this.save.jobs === 1 ? '' : 's'}`
+            : 'CHARTER — the job board opens when you take off'
         : this.save.mode === 'approach'
           ? bestLdg !== undefined
             ? `BEST LANDING — <b>${bestLdg} / 100</b>`
@@ -389,6 +449,77 @@ export class Screens {
     this.victoryEl.querySelector('.v-title')!.textContent = 'ALL GATES CLEARED';
     this.victoryEl.querySelector('.v-note')!.textContent = '';
     this.victoryEl.querySelector('.restart')!.textContent = 'Run It Again';
+    this.victoryEl.querySelector('.stats-slot')!.innerHTML = this.debriefHtml(stats, extra);
+    this.show('victory');
+  }
+
+  /* ---------------- jobs ---------------- */
+
+  private buildJobs(): void {
+    const j = this.el(`
+      <div class="screen">
+        <div class="veil"></div>
+        <div class="panel victory jobs">
+          <div class="kicker j-kicker">job board</div>
+          <h2 class="j-title"></h2>
+          <p class="v-note j-note"></p>
+          <div class="job-list"></div>
+          <div class="row">
+            <button class="btn ghost hangar">Hangar</button>
+          </div>
+        </div>
+      </div>`);
+    document.body.appendChild(j);
+    this.jobsEl = j;
+    j.querySelector('.hangar')!.addEventListener('click', () => this.onHangar());
+    this.jobLine = this.el(`<div id="jobline"></div>`);
+    document.body.appendChild(this.jobLine);
+  }
+
+  /** The board at a field: pick one and you are on the runway with it. */
+  showJobs(field: string, aircraft: string, cards: JobCard[], credits: number, onPick: (i: number) => void): void {
+    this.jobsEl.querySelector('.j-kicker')!.textContent = `job board · ${aircraft}`;
+    this.jobsEl.querySelector('.j-title')!.textContent = field;
+    this.jobsEl.querySelector('.j-note')!.textContent = cards.length
+      ? `Paid on arrival: the fee, adjusted for punctuality, the landing and — with people aboard — the ride. Earned so far: ${credits.toLocaleString('en-US')} cr.`
+      : 'Nothing on the board that this aircraft can fly from here. Try another aircraft, or fly somewhere bigger.';
+    const list = this.jobsEl.querySelector('.job-list')!;
+    list.innerHTML = cards.map((c, i) => `
+      <button class="job-card" data-i="${i}">
+        <div class="jc-kind">${c.kind}</div>
+        <div class="jc-main">
+          <div class="jc-title">${c.title}</div>
+          <div class="jc-to">→ ${c.to} · ${c.km.toFixed(0)} km · ${String(c.bearing).padStart(3, '0')}°${c.note ? ` · ${c.note}` : ''}</div>
+        </div>
+        <div class="jc-pay"><span>${c.pay.toLocaleString('en-US')} cr</span><small>par ${c.par}</small></div>
+      </button>`).join('');
+    list.querySelectorAll<HTMLButtonElement>('.job-card').forEach((b) => {
+      b.addEventListener('click', () => onPick(Number(b.dataset.i)));
+    });
+    this.show('jobs');
+  }
+
+  /** In-flight job strip under the compass (null hides it). */
+  setJobLine(text: string | null): void {
+    this.jobLine.textContent = text ?? '';
+    this.jobLine.classList.toggle('show', text !== null);
+  }
+
+  /** Arrival debrief: what the job paid, and why. */
+  showJobDone(r: JobReport, stats: DebriefStats): void {
+    const pct = (k: number): string => `${k >= 1 ? '+' : '−'}${Math.abs(Math.round((k - 1) * 100))}%`;
+    const extra = `
+      <div class="cell"><div class="k">Paid</div><div class="v green">${r.pay.toLocaleString('en-US')} cr</div></div>
+      <div class="cell"><div class="k">Fee</div><div class="v">${r.fee.toLocaleString('en-US')} cr</div></div>
+      <div class="cell"><div class="k">Time ${r.time} · par ${r.par}</div><div class="v">${pct(r.timePct)}</div></div>
+      <div class="cell"><div class="k">Landing ${r.landing}</div><div class="v">${pct(r.landPct)}</div></div>
+      ${r.comfort ? `<div class="cell"><div class="k">Ride ${r.comfort}</div><div class="v">${pct(r.comfortPct)}</div></div>` : ''}
+      <div class="cell"><div class="k">Career · ${r.jobs} job${r.jobs === 1 ? '' : 's'}</div><div class="v">${r.credits.toLocaleString('en-US')} cr</div></div>`;
+    this.victoryEl.querySelector('.v-kicker')!.textContent = `delivered · ${r.to}`;
+    this.victoryEl.querySelector('.v-title')!.textContent = `${r.title} — ${r.grade}`;
+    this.victoryEl.querySelector('.v-note')!.textContent =
+      'The fee is adjusted for punctuality (+15% early … −40% late), the landing grade and, with people aboard, the ride.';
+    this.victoryEl.querySelector('.restart')!.textContent = 'Next Job';
     this.victoryEl.querySelector('.stats-slot')!.innerHTML = this.debriefHtml(stats, extra);
     this.show('victory');
   }

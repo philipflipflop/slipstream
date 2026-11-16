@@ -3,17 +3,25 @@
  * math off the main thread, and posts transferable payloads back.
  */
 import { WorldGen, WorldTheme } from './heightfield';
-import { buildChunkPayload, payloadTransfers, buildFarPayload, farTransfers } from './terrainBuilder';
+import {
+  buildChunkPayload, payloadTransfers, buildFarPayload, farTransfers, cloneFar, FarPayload,
+} from './terrainBuilder';
 
 interface InitMsg { type: 'init'; seed: number; theme: WorldTheme }
 interface BuildMsg {
   type: 'build'; cx: number; cz: number; res: number; scatter: 0 | 1 | 2;
   prev: number; shellCell: number;
 }
-interface FarMsg { type: 'far'; ox: number; oz: number; cells: number; cellSize: number }
+interface FarMsg {
+  type: 'far'; slot: number; ox: number; oz: number; cells: number; cellSize: number;
+  parentCell: number; envelope: boolean;
+}
 type Msg = InitMsg | BuildMsg | FarMsg;
 
 let gen: WorldGen | null = null;
+// the last shell built per slot: a re-centre reuses every lattice point it
+// already has, so only the new strip is evaluated
+const lastFar: Array<FarPayload | null> = [null, null];
 
 self.onmessage = (e: MessageEvent<Msg>) => {
   const msg = e.data;
@@ -23,7 +31,11 @@ self.onmessage = (e: MessageEvent<Msg>) => {
   }
   if (!gen) return;
   if (msg.type === 'far') {
-    const p = buildFarPayload(gen, msg.ox, msg.oz, msg.cells, msg.cellSize);
+    const p = buildFarPayload(
+      gen, msg.ox, msg.oz, msg.cells, msg.cellSize, msg.parentCell, msg.envelope,
+      lastFar[msg.slot], msg.slot,
+    );
+    lastFar[msg.slot] = cloneFar(p);
     (self as unknown as Worker).postMessage(p, farTransfers(p));
     return;
   }

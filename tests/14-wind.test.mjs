@@ -125,3 +125,74 @@ const mkInp = (o = {}) => ({
   assert.ok(slid < 1.5, `parked jet slid ${slid.toFixed(1)} m in a 10 kt crosswind`);
   console.log(`  ✓ parked jet holds heading and position in a 10 kt crosswind (${(dh * 57.3).toFixed(2)}°, ${slid.toFixed(2)} m)`);
 }
+
+// parked stance in ANY wind: every fixed-wing type sits still on its gear
+// with a 15 kt wind from each quarter. Playtester report: "a lot of the
+// planes fall backwards at start, doing a small tail strike" — free flight
+// rolls a random wind, and whenever it came from the beam or the tail the
+// angle of attack read up to ±180°, the alpha spring heaved the nose 10–19°
+// up, and the reversed-flow drag blew the trainer 24 m down the runway.
+{
+  const { CATALOG } = await import('../.test-build/aircraft/catalog.js');
+  let worstPitch = 0;
+  let worstMove = 0;
+  let n = 0;
+  for (const spec of CATALOG) {
+    if (spec.engine === 'heli') continue;
+    for (const from of [0, 45, 90, 100, 135, 180, 225, 270, 315]) {
+      const st = createState();
+      spawnOnRunway(spec, st, flat); // runway heading 000
+      const rad = (from * Math.PI) / 180;
+      const ms = 15 / 1.944;
+      setWind(-Math.sin(rad) * ms, Math.cos(rad) * ms);
+      const x0 = st.pos.x, z0 = st.pos.z;
+      const inp = mkInp();
+      let dev = 0;
+      for (let t = 0; t < 8; t += dt) {
+        stepFlight(spec, st, inp, dt, flat);
+        dev = Math.max(dev, Math.abs(st.pitchAngle - spec.groundPitch));
+      }
+      const moved = Math.hypot(st.pos.x - x0, st.pos.z - z0);
+      assert.ok(!st.crashed, `${spec.id}: crashed parked in a 15 kt wind from ${from}°`);
+      assert.ok(dev < 0.03, `${spec.id}: nose moved ${(dev * 57.3).toFixed(1)}° parked, wind from ${from}°`);
+      assert.ok(moved < 0.3, `${spec.id}: blown ${moved.toFixed(1)} m along the ground, wind from ${from}°`);
+      worstPitch = Math.max(worstPitch, dev);
+      worstMove = Math.max(worstMove, moved);
+      n++;
+    }
+  }
+  setWind(0, 0);
+  console.log(`  ✓ parked in 15 kt from every quarter: ${n} cases, nose within ${(worstPitch * 57.3).toFixed(1)}°, moved ≤ ${worstMove.toFixed(2)} m`);
+}
+
+// ... and the tail still does its job once air arrives from ahead: a
+// tail-dragger's tail rises on the takeoff roll, and a tailwind take-off
+// still rotates and climbs (longer roll, same aeroplane)
+{
+  const fal = specById('falcon');
+  const st = createState();
+  spawnOnRunway(fal, st, flat);
+  const inp = mkInp({ throttle: 1 });
+  let minPitch = Infinity;
+  for (let t = 0; t < 14 && st.onGround; t += dt) {
+    stepFlight(fal, st, inp, dt, flat);
+    minPitch = Math.min(minPitch, st.pitchAngle);
+  }
+  assert.ok(minPitch < fal.groundPitch - 0.08,
+    `tail-dragger's tail never rose on the roll (min pitch ${(minPitch * 57.3).toFixed(1)}° vs ${(fal.groundPitch * 57.3).toFixed(1)}° parked)`);
+
+  const sk = specById('skylark');
+  const s2 = createState();
+  spawnOnRunway(sk, s2, flat);
+  setWind(0, -4.1); // 8 kt tailwind on runway 36
+  const i2 = mkInp({ throttle: 1 });
+  let t2 = 0;
+  for (; t2 < 60; t2 += dt) {
+    i2.pitch = s2.airspeed > 27 && s2.pitchAngle < 0.14 ? 0.5 : 0;
+    stepFlight(sk, s2, i2, dt, flat);
+    if (s2.pos.y > 8 + sk.gearHeight + 30) break;
+  }
+  setWind(0, 0);
+  assert.ok(!s2.crashed && s2.pos.y > 8 + sk.gearHeight + 30, 'tailwind take-off never climbed away');
+  console.log(`  ✓ tail still flies with air from ahead: tail-dragger's tail rises ${((fal.groundPitch - minPitch) * 57.3).toFixed(0)}° on the roll; 8 kt tailwind take-off climbs out in ${t2.toFixed(0)} s`);
+}

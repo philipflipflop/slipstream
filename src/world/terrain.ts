@@ -1,11 +1,13 @@
 /**
  * Infinite streamed terrain: square chunks around the aircraft at four
- * nested resolutions, over one coarse far-horizon shell. Detail is a pure
+ * nested resolutions, over two coarse shells — the far shell (450 m cells,
+ * ~40 km) and the horizon shell (1800 m cells, ~180 km). Detail is a pure
  * function of DISTANCE (see lod.ts): every chunk carries its parent level's
  * look and the vertex shader blends parent → own per vertex inside a
  * per-level distance band, so mesh swaps (up and down a level) land in dead
- * zones where both meshes render the identical surface. Nothing animates
- * over time in steady flight — that is what finally retired the LOD "pop".
+ * zones where both meshes render the identical surface. The far shell hands
+ * over to the horizon shell the same way. Nothing animates over time in
+ * steady flight — that is what finally retired the LOD "pop".
  *
  * The heavy generation math runs in a Web Worker (terrain.worker.ts) —
  * chunks arrive as transferable typed arrays and only the cheap GPU upload
@@ -17,6 +19,8 @@ import { buildChunkPayload, buildFarPayload, ChunkPayload, FarPayload, CHUNK_SIZ
 import {
   LOD_PRESETS, LodPreset, LodQuality, LodFrame, lodFrame, planStep, wantLevel, edgeBand,
   LEVEL_RES, levelOfRes, CHUNK_R, DEL_HYST, SHELL_SLACK, HOLE_STEP,
+  SHELL_PRESETS, ShellPreset, shellHole, shellEdge, shellBand, hSlack, slewShellEdge, horizonHole,
+  S_RECENTRE_IDLE, S_RECENTRE, H_RECENTRE_IDLE, H_RECENTRE, H_HOLE_STEP, STREAM_LEAD,
 } from './lod';
 
 export { CHUNK_SIZE };
@@ -245,15 +249,152 @@ const FADE_DUR = 1.2;
  *  times a second at altitude, so no string building in that loop. */
 const keyOf = (cx: number, cz: number): number => (cx + 32768) * 65536 + (cz + 32768);
 
-/** ?lodtint=1 — per-level tints (14 red, 28 amber, 56 green, 112 blue) */
+/** ?lodtint=1 — per-level tints (14 red, 28 amber, 56 green, 112 blue,
+ *  far shell violet; the horizon shell stays untinted) */
 const LEVEL_TINT = [
   new THREE.Vector3(1.0, 0.45, 0.4),
   new THREE.Vector3(1.0, 0.85, 0.35),
   new THREE.Vector3(0.5, 1.0, 0.5),
   new THREE.Vector3(0.45, 0.7, 1.0),
+  new THREE.Vector3(0.8, 0.5, 1.0),
 ];
+/** uBands / LEVEL_TINT slot of the far shell */
+const SHELL_LEVEL = 4;
+
+/**
+ * The waterline cut every terrain fragment shader starts with (see
+ * water.ts): `tShore` is the share of this pixel that is above the water,
+ * from the world height `y` and its screen-space gradient. Fragments wholly
+ * below are discarded; the rest go out with alpha = tShore and the material
+ * has alpha-to-coverage on, so MSAA anti-aliases the coast exactly as it
+ * does every polygon edge. (A bare `discard` is all-or-nothing per pixel:
+ * the shoreline was the one edge in the scene left to stair-step and crawl.)
+ */
+const shoreCut = (y: string): string =>
+  `float tShore = clamp((${y} - uClipY) / max(fwidth(${y}), 1e-4) + 0.5, 0.0, 1.0);\n\tif (tShore <= 0.0) discard;`;
+
+/**
+ * Material state for the cut above. The fragment's alpha only selects MSAA
+ * samples; it must not reach the canvas, whose alpha channel is live (three
+ * always asks for one) — a coast pixel left at alpha 0.5 lets the page
+ * behind show through. So colour is written as-is and the framebuffer's own
+ * alpha (1, from the clear) is kept.
+ */
+function shoreCoverage(mat: THREE.Material): void {
+  mat.alphaToCoverage = true;
+  mat.blending = THREE.CustomBlending;
+  mat.blendSrc = THREE.OneFactor;
+  mat.blendDst = THREE.ZeroFactor;
+  mat.blendSrcAlpha = THREE.ZeroFactor;
+  mat.blendDstAlpha = THREE.OneFactor;
+}
 
 const GROW_ONE = { value: 1 };
+
+/**
+ * One coarse terrain lattice — the far shell S (slot 0) or the horizon
+ * shell H (slot 1): a square mesh trimmed to a disc, with a hole that is
+ * re-punched (index-only) as the finer coverage inside it moves.
+ */
+class Shell {
+  mesh: THREE.Mesh | null = null;
+  geo: THREE.BufferGeometry | null = null;
+  idx: Uint16Array | Uint32Array | null = null;
+  /** centre of the build last REQUESTED (Infinity = rebuild as soon as allowed) */
+  ox = Infinity;
+  oz = Infinity;
+  /** the geometry on screen: centre, lattice */
+  gox = 0;
+  goz = 0;
+  gCells = 0;
+  gCell = 0;
+  pending = false;
+  stale = false;
+  result: FarPayload | null = null;
+  /** previous payload, kept only on the no-worker path (builder reuse) */
+  prev: FarPayload | null = null;
+  /** the hole currently punched in the index (world centre + radius) */
+  holeX = 0;
+  holeZ = 0;
+  holeR = -1;
+  builds = 0;
+
+  constructor(readonly slot: number, public cells: number, public cell: number) {}
+
+  /** radius of the disc the on-screen geometry covers */
+  get radius(): number { return (this.gCells * this.gCell) / 2; }
+
+  /** distance from a point to the on-screen mesh centre (∞ without one) */
+  drift(px: number, pz: number): number {
+    return this.mesh ? Math.hypot(px - this.gox, pz - this.goz) : Infinity;
+  }
+
+  /**
+   * Recentre snap: a multiple of both the chunk size and the cell, so
+   * vertices land on the same world lattice every rebuild — heights are
+   * identical between rebuilds and the horizon never "swims".
+   */
+  snap(): number {
+    let s = CHUNK_SIZE;
+    while (s % this.cell !== 0) s += CHUNK_SIZE;
+    return s;
+  }
+
+  configure(cells: number, cell: number): void {
+    if (cells === this.cells && cell === this.cell) return;
+    this.cells = cells;
+    this.cell = cell;
+    if (this.pending) this.stale = true;
+    else { this.ox = Infinity; this.oz = Infinity; }
+  }
+
+  /**
+   * Re-index, skipping quads fully inside the hole disc (the area finer
+   * terrain ACTUALLY covers) and quads wholly outside the rim disc. Index-
+   * only: vertices stay put, so this is cheap enough to run every ~200 m.
+   */
+  reindex(open: boolean): void {
+    if (!this.geo || !this.idx) return;
+    const cells = this.gCells;
+    const cs = this.gCell;
+    const half = (cells * cs) / 2;
+    const ccx = this.holeX;
+    const ccz = this.holeZ;
+    const holeR2 = this.holeR > 0 && open ? this.holeR * this.holeR : -1;
+    const idx = this.idx;
+    const n = cells + 1;
+    // the OUTER edge is a disc too (trim the square's corners): the terrain
+    // silhouette then reads as a circle at every scale, not a rounded square
+    const rimR2 = half * half;
+    let q = 0;
+    for (let j = 0; j < cells; j++) {
+      const z0 = this.goz - half + j * cs;
+      // farthest z-extent of this quad row from the hole centre
+      const dz = Math.max(Math.abs(z0 - ccz), Math.abs(z0 + cs - ccz));
+      // nearest z-extent from the MESH centre (outer rim test)
+      const zr0 = z0 - this.goz;
+      const nz = zr0 > 0 ? zr0 : (zr0 + cs < 0 ? -(zr0 + cs) : 0);
+      for (let i = 0; i < cells; i++) {
+        const x0 = this.gox - half + i * cs;
+        const xr0 = x0 - this.gox;
+        const nx = xr0 > 0 ? xr0 : (xr0 + cs < 0 ? -(xr0 + cs) : 0);
+        if (nx * nx + nz * nz > rimR2) continue; // outside the rim disc
+        if (holeR2 > 0) {
+          const dx = Math.max(Math.abs(x0 - ccx), Math.abs(x0 + cs - ccx));
+          if (dx * dx + dz * dz < holeR2) continue; // finer terrain covers this quad
+        }
+        const a = j * n + i;
+        const b = a + 1;
+        const c = a + n;
+        const d = c + 1;
+        idx[q++] = a; idx[q++] = c; idx[q++] = b;
+        idx[q++] = b; idx[q++] = c; idx[q++] = d;
+      }
+    }
+    this.geo.setDrawRange(0, q);
+    (this.geo.index as THREE.BufferAttribute).needsUpdate = true;
+  }
+}
 
 export class TerrainManager {
   readonly gen: WorldGen;
@@ -301,8 +442,10 @@ export class TerrainManager {
   private fading: Chunk[] = [];
 
   // shared shader uniforms — one upload per frame drives every chunk
+  // (bands 0–3 are the chunk levels, 4 the far shell's blend toward the
+  // horizon shell)
   private uCenter = { value: new THREE.Vector2() };
-  private uBands = [0, 1, 2, 3].map(() => ({ value: new THREE.Vector2(0, 1) }));
+  private uBands = [0, 1, 2, 3, 4].map(() => ({ value: new THREE.Vector2(0, 1) }));
   private uGrow = [0, 1, 2].map(() => ({ value: new THREE.Vector2(0, 1) }));
   private uDbg = { value: 0 };
   private growMats = new Map<number, THREE.MeshLambertMaterial>();
@@ -312,25 +455,18 @@ export class TerrainManager {
    *  (eased by the time-fade instead of being pixel-identical) */
   readonly stats = { swaps: 0, late: 0, fresh: 0, lateFresh: 0, dropped: 0 };
 
-  // far shell: one coarse mega-mesh of the horizon underneath the chunk ring
-  private farMesh: THREE.Mesh | null = null;
-  private farGeo: THREE.BufferGeometry | null = null;
-  private farIndexArr: Uint16Array | Uint32Array | null = null;
-  private farOx = Infinity;
-  private farOz = Infinity;
-  private farGeoOx = 0;
-  private farGeoOz = 0;
-  private farGeoCells = 0;
-  private farGeoCell = 0;
-  private farPending = false;
-  private farStale = false;
-  private farResult: FarPayload | null = null;
-  private farCells = 140;
-  private farCellSize = 450;
-  // the hole currently punched in the shell index (world centre + radius)
-  private holeX = 0;
-  private holeZ = 0;
-  private holeR = -1;
+  // the two coarse lattices under and beyond the chunk disc (lod.ts
+  // "shells"): far shell S and horizon shell H
+  private shellPreset: ShellPreset = SHELL_PRESETS.high;
+  private far = new Shell(0, SHELL_PRESETS.high.cells, SHELL_PRESETS.high.cell);
+  private hor = new Shell(1, SHELL_PRESETS.high.hCells, SHELL_PRESETS.high.hCell);
+  private shellMat: THREE.MeshLambertMaterial;
+  /** S collapse edge (beyond it S renders H's look), slewed like `edge` */
+  private sEdge = 0;
+  private sEdgeSnap = true;
+  /** how far the haze currently reaches (set by main each frame): the
+   *  horizon shell is not drawn while it would be fully fogged anyway */
+  hazeFar = Infinity;
 
   /** 0 = day (no cost); > 0 lights the city windows at that intensity and
    *  > 0.3 also fits blinking red obstruction beacons to the supertalls.
@@ -340,10 +476,34 @@ export class TerrainManager {
   private beaconGeo: THREE.SphereGeometry | null = null;
   private beaconTime = 0;
 
-  constructor(private scene: THREE.Scene, gen: WorldGen, windowGlow = 0) {
+  /**
+   * `clipY`: terrain fragments below this world height (the water sheet)
+   * are discarded — the shoreline is decided here, per fragment, instead of
+   * by a depth test that cannot resolve it at range (see water.ts). Every
+   * material that draws terrain needs the cut; null (no water) disables it.
+   */
+  constructor(private scene: THREE.Scene, gen: WorldGen, windowGlow = 0, private clipY: number | null = null) {
     this.gen = gen;
     this.windowGlow = windowGlow;
     this.terrainMat = new THREE.MeshLambertMaterial({ vertexColors: true });
+    if (clipY !== null) {
+      // the horizon shell's plain material needs the same waterline cut
+      this.terrainMat.onBeforeCompile = (sh) => {
+        sh.uniforms.uClipY = { value: clipY };
+        sh.vertexShader = 'varying float vClipWY;\n' + sh.vertexShader.replace(
+          '#include <begin_vertex>',
+          '#include <begin_vertex>\n\tvClipWY = (modelMatrix * vec4(transformed, 1.0)).y;',
+        );
+        sh.fragmentShader = 'varying float vClipWY;\nuniform float uClipY;\n' + sh.fragmentShader
+          .replace('void main() {', 'void main() {\n\t' + shoreCut('vClipWY'))
+          .replace('#include <color_fragment>', '#include <color_fragment>\n\tdiffuseColor.a *= tShore;');
+      };
+      shoreCoverage(this.terrainMat);
+      this.terrainMat.customProgramCacheKey = () => 'terrain-plain-clip';
+    }
+    // the far shell blends to the horizon shell's look by distance, with the
+    // chunk shader (no arrival fade: uFade = (·, 1) leaves the band alone)
+    this.shellMat = this.makeChunkMat(SHELL_LEVEL, { value: new THREE.Vector2(1, 1) });
     this.treeMat = new THREE.MeshLambertMaterial({ vertexColors: true });
     this.houseMat = new THREE.MeshLambertMaterial({ vertexColors: true });
     this.treeGeo = buildTreeGeometry();
@@ -372,7 +532,10 @@ export class TerrainManager {
       this.worker = new Worker(new URL('./terrain.worker.ts', import.meta.url), { type: 'module' });
       this.worker.postMessage({ type: 'init', seed: gen.seed, theme: gen.theme });
       this.worker.onmessage = (e: MessageEvent<ChunkPayload | FarPayload>) => {
-        if ('far' in e.data) { this.farResult = e.data; return; }
+        if ('far' in e.data) {
+          (e.data.slot === 0 ? this.far : this.hor).result = e.data;
+          return;
+        }
         this.results.push(e.data);
         this.inFlight--;
         // refeed straight away: the worker's throughput must not hang off
@@ -384,7 +547,8 @@ export class TerrainManager {
         this.worker = null;
         this.pending.clear();
         this.inFlight = 0;
-        this.farPending = false;
+        this.far.pending = false;
+        this.hor.pending = false;
         this.scanDirty = true;
       };
     } catch {
@@ -405,15 +569,42 @@ export class TerrainManager {
   // them — the far shell renders everywhere (hole stays closed).
   shellOnly = false;
 
-  /** Quality preset hook: LOD reach + load radius (see lod.ts). */
+  /** Quality preset hook: LOD reach, load radius and shell lattices (see
+   *  lod.ts). A lattice change forces that shell to rebuild. */
   setQuality(q: LodQuality): void {
     this.preset = LOD_PRESETS[q];
+    this.shellPreset = SHELL_PRESETS[q];
+    this.far.configure(this.shellPreset.cells, this.shellPreset.cell);
+    this.hor.configure(this.shellPreset.hCells, this.shellPreset.hCell);
     this.scanDirty = true;
+  }
+
+  /** The farthest the haze may open on this preset, m. */
+  fogCap(): number {
+    return this.shellPreset.fogCap;
+  }
+
+  /**
+   * How far real terrain currently reaches from the AIRCRAFT, m — the haze
+   * must close inside this or the outermost rim shows. The horizon shell's
+   * reach once it is up, the far shell's until then (∞ before either
+   * exists: nothing to hide yet).
+   */
+  viewLimit(): number {
+    const sh = this.hor.mesh && this.hor.mesh.visible ? this.hor : this.far;
+    if (!sh.mesh) return Infinity;
+    return sh.radius - sh.drift(this.px, this.pz) - STREAM_LEAD - 500;
   }
 
   /** How far the fog may open versus its ground range (altitude-driven). */
   fogScale(): number {
     return this.lod.fogScale;
+  }
+
+  /** Telemetry: far / horizon shell builds so far, and whether the horizon
+   *  shell is being drawn ("12/3+"). */
+  shellInfo(): string {
+    return `${this.far.builds}/${this.hor.builds}${this.hor.mesh && this.hor.mesh.visible ? '+' : '-'}`;
   }
 
   /** Call every frame with the streaming centre + height above ground. */
@@ -432,6 +623,7 @@ export class TerrainManager {
     if (jumped || this.aglS < 0) {
       this.aglS = Math.max(agl, 0);
       this.edgeSnap = true;
+      this.sEdgeSnap = true;
       this.scanDirty = true;
     } else {
       const d = Math.max(agl, 0) - this.aglS;
@@ -495,39 +687,93 @@ export class TerrainManager {
     this.uGrow[0].value.set(eb[0], eb[1]);
     for (let s = 1; s <= 2; s++) this.uGrow[s].value.set(this.lod.grow[s][0], this.lod.grow[s][1]);
 
-    // far shell: swap in a freshly baked horizon
-    if (this.farResult) {
-      const p = this.farResult;
-      this.farResult = null;
-      this.finalizeFar(p);
+    // shells: swap in freshly baked lattices
+    for (const sh of [this.far, this.hor]) {
+      if (sh.result) {
+        const p = sh.result;
+        sh.result = null;
+        this.finalizeShell(sh, p);
+      }
     }
 
     this.feed();
 
-    // recentre the horizon shell preferably when no chunk work is
-    // outstanding — it's the biggest single job. But at cruise the queue may
-    // NEVER fully drain (slower devices), and a starved shell drifts
-    // kilometres stale then lurches forward in one visible step; past ~7 km
-    // of drift the rebuild goes ahead of the chunk queue (one ~100 ms worker
-    // job every few km — imperceptible).
-    const farDrift = Math.max(Math.abs(px - this.farOx), Math.abs(pz - this.farOz));
-    if (
-      !this.farPending &&
-      // the FIRST build still waits for boot chunks (never delay spawn
-      // terrain); only re-centres of an existing shell may jump the queue
-      ((this.farMesh !== null && farDrift > 6800) ||
-        (this.pending.size === 0 && this.queue.length === 0 && farDrift > 4500))
-    ) {
-      const snap = this.farSnap();
-      const ox = Math.round(px / snap) * snap;
-      const oz = Math.round(pz / snap) * snap;
-      if (ox === this.farOx && oz === this.farOz) return; // nothing to gain
-      this.farPending = true;
-      if (this.worker) {
-        this.worker.postMessage({ type: 'far', ox, oz, cells: this.farCells, cellSize: this.farCellSize });
-      } else {
-        this.farResult = buildFarPayload(this.gen, ox, oz, this.farCells, this.farCellSize);
-      }
+    // re-centre the shells. Preferably when no chunk work is outstanding,
+    // but at cruise the queue may NEVER fully drain (slower devices), so
+    // past the forced threshold a rebuild goes ahead of it. The FIRST far
+    // shell still waits for boot chunks (never delay spawn terrain), and
+    // the horizon shell waits for the far shell.
+    const idle = this.pending.size === 0 && this.queue.length === 0;
+    this.requestShell(this.far, idle, S_RECENTRE_IDLE, S_RECENTRE);
+    if (this.far.mesh) this.requestShell(this.hor, true, H_RECENTRE_IDLE, H_RECENTRE);
+
+    this.updateShells(dt);
+  }
+
+  /** Post a shell rebuild when its mesh centre has fallen too far behind. */
+  private requestShell(sh: Shell, idle: boolean, idleAt: number, forceAt: number): void {
+    if (sh.pending || this.freezeShells) return;
+    const drift = Math.hypot(this.px - sh.ox, this.pz - sh.oz);
+    if (!((sh.mesh !== null && drift > forceAt) || (idle && drift > idleAt))) return;
+    const snap = sh.snap();
+    const ox = Math.round(this.px / snap) * snap;
+    const oz = Math.round(this.pz / snap) * snap;
+    if (ox === sh.ox && oz === sh.oz) return; // nothing to gain
+    sh.pending = true;
+    // the far shell carries the horizon shell's look; the horizon shell is
+    // plain terrain (no lower envelope, no parent)
+    const parentCell = sh.slot === 0 ? this.hor.cell : 0;
+    const envelope = sh.slot === 0;
+    if (this.worker) {
+      this.worker.postMessage({
+        type: 'far', slot: sh.slot, ox, oz, cells: sh.cells, cellSize: sh.cell, parentCell, envelope,
+      });
+    } else {
+      sh.result = buildFarPayload(this.gen, ox, oz, sh.cells, sh.cell, parentCell, envelope, sh.prev, sh.slot);
+      sh.prev = sh.result;
+    }
+  }
+
+  /**
+   * Where the far shell hands over to the horizon shell. H's hole is the
+   * disc S really covers around the streaming centre; S renders H's look
+   * beyond `sEdge` (a slack inside that hole), so wherever H may still be
+   * drawn the two surfaces are identical. The edge is slew-limited: when a
+   * rebuilt S lands its drift drops by kilometres at once, and the band
+   * must walk back out rather than jump. The hole follows the EDGE (never
+   * the other way round) so it cannot outrun the blend.
+   */
+  private updateShells(dt: number): void {
+    const far = this.far;
+    const hor = this.hor;
+    const px = this.px;
+    const pz = this.pz;
+    const hCell = hor.mesh ? hor.gCell : hor.cell;
+    const cover = far.mesh ? shellHole(far.radius, far.drift(px, pz)) : 0;
+    const target = shellEdge(cover, hCell);
+    if (this.sEdgeSnap) {
+      this.sEdge = target;
+      this.sEdgeSnap = false;
+    } else {
+      this.sEdge = slewShellEdge(this.sEdge, target, dt);
+    }
+    const sb = shellBand(this.sEdge);
+    this.uBands[SHELL_LEVEL].value.set(sb[0], sb[1]);
+
+    if (!hor.mesh) return;
+    // H is only drawn once S comfortably covers the chunk disc (after a
+    // respawn S is briefly somewhere else) and the haze reaches it at all
+    const hole = horizonHole(cover, this.sEdge, hCell);
+    const show = far.mesh !== null && !this.shellOnly &&
+      hole > this.lod.load + 1500 &&
+      this.hazeFar > hole - hSlack(hCell) - STREAM_LEAD - 1000;
+    hor.mesh.visible = show;
+    if (!show) return;
+    if (Math.abs(hole - hor.holeR) > 25 || Math.hypot(px - hor.holeX, pz - hor.holeZ) > H_HOLE_STEP - 60) {
+      hor.holeX = px;
+      hor.holeZ = pz;
+      hor.holeR = hole;
+      hor.reindex(true);
     }
   }
 
@@ -617,11 +863,12 @@ export class TerrainManager {
     // much clear of the nearest missing chunk as well)
     const hole = Math.max(Math.min(f.hole, gap - HOLE_STEP - 30), 0);
     this.edgeTarget = Math.max(hole - SHELL_SLACK, 0);
-    if (Math.abs(hole - this.holeR) > 25 || Math.hypot(px - this.holeX, pz - this.holeZ) > HOLE_STEP - 60) {
-      this.holeX = px;
-      this.holeZ = pz;
-      this.holeR = hole;
-      this.rebuildFarIndex();
+    const far = this.far;
+    if (Math.abs(hole - far.holeR) > 25 || Math.hypot(px - far.holeX, pz - far.holeZ) > HOLE_STEP - 60) {
+      far.holeX = px;
+      far.holeZ = pz;
+      far.holeR = hole;
+      far.reindex(!this.shellOnly);
     }
   }
 
@@ -644,7 +891,7 @@ export class TerrainManager {
       const res = LEVEL_RES[step.level];
       // morph data always reaches the PARENT level (the shell for level 0)
       const prev = step.level > 0 ? res / 2 : 0;
-      const shellCell = this.farGeo ? this.farGeoCell : this.farCellSize;
+      const shellCell = this.far.geo ? this.far.gCell : this.far.cell;
       if (this.worker) {
         this.inFlight++;
         this.worker.postMessage({
@@ -658,127 +905,110 @@ export class TerrainManager {
     }
   }
 
-  /** Quality preset hook: shell density. Forces a rebuild when it changes. */
-  configureFar(cells: number, cellSize: number): void {
-    if (cells === this.farCells && cellSize === this.farCellSize) return;
-    this.farCells = cells;
-    this.farCellSize = cellSize;
-    if (this.farPending) this.farStale = true;
-    else { this.farOx = Infinity; this.farOz = Infinity; }
+  /** DEBUG: stop re-centring the shells (pixel-diff tests hold a state) */
+  freezeShells = false;
+
+  /**
+   * DEBUG: rebuild one shell synchronously with its centre offset from the
+   * streaming centre, as if the last re-centre had happened that far away.
+   * Any offset inside the drift allowance must leave the picture unchanged
+   * — the in-renderer proof that shell swaps are seamless.
+   */
+  debugShiftShell(slot: number, dx: number, dz: number): string {
+    const sh = slot === 0 ? this.far : this.hor;
+    const snap = sh.snap();
+    const p = buildFarPayload(
+      this.gen,
+      Math.round((this.px + dx) / snap) * snap,
+      Math.round((this.pz + dz) / snap) * snap,
+      sh.cells, sh.cell, slot === 0 ? this.hor.cell : 0, slot === 0, null, slot,
+    );
+    this.freezeShells = true;
+    this.finalizeShell(sh, p);
+    return `${p.ox},${p.oz} drift=${sh.drift(this.px, this.pz).toFixed(0)}`;
+  }
+
+  /** DEBUG: build both shells synchronously right now (shellonly/lodtint
+   *  screenshots race the worker under virtual-time headless capture). */
+  forceFarBuild(px: number, pz: number): void {
+    for (const sh of [this.far, this.hor]) {
+      const snap = sh.snap();
+      this.finalizeShell(sh, buildFarPayload(
+        this.gen,
+        Math.round(px / snap) * snap,
+        Math.round(pz / snap) * snap,
+        sh.cells,
+        sh.cell,
+        sh.slot === 0 ? this.hor.cell : 0,
+        sh.slot === 0,
+        null,
+        sh.slot,
+      ));
+    }
   }
 
   /**
-   * Recentre snap: a multiple of both the chunk size and the shell cell, so
-   * shell vertices land on the same world lattice every rebuild — heights
-   * are identical between rebuilds and the horizon never "swims".
+   * Swap a freshly baked shell in. Shell vertices sit on a fixed world
+   * lattice, so wherever the old and new meshes overlap they are the same
+   * surface; the strip the new one adds lies beyond the old rim, where the
+   * far shell is collapsed onto the horizon shell (already on screen there)
+   * and the horizon shell is under full haze. Either way no pixel changes.
    */
-  private farSnap(): number {
-    let s = CHUNK_SIZE;
-    while (s % this.farCellSize !== 0) s += CHUNK_SIZE;
-    return s;
-  }
-
-  /** DEBUG: build the far shell synchronously right now (shellonly/lodtint
-   *  screenshots race the worker under virtual-time headless capture). */
-  forceFarBuild(px: number, pz: number): void {
-    const snap = this.farSnap();
-    this.finalizeFar(buildFarPayload(
-      this.gen,
-      Math.round(px / snap) * snap,
-      Math.round(pz / snap) * snap,
-      this.farCells,
-      this.farCellSize,
-    ));
-  }
-
-  private finalizeFar(p: FarPayload): void {
-    this.farPending = false;
-    if (this.farStale) {
+  private finalizeShell(sh: Shell, p: FarPayload): void {
+    sh.pending = false;
+    sh.builds++;
+    if (sh.stale) {
       // density changed while this one was baking — keep it, but rebuild soon
-      this.farStale = false;
-      this.farOx = Infinity;
-      this.farOz = Infinity;
+      sh.stale = false;
+      sh.ox = Infinity;
+      sh.oz = Infinity;
     } else {
-      this.farOx = p.ox;
-      this.farOz = p.oz;
+      sh.ox = p.ox;
+      sh.oz = p.oz;
     }
 
-    if (this.farMesh) {
-      this.scene.remove(this.farMesh);
-      this.farGeo!.dispose();
+    if (sh.mesh) {
+      this.scene.remove(sh.mesh);
+      sh.geo!.dispose();
     }
-    this.farGeoOx = p.ox;
-    this.farGeoOz = p.oz;
-    this.farGeoCells = p.cells;
-    this.farGeoCell = p.cellSize;
+    sh.gox = p.ox;
+    sh.goz = p.oz;
+    sh.gCells = p.cells;
+    sh.gCell = p.cellSize;
 
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(p.positions, 3));
     geo.setAttribute('normal', new THREE.BufferAttribute(p.normals, 3));
     geo.setAttribute('color', new THREE.BufferAttribute(p.colors, 3));
+    const morphs = p.baseY !== null && p.baseCols !== null && p.baseNrms !== null;
+    if (morphs) {
+      geo.setAttribute('baseY', new THREE.BufferAttribute(p.baseY!, 1));
+      geo.setAttribute('baseCol', new THREE.BufferAttribute(p.baseCols!, 3));
+      geo.setAttribute('baseNrm', new THREE.BufferAttribute(p.baseNrms!, 3));
+    }
     // 16-bit indices whenever the lattice allows (every preset): the hole
     // is re-punched several times a second at speed, and this halves the
     // upload
     const nIdx = p.cells * p.cells * 6;
-    this.farIndexArr = (p.cells + 1) * (p.cells + 1) <= 65535 ? new Uint16Array(nIdx) : new Uint32Array(nIdx);
-    geo.setIndex(new THREE.BufferAttribute(this.farIndexArr, 1));
-    this.farGeo = geo;
+    sh.idx = (p.cells + 1) * (p.cells + 1) <= 65535 ? new Uint16Array(nIdx) : new Uint32Array(nIdx);
+    geo.setIndex(new THREE.BufferAttribute(sh.idx, 1));
+    sh.geo = geo;
 
-    const mesh = new THREE.Mesh(geo, this.terrainMat);
+    const mesh = new THREE.Mesh(geo, morphs ? this.shellMat : this.terrainMat);
     mesh.position.set(p.ox, 0, p.oz);
     mesh.matrixAutoUpdate = false;
     mesh.updateMatrix();
     mesh.frustumCulled = false; // spans the whole horizon — always in view
-    this.farMesh = mesh;
-    this.rebuildFarIndex();
-    this.scene.add(mesh);
-  }
-
-  /**
-   * Re-index the shell, skipping quads fully inside the hole disc (the area
-   * detailed chunks ACTUALLY cover, centred on the streaming centre). Index-
-   * only: vertices stay put, so this is cheap enough to run every ~200 m.
-   */
-  private rebuildFarIndex(): void {
-    if (!this.farGeo || !this.farIndexArr) return;
-    const cells = this.farGeoCells;
-    const cs = this.farGeoCell;
-    const half = (cells * cs) / 2;
-    const ccx = this.holeX;
-    const ccz = this.holeZ;
-    const holeR2 = this.holeR > 0 && !this.shellOnly ? this.holeR * this.holeR : -1;
-    const idx = this.farIndexArr;
-    const n = cells + 1;
-    // the OUTER edge is a disc too (trim the square's corners): the terrain
-    // silhouette then reads as a circle at every scale, not a rounded square
-    const rimR2 = half * half;
-    let q = 0;
-    for (let j = 0; j < cells; j++) {
-      const z0 = this.farGeoOz - half + j * cs;
-      // farthest z-extent of this quad row from the hole centre
-      const dz = Math.max(Math.abs(z0 - ccz), Math.abs(z0 + cs - ccz));
-      // nearest z-extent from the MESH centre (outer rim test)
-      const zr0 = z0 - this.farGeoOz;
-      const nz = zr0 > 0 ? zr0 : (zr0 + cs < 0 ? -(zr0 + cs) : 0);
-      for (let i = 0; i < cells; i++) {
-        const x0 = this.farGeoOx - half + i * cs;
-        const xr0 = x0 - this.farGeoOx;
-        const nx = xr0 > 0 ? xr0 : (xr0 + cs < 0 ? -(xr0 + cs) : 0);
-        if (nx * nx + nz * nz > rimR2) continue; // outside the rim disc
-        if (holeR2 > 0) {
-          const dx = Math.max(Math.abs(x0 - ccx), Math.abs(x0 + cs - ccx));
-          if (dx * dx + dz * dz < holeR2) continue; // chunks cover this quad
-        }
-        const a = j * n + i;
-        const b = a + 1;
-        const c = a + n;
-        const d = c + 1;
-        idx[q++] = a; idx[q++] = c; idx[q++] = b;
-        idx[q++] = b; idx[q++] = c; idx[q++] = d;
-      }
+    sh.mesh = mesh;
+    if (sh.slot === 0) {
+      sh.reindex(!this.shellOnly);
+    } else {
+      // the hole is punched (and the mesh shown) by updateShells
+      sh.holeR = -1;
+      mesh.visible = false;
+      sh.reindex(true);
     }
-    this.farGeo.setDrawRange(0, q);
-    (this.farGeo.index as THREE.BufferAttribute).needsUpdate = true;
+    this.scene.add(mesh);
   }
 
   /**
@@ -824,9 +1054,13 @@ export class TerrainManager {
       // vertex-colour interpolation that reads as "low poly" up close. Each
       // octave fades out BEFORE its wavelength drops below a pixel — value
       // noise has no mipmaps, so past that point it aliases into shimmer
+      const clip = this.clipY;
+      if (clip !== null) sh.uniforms.uClipY = { value: clip };
       sh.fragmentShader =
         'varying vec3 vTWorld;\n' +
+        (clip !== null ? 'uniform float uClipY;\n' : '') +
         sh.fragmentShader
+          .replace('void main() {', clip !== null ? 'void main() {\n\t' + shoreCut('vTWorld.y') : 'void main() {')
           .replace(
             '#include <common>',
             `#include <common>
@@ -846,24 +1080,34 @@ export class TerrainManager {
           .replace(
             '#include <color_fragment>',
             `#include <color_fragment>
+            ${clip !== null ? 'diffuseColor.a *= tShore;' : ''}
             {
               float dDist = distance(vTWorld, cameraPosition);
-              if (dDist < 1300.0) {
-                float f1 = smoothstep(420.0, 70.0, dDist);
-                float f2 = smoothstep(1300.0, 220.0, dDist);
-                float f3 = smoothstep(160.0, 32.0, dDist);
-                float n1 = tNoise(vTWorld.xz * 1.45);
-                float n2 = tNoise(vTWorld.xz * 0.21 + 37.0);
-                float n3 = tNoise(vTWorld.xz * 7.3);
-                diffuseColor.rgb *= 1.0
-                  + (n1 - 0.5) * 0.14 * f1
-                  + (n2 - 0.5) * 0.2 * f2
-                  + (n3 - 0.5) * 0.1 * f3;
+              if (dDist < 5200.0) {
+                // 30 m mottling carries the ground texture out to the
+                // middle distance (a 30 m wavelength is still ~6 px wide
+                // where it fades out)
+                float f4 = smoothstep(5200.0, 1700.0, dDist);
+                float n4 = tNoise(vTWorld.xz * 0.034 + 91.0);
+                float dMul = 1.0 + (n4 - 0.5) * 0.15 * f4;
+                if (dDist < 1300.0) {
+                  float f1 = smoothstep(420.0, 70.0, dDist);
+                  float f2 = smoothstep(1300.0, 220.0, dDist);
+                  float f3 = smoothstep(160.0, 32.0, dDist);
+                  float n1 = tNoise(vTWorld.xz * 1.45);
+                  float n2 = tNoise(vTWorld.xz * 0.21 + 37.0);
+                  float n3 = tNoise(vTWorld.xz * 7.3);
+                  dMul += (n1 - 0.5) * 0.14 * f1
+                    + (n2 - 0.5) * 0.2 * f2
+                    + (n3 - 0.5) * 0.1 * f3;
+                }
+                diffuseColor.rgb *= dMul;
               }
             }`,
           );
     };
-    mat.customProgramCacheKey = () => 'terrain-dlod';
+    if (this.clipY !== null) shoreCoverage(mat);
+    mat.customProgramCacheKey = () => (this.clipY !== null ? 'terrain-dlod-clip' : 'terrain-dlod');
     return mat;
   }
 
@@ -942,7 +1186,7 @@ export class TerrainManager {
       // the edge
       if (level !== 0 || dc - CHUNK_R < this.uBands[0].value.y - 1) {
         onTime = false;
-        if (this.farMesh) this.stats.lateFresh++;
+        if (this.far.mesh) this.stats.lateFresh++;
       }
     } else {
       // only the step that is STILL wanted may land: plans can flip while a

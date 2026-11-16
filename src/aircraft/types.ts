@@ -35,6 +35,10 @@ export interface AircraftSpec {
   airbrakeCd: number; // extra drag with speed brake out (0 = not fitted)
   fbw?: boolean;      // fly-by-wire alpha limiter (no accidental stalls)
   gun?: boolean;      // internal cannon (hold Space / FIRE in the air)
+  engines?: number;   // engine count (default 1) — practice failures take them one at a time
+  /** yaw acceleration toward a dead engine per m/s² of live-engine thrust:
+   *  the thrust-line arm over the yaw inertia (wing-mounted ≫ rear/centre) */
+  asymYaw?: number;
 
   flapsCl: number;
   flapsCd: number;

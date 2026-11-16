@@ -189,7 +189,7 @@ html, body {
 
 .mode-row { display: flex; gap: 10px; flex-wrap: wrap; }
 .mode-chip {
-  flex: 1; min-width: 130px; text-align: left; cursor: pointer;
+  flex: 1 1 40%; min-width: 130px; text-align: left; cursor: pointer;
   border: 1px solid var(--line); background: rgba(10, 19, 34, .7);
   padding: 10px 14px; color: var(--paper); font-family: var(--font-ui);
   transition: border-color .2s, background .2s;
@@ -394,6 +394,30 @@ html, body {
 }
 #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 
+/* charter: in-flight job strip + the job board */
+#jobline {
+  position: fixed; left: 50%; top: 134px; transform: translateX(-50%);
+  font: 600 12px 'Chakra Petch', monospace; letter-spacing: .1em; color: var(--amber);
+  background: rgba(7, 13, 24, .55); border: 1px solid rgba(255, 179, 64, .35);
+  padding: 4px 12px; border-radius: 3px; white-space: nowrap; pointer-events: none;
+  opacity: 0; transition: opacity .25s; z-index: 6; max-width: 94vw; overflow: hidden; text-overflow: ellipsis;
+}
+#jobline.show { opacity: 1; }
+.panel.jobs { max-width: 640px; width: 92vw; }
+.job-list { display: flex; flex-direction: column; gap: 8px; margin: 14px 0 18px; }
+.job-card {
+  display: flex; align-items: center; gap: 14px; text-align: left; width: 100%;
+  background: rgba(10, 20, 34, .7); border: 1px solid rgba(125, 255, 168, .25); color: #e8eef7;
+  padding: 10px 14px; border-radius: 4px; cursor: pointer; font-family: inherit;
+}
+.job-card:hover { border-color: var(--phos); background: rgba(20, 50, 40, .5); }
+.jc-kind { font: 700 10px 'Chakra Petch', monospace; letter-spacing: .16em; color: var(--amber); width: 74px; text-transform: uppercase; }
+.jc-main { flex: 1; min-width: 0; }
+.jc-title { font-weight: 700; letter-spacing: .06em; font-size: 13px; }
+.jc-to { color: var(--fog); font-size: 11px; margin-top: 3px; }
+.jc-pay { text-align: right; font: 700 14px 'Chakra Petch', monospace; color: var(--phos); white-space: nowrap; }
+.jc-pay small { display: block; color: var(--fog); font-weight: 600; font-size: 10px; margin-top: 2px; }
+
 #pausebtn {
   position: fixed; top: calc(12px + var(--sat)); right: calc(12px + var(--sar)); z-index: 30;
   width: 42px; height: 42px; display: none; place-items: center;
@@ -488,6 +512,14 @@ body.portrait-flying #rotate-hint { display: flex; }
   .menu-body { grid-template-columns: 1fr; grid-template-rows: minmax(150px, 1fr) auto; }
   .spec-card p.blurb { display: none; }
   .panel { padding: 20px; }
+}
+/* laptop-height windows: four modes, three worlds, time and weather all
+   have to fit the card — the mode blurbs go first */
+@media (max-height: 760px) {
+  .mode-chip { padding: 8px 12px; }
+  .mode-chip .mc-desc { display: none; }
+  .world-chip .wc-desc { display: none; }
+  .spec-card { gap: 8px; padding: 14px 18px; }
 }
 /* short landscape phones: compress everything into one screen */
 @media (max-height: 520px) {

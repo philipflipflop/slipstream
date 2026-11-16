@@ -27,8 +27,8 @@ deterministic, all sharing the home airfield cluster):
 
 | World | Character |
 | --- | --- |
-| **Emerald Archipelago** | Island chains, forests, snow-capped alpine ranges. |
-| **Redstone Mesa** | Layered desert plateaus carved by winding canyon systems. |
+| **Emerald Archipelago** | Island chains, forests and farmland, hill country, rivers winding to the sea, snow-capped alpine ranges and the odd volcano standing out of the water. |
+| **Redstone Mesa** | Layered desert plateaus carved by winding canyon systems, free-standing mesas and buttes, dune seas. |
 | **Meridian Bay** | A coastal metropolis: two downtown cores with 400 m+ setback supertalls, glass and concrete towers, street grids, parks and suburbs. |
 
 ### Time of day
@@ -46,6 +46,17 @@ Airfield lights behave like real point sources: edge lights and PAPI hold a
 couple of pixels at any range instead of vanishing, and after dark every field
 runs a rotating **white/green airport beacon** you can spot from 15+ km — that's
 how you find a runway at night.
+
+### Weather
+
+Six skies from the hangar (or `?wx=clear|fair|broken|overcast|rain|fog`): **Clear**,
+**Fair** (scattered cumulus), **Broken** (a layer at 4,300 ft with gaps to fly through),
+**Overcast** (solid from 2,100 ft, sunshine on top at 5,000), **Rain** (cloudbase 1,000 ft,
+4 km in rain, gusty) and **Fog** (700 m at the surface, blue sky above 600 ft). The cloud
+is a real layer: beneath it the light is grey and you see what the weather allows, inside
+it you see a few hundred metres, and above it the sun is out over an undercast. Wind and
+turbulence follow the weather, the tower reads you the sky with your clearance, and the
+ILS finally has a job — in Rain the runway appears at about 1,000 ft, in Fog at the flare.
 
 ### ILS
 
@@ -90,6 +101,7 @@ times are comparable; `?wind=hdg,kt` forces a specific wind.
 | Nav chart / flight computer | `N` (zoom `,` `.`) |
 | ILS receiver auto / off | `I` |
 | Autopilot **approach** — ILS-coupled autoland | `L` (or APPR on the autopilot panel) |
+| Practice **engine failure** | `X` — singles: engine out / relight. Twins: No.1 out, both out, relight |
 | Pause | `Esc` or `P` |
 | Restart flight | `R` |
 
@@ -117,11 +129,23 @@ speed tape. If `STALL` flashes — nose down, power up.
 | **Meridian 700** | 16-tonne executive jet. Stately, fast in cruise, needs planning. |
 | **Airbus A320neo** | 64-tonne narrowbody airliner in flag-carrier colours, built to the real book numbers: 122.6 m² wing, twin LEAP-class engines, rotate ~150 kt, full-flap stall ~110 kt, MMO ≈ 470 kt, +2.5 g transport limits and normal-law **alpha protection** (full aft stick mushes — it will not stall). Fly the profile and grease it on. |
 
+**Engine failures:** `X` fails an engine in any of them. A single becomes a glider (the
+HUD gives the best-glide speed for your height — 9:1 in the trainer, 14:1 in the A320);
+a twin loses its left engine first, swings toward it and needs rudder to fly straight —
+the Islander will just about climb on one — and a second press takes the other.
+
 Each one is parameterised physically (mass, wing area, lift slope, stall angle, drag,
 thrust model) — the handling differences fall out of the numbers, not scripts.
 
 ### Modes
 
+- **Charter** — paying work. Take-off opens the **job board** of the field you are at:
+  passengers, freight, a medevac, a priority dispatch, each to an airfield your aircraft
+  can actually use (airliners fly between internationals, the trainer to grass strips).
+  The destination goes into the flight plan and is ringed on the map. You are paid when
+  you are down and stopped there: the fee, adjusted for punctuality (+15% early … −40%
+  late), the landing grade and — with people aboard — the ride (they mind g, steep banks
+  and a hard arrival). The destination becomes your base, with a fresh board.
 - **Free Flight** — explore. The world streams in around you forever: coasts, forests,
   settlements, snow-capped ranges. Three **international airports** anchor the map at
   a European ~100 km spacing — **Meridian Intl** (spawn), **Westgate Intl** and
@@ -159,8 +183,17 @@ couples to it: it intercepts and tracks the localizer on ground track — so the
 a crosswind simply emerges — holds altitude until the glide path comes down to meet it,
 rides the 3° path at the reference speed for whatever flap you have set, flares off the
 radio altimeter, closes the throttles, and holds the centreline on the rollout with the
-autobrake on. You manage gear and flaps; touch the stick and the aircraft is yours.
+autobrake on. **Gear and flaps are yours** — the capture call reminds you — and the
+approach speed follows whatever flap you select; touch the stick and the aircraft is yours.
 It works in every fixed-wing aircraft, from the Skylark to the A320.
+
+You can arm it from cruise: it slows to an intercept speed (using the speedbrake if it
+has to), turns onto the localizer without sailing through it, and only starts down once
+it is established. Give it room, though — about 3° of glide path means roughly **300 m
+of height per 6 km**, so 15 km out you want to be near 800 m (2,500 ft) above the field,
+not 2,000. If the approach cannot end on the runway it says why and **goes around**
+instead of pressing on: too high for the glide path, too fast or off the centreline at
+300 ft, gear still up, or floating past the middle of the runway.
 
 ### Warnings
 
@@ -176,12 +209,24 @@ Plug in a controller and fly: left stick pitch/roll, right stick rudder, **RT/LT
 **X** camera, **LB/RB** flaps, D-pad ▲ autopilot, ▼ APPR, ◀ HUD, ▶ nav chart, **Start** pause.
 Flight sticks with a non-standard layout get stick + trigger.
 
-The sky and the ramps are alive: **NPC aircraft** park nose-in on the
+The sky, the ramps and the sea are alive. **NPC aircraft** park nose-in on the
 international terminal stands and on regional aprons and strip edges (never
-blocking a runway — deterministic per field, like everything else), while a
+blocking a runway — deterministic per field, like everything else), and a
 handful of AI airliners and light singles cruise terrain-aware tracks through
-your patch of sky with nav lights and strobes blinking. Races keep the air to
-themselves.
+your patch of sky with nav lights and strobes blinking — two of them high
+overflights drawing **contrails**. The airports **work**: airliners fly the ILS
+into the internationals every two or three minutes, land, roll out and vacate,
+while others taxi on, line up and depart — always on the into-wind runway, one
+movement at a time, landing lights on. They use the eastern runway of each pair
+(you spawn on the western one); sit on theirs and arrivals **go around**.
+Regional fields see the same with light singles. All of it is **on the map** — aircraft
+as cyan arrowheads with their height relative to yours in hundreds of feet, ships as grey
+ticks — and the **tower talks**: "cleared to land" with the wind once you are established
+on final, "continue approach" if something is still on the runway, "go around" if it has
+not cleared by short final, and "traffic, 2 o'clock, 3 km, 500 ft above" when something
+gets close. Out at sea, **freighters,
+ferries and small boats** trail wakes and steer clear of the shallows. Races
+keep the air to themselves.
 
 ## Engineering notes
 
@@ -194,7 +239,8 @@ themselves.
   **Web Worker** — payloads arrive as transferable typed arrays, so the main thread never
   hitches while streaming chunks around the aircraft.
 - **Level of detail is a function of distance, not time.** Chunks come at four nested
-  resolutions over one coarse **horizon shell** (~60–80 km of the same heightfield). Every
+  resolutions over two coarse shells of the same heightfield — a far shell out to ~40 km
+  and a **horizon shell** out to ~180 km. Every
   chunk carries its *parent* level's look — heights, colours and normals sampled on the
   coarser lattice — and the vertex shader blends parent → own by each vertex's distance,
   inside a per-level band. Mesh swaps (up *and* down a level) are scheduled in the dead
@@ -205,6 +251,14 @@ themselves.
   however exact the start frame, an arc of tiles sharpening together is an event the eye
   catches. The policy lives in `src/world/lod.ts` with a simulated-flight test that checks
   every swap, arrival and removal is pixel-identical.)
+- **You can see a long way.** At ground level the haze closes at 7–16 km (by quality),
+  not at the edge of the detailed terrain, and it opens with height to 200 km.
+- **The horizon is where a horizon belongs.** Terrain reaches 90–216 km (by quality), and
+  the haze opens with altitude so its far edge sits ~3–4° below eye level at airliner
+  cruise — about where the real horizon is — instead of the world ending in a hazy disc
+  far below you. The far shell blends into the horizon shell by distance exactly as chunks
+  blend into it, haze is measured as true distance from the eye, and fully hazed land,
+  sea and sky are the same colour, so the edge of the world never shows.
 - **Airports have real approach surfaces.** Off every runway end a 2° obstacle-limitation
   plane keeps terrain, trees and city towers out from under the 3° glide path — as at any
   real airport — so every ILS in the procedural world is actually flyable.
@@ -237,6 +291,8 @@ themselves.
 - `&nav=1` — open the planning chart after the fast-forward
 - `&mode=approach` — start in Final Approach (with `autofly=1` the autopilot flies the ILS to an autoland)
 - `&q=low` — graphics quality (`low`, `medium`, `high`)
+- `&alt=6000` — jump to that altitude (metres) after the fast-forward
+- `&touch=1` — force the touch UI (with `&q=low`, the phone render path)
 - `&lodtint=1` — tint terrain by LOD level, darkened by how far each vertex is blended toward its parent (the distance bands show as rings)
 - `&lodlog=1` — log any LOD swap that was not between identical surfaces
 

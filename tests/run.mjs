@@ -17,7 +17,7 @@ console.log('▸ compiling logic modules…');
 // invoke the local compiler directly — npx can rewrite package-lock.json on
 // a cold cache, silently pruning the @emnapi entries Cloudflare's npm needs
 execSync(
-  'node node_modules/typescript/bin/tsc src/aircraft/flightModel.ts src/aircraft/catalog.ts src/aircraft/autopilot.ts src/world/rings.ts src/world/traffic.ts src/world/terrainBuilder.ts src/world/lod.ts src/world/obstacles.ts src/nav/route.ts src/nav/ils.ts src/nav/landing.ts src/input/gamepad.ts src/combat/range.ts ' +
+  'node node_modules/typescript/bin/tsc src/aircraft/flightModel.ts src/aircraft/catalog.ts src/aircraft/autopilot.ts src/world/rings.ts src/world/traffic.ts src/world/terrainBuilder.ts src/world/lod.ts src/world/obstacles.ts src/nav/route.ts src/nav/ils.ts src/nav/landing.ts src/input/gamepad.ts src/combat/range.ts src/world/weather.ts src/nav/radio.ts src/nav/jobs.ts ' +
   `--outDir .test-build --module esnext --target es2022 --moduleResolution bundler --skipLibCheck`,
   { cwd: root, stdio: 'inherit' },
 );

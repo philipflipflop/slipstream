@@ -21,6 +21,12 @@ import { clamp, wrapAngle } from '../core/math';
 export type ApprPhase = 'off' | 'loc' | 'gs' | 'flare' | 'rollout' | 'done';
 
 const TAN_GS = Math.tan((3 * Math.PI) / 180);
+/** above this angle to the glideslope station the path cannot be regained */
+const TAN_TOO_HIGH = Math.tan((6.5 * Math.PI) / 180);
+/** localizer intercept speed, × the clean approach speed */
+const INTERCEPT_SPEED = 1.45;
+/** aim-point distance on the centreline, in turn radii */
+const LEAD_RADII = 0.9;
 
 export class Autopilot {
   engaged = false;
@@ -37,6 +43,11 @@ export class Autopilot {
   /** the ILS being flown in APPR mode (null = basic hold modes) */
   approach: IlsApproach | null = null;
   apprPhase: ApprPhase = 'off';
+  /** Set (to the reason) when APPR abandons an approach it cannot finish and
+   *  reverts to a climb on runway heading; the caller announces and clears it. */
+  goAround: string | null = null;
+  /** the speedbrake is out because APPR put it out (so APPR may stow it) */
+  private apBrake = false;
 
   /** minSpd 0 (helicopter) allows a hover hold; fixed-wing keeps the 30 m/s floor. */
   engage(st: FlightState, throttle: number, minSpd = 30): void {
@@ -50,6 +61,8 @@ export class Autopilot {
     this.pitchTrim = 0;
     this.approach = null;
     this.apprPhase = 'off';
+    this.goAround = null;
+    this.apBrake = false;
   }
 
   disengage(): void {
@@ -62,6 +75,27 @@ export class Autopilot {
   armApproach(app: IlsApproach): void {
     this.approach = app;
     this.apprPhase = 'loc';
+    this.goAround = null;
+  }
+
+  /**
+   * GO AROUND: the approach cannot end on the runway from here, so climb
+   * away on runway heading in the basic modes and say why. (Before this
+   * existed the mode simply kept descending: armed above the glide path it
+   * "landed" kilometres beyond the far end.)
+   */
+  private abandonApproach(spec: AircraftSpec, st: FlightState, c: ControlInputs, reason: string): void {
+    const app = this.approach!;
+    this.approach = null;
+    this.apprPhase = 'off';
+    this.goAround = reason;
+    this.targetHdg = app.course;
+    this.targetAlt = Math.max(st.pos.y, app.elev + 450);
+    this.targetSpd = Math.max(this.targetSpd, approachSpeed(spec, c.flaps) * 1.12, this.minSpd);
+    this.pitchTrim = clamp(this.pitchTrim, -0.3, 0.3);
+    c.brakes = false;
+    if (this.apBrake) c.airbrake = false;
+    this.apBrake = false;
   }
 
   /** Drop back to the basic hold modes on the present heading/altitude. */
@@ -208,6 +242,8 @@ export class Autopilot {
       c.throttle = 0;
       this.thrInt = 0;
       c.brakes = true;
+      if (this.apBrake) c.airbrake = false;
+      this.apBrake = false;
       if (gs < 2.5) {
         // stopped on the centreline: job done, hand the aircraft back
         this.apprPhase = 'done';
@@ -220,12 +256,19 @@ export class Autopilot {
     // ---- lateral: steer the GROUND TRACK at a point on the centreline ----
     // aiming a fixed time ahead makes the intercept angle shrink smoothly to
     // zero; steering track rather than heading means a crosswind is held
-    // off with exactly the crab it needs, no integrator required
-    const lead = clamp(gs * 11, 420, 3200);
+    // off with exactly the crab it needs, no integrator required.
+    // The aim point must also be about a TURN RADIUS ahead, or a fast
+    // intercept cannot follow its own command and sails through the beam
+    // (a jet at 400 kt flew 1 to 4 km past the centreline): lead grows with
+    // the radius at the bank this airframe may use, and fighters may bank
+    // like fighters while still high.
+    const bankHi = spec.gLimit >= 7 ? 0.8 : 0.44;
+    const turnR = (gs * gs) / (9.81 * Math.tan(bankHi));
+    const lead = clamp(Math.max(gs * 11, turnR * LEAD_RADII), 420, 14000);
     const wantTrack = app.course - clamp(Math.atan2(cross, lead), -0.7, 0.7);
     const trkErr = wrapAngle(wantTrack - track);
-    // airline bank limits, tightening to wings-nearly-level in the flare
-    const bankCap = ra < 12 ? 0.07 : ra < 60 ? 0.2 : 0.44;
+    // airline bank limits low down, tightening to wings-nearly-level in the flare
+    const bankCap = ra < 12 ? 0.07 : ra < 60 ? 0.2 : ra < 150 ? 0.44 : bankHi;
     const bankTargetRight = clamp(trkErr * 2.4, -bankCap, bankCap);
     c.roll = clamp((bankTargetRight + st.rollAngle) * 2.0 + st.angVel.z * 0.5, -0.6, 0.6);
     c.yaw = 0;
@@ -234,9 +277,48 @@ export class Autopilot {
     // height above the 3° path from the station 300 m inside the threshold
     const pathY = app.elev + 2.5 + TAN_GS * (toGo + 300);
     const hErr = st.pos.y - pathY;
+    // the glide path is only taken once ESTABLISHED on the localizer: inside
+    // the beam and tracking along it. (Position alone used to do: crossing
+    // the beam at 90 degrees captured the glideslope, and the aircraft
+    // descended into the hills kilometres off the centreline.)
     if (this.apprPhase === 'loc' && toGo > 0 && hErr > -18 &&
-        Math.abs(cross) < Math.max(toGo * 0.09, 120)) {
+        Math.abs(cross) < Math.max(toGo * 0.05, 90) &&
+        Math.abs(wrapAngle(track - app.course)) < 0.3) {
       this.apprPhase = 'gs'; // the path has come down to meet us (or we are above it)
+    }
+
+    // ---- can this still end on the runway? ----
+    if (this.apprPhase === 'gs') {
+      let why: string | null = null;
+      // too high to regain the path: the steepest descent the mode flies is
+      // about twice the glide path
+      const need = (st.pos.y - app.elev) / Math.max(toGo + 300, 1);
+      if (ra > 100 && need > TAN_TOO_HIGH) why = 'APPR OFF — TOO HIGH FOR THE GLIDE PATH: DESCEND, RE-ARM';
+      // the stabilised-approach gate, ~300 ft up: on the path, on the
+      // centreline, wheels down, or go around. Speed is judged last, at
+      // ~100 ft: a slippery jet is still shedding it down the final mile,
+      // and 25 kt over the reference at the flare is a float off the far end
+      else if (ra < 90 && toGo < 1800) {
+        if (spec.retractableGear && !c.gearDown) why = 'GO AROUND — GEAR NOT DOWN';
+        else if (hErr > 22) why = 'GO AROUND — TOO HIGH';
+        else if (Math.abs(cross) > 28) why = 'GO AROUND — OFF THE CENTRELINE';
+        else if (ra < 34 && st.airspeed > approachSpeed(spec, c.flaps) + 13) why = 'GO AROUND — TOO FAST';
+      }
+      if (why) {
+        this.abandonApproach(spec, st, c, why);
+        this.update(spec, st, c, dt, ra);
+        return;
+      }
+    } else if (this.apprPhase === 'flare' && !st.onGround && -toGo > app.length * 0.55) {
+      // floated past the middle of the runway: not enough left to stop on
+      this.abandonApproach(spec, st, c, 'GO AROUND — LONG LANDING');
+      this.update(spec, st, c, dt, ra);
+      return;
+    } else if (this.apprPhase === 'loc' && toGo < -300) {
+      // never got established before the runway went by underneath
+      this.abandonApproach(spec, st, c, 'APPR OFF — RUNWAY PASSED BEFORE THE LOCALIZER WAS CAPTURED');
+      this.update(spec, st, c, dt, ra);
+      return;
     }
     const sink = -st.vel.y;
     // exponential flare: commanded sink decays with height (time constant
@@ -272,10 +354,17 @@ export class Autopilot {
     }
 
     // managed speed: on the glide path the target bleeds to the reference
-    // speed for whatever flap is set — select flap and it slows to match
+    // speed for whatever flap is set — select flap and it slows to match.
+    // Before that, from the moment the mode is armed, it slows to an
+    // intercept speed: nobody captures a localizer at cruise speed (the
+    // turn radius is kilometres) and the glide path leaves no room to
+    // lose 200 kt.
     if (this.apprPhase !== 'loc') {
       const vapp = Math.max(approachSpeed(spec, c.flaps), this.minSpd * 0.6);
       this.targetSpd += clamp(vapp - this.targetSpd, -1.6 * dt, 1.6 * dt);
+    } else {
+      const vInt = approachSpeed(spec, 0) * INTERCEPT_SPEED;
+      if (this.targetSpd > vInt) this.targetSpd = Math.max(this.targetSpd - 1.6 * dt, vInt);
     }
     // same airspeed protection as the basic modes
     const spdMargin = clamp((st.airspeed - this.targetSpd * 0.75) / (this.targetSpd * 0.25), 0, 1);
@@ -288,6 +377,20 @@ export class Autopilot {
       this.pitchTrim = clamp(this.pitchTrim + vsErr * 0.03 * dt, -0.45, 0.45);
     }
     c.pitch = clamp(rawPitch, -0.6, 0.75);
+
+    // ---- speedbrake: out to lose a large excess, stowed again once it is
+    // gone. Only what the mode put out is taken back: the pilot's own
+    // selection is left alone.
+    if (spec.airbrakeCd > 0) {
+      const over = st.airspeed - this.targetSpd;
+      if (this.apprPhase === 'flare' || over < 3) {
+        if (this.apBrake) c.airbrake = false;
+        this.apBrake = false;
+      } else if (over > 9 && !c.airbrake) {
+        c.airbrake = true;
+        this.apBrake = true;
+      }
+    }
 
     // ---- thrust ----
     if (this.apprPhase === 'flare') {

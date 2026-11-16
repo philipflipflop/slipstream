@@ -55,6 +55,8 @@ export const CATALOG: AircraftSpec[] = [
     stallAoA: 0.31,
     cd0: 0.038,
     maxThrust: 11000,
+    engines: 2,
+    asymYaw: 0.5,
     propFalloff: 0.55,
     pitchRate: 1.35,
     rollRate: 1.5,
@@ -205,6 +207,8 @@ export const CATALOG: AircraftSpec[] = [
     stallAoA: 0.44,
     cd0: 0.016,
     maxThrust: 120000,
+    engines: 2,
+    asymYaw: 0.025, // engines side by side on the centreline
     afterburner: 1.5,
     propFalloff: 0.1,
     pitchRate: 3.6,
@@ -244,6 +248,8 @@ export const CATALOG: AircraftSpec[] = [
     stallAoA: 0.24,
     cd0: 0.02,
     maxThrust: 96000,
+    engines: 2,
+    asymYaw: 0.2,   // rear-fuselage pods: a short arm
     propFalloff: 0.18,
     pitchRate: 0.95,
     rollRate: 1.25,
@@ -284,6 +290,8 @@ export const CATALOG: AircraftSpec[] = [
     stallAoA: 0.26,
     cd0: 0.022,
     maxThrust: 241000,
+    engines: 2,
+    asymYaw: 0.5,   // underwing pods 5.75 m out
     // high for a jet: stands in for the un-modelled transonic drag rise, so
     // max level speed settles right at MMO (~470-480 kt) instead of far past it
     propFalloff: 0.6,

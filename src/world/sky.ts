@@ -7,6 +7,31 @@
 import * as THREE from 'three';
 import { clamp, damp } from '../core/math';
 import type { DaylightPreset } from './daylight';
+import type { WeatherPreset } from './weather';
+
+// Scene fog measures TRUE distance from the eye, per fragment. three.js
+// fogs by view-space depth (−z), which is ~25% short at the screen corners:
+// terrain there stayed half-visible past the range where the centre of the
+// screen was fully hazed, so the rim of the world showed at the sides and
+// the haze line slid over the ground whenever the camera turned. The
+// position is interpolated and its length taken per fragment (a per-vertex
+// length is wrong across long triangles — runways, the water sheet).
+// Patched once at module load, before any material compiles.
+THREE.ShaderChunk.fog_pars_vertex = /* glsl */ `
+#ifdef USE_FOG
+  varying vec3 vFogPosition;
+#endif
+`;
+THREE.ShaderChunk.fog_vertex = /* glsl */ `
+#ifdef USE_FOG
+  vFogPosition = mvPosition.xyz;
+#endif
+`;
+THREE.ShaderChunk.fog_pars_fragment = THREE.ShaderChunk.fog_pars_fragment
+  .replace('varying float vFogDepth;', 'varying vec3 vFogPosition;');
+THREE.ShaderChunk.fog_fragment =
+  '#ifdef USE_FOG\n\tfloat vFogDepth = length( vFogPosition );\n#endif\n' +
+  THREE.ShaderChunk.fog_fragment;
 
 const SKY_VERT = /* glsl */ `
   varying vec3 vDir;
@@ -27,6 +52,7 @@ const SKY_FRAG = /* glsl */ `
   uniform vec3 uDiscColor;
   uniform float uDiscBoost;
   uniform float uStars;
+  uniform vec4 uWhite;   // rgb = the cloud you are inside, a = how deep
   varying vec3 vDir;
 
   float hash13(vec3 p) {
@@ -51,10 +77,14 @@ const SKY_FRAG = /* glsl */ `
     }
 
     float sunAmt = max(dot(d, uSunDir), 0.0);
-    // haze around the disc
-    col += uGlowColor * pow(sunAmt, 14.0) * uGlowAmt;
+    // haze around the disc — above the horizon only. Below it the dome must
+    // be EXACTLY the fog colour: that is where fully hazed terrain and water
+    // end, and any glow there outlines the rim of the world as an arc under
+    // a low sun (and the arc jumps each time the horizon shell re-centres)
+    col += uGlowColor * pow(sunAmt, 14.0) * uGlowAmt * smoothstep(-0.01, 0.10, h);
     // the disc itself (sun by day, moon by night)
     col += uDiscColor * smoothstep(0.9994, 0.9999, sunAmt) * uDiscBoost;
+    col = mix(col, uWhite.rgb, uWhite.a);
     gl_FragColor = vec4(col, 1.0);
   }
 `;
@@ -89,15 +119,49 @@ export class Sky {
   readonly sunDir: THREE.Vector3;
   readonly sun: THREE.DirectionalLight;
   readonly hemi: THREE.HemisphereLight;
+  /** horizon colour as the raw sky/water shaders use it */
   readonly fogColor: THREE.Color;
+  /**
+   * The colour to hand THREE.Fog so fogged geometry lands on EXACTLY what
+   * the dome shows at the horizon. The dome and water shaders write their
+   * (linear) colour values straight to the screen; three.js materials
+   * encode theirs to sRGB first — so handing both the same Color made fully
+   * hazed terrain come out paler (198,211,224) than the sky behind it
+   * (144,166,190). Distant land then never melted into the horizon: it
+   * stood out as pale shapes, and the rim of the world "popped in" as a
+   * visible outline however thick the haze was.
+   */
+  readonly sceneFogColor: THREE.Color;
+  /** cloud in sunlight / cloud seen from beneath (raw shader space, like
+   *  fogColor): the deck's two faces, and what the inside of it looks like */
+  readonly cloudLit: THREE.Color;
+  readonly cloudShade: THREE.Color;
   private dome: THREE.Mesh;
   private clouds: THREE.Sprite[] = [];
   private cloudBaseOpacity: number[] = [];
   private cloudSpan = 9000;
+  // the clear-sky palette and its under-the-deck (grey) counterpart
+  private zenith0: THREE.Color;
+  private horizon0: THREE.Color;
+  private zenithGrey: THREE.Color;
+  private horizonGrey: THREE.Color;
+  private puffFade = 1;
 
-  constructor(scene: THREE.Scene, cloudCount: number, preset: DaylightPreset) {
+  constructor(scene: THREE.Scene, cloudCount: number, private preset: DaylightPreset, private wx?: WeatherPreset) {
     this.sunDir = new THREE.Vector3(...preset.sunDir).normalize();
     this.fogColor = new THREE.Color(preset.horizon);
+    this.zenith0 = new THREE.Color(preset.zenith);
+    this.horizon0 = this.fogColor.clone();
+    // an overcast sky is a neutral grey about as bright as the day's own
+    // horizon haze, a little darker overhead
+    const lum = 0.2126 * this.horizon0.r + 0.7152 * this.horizon0.g + 0.0722 * this.horizon0.b;
+    this.horizonGrey = new THREE.Color(0.8 * lum, 0.83 * lum, 0.87 * lum);
+    this.zenithGrey = this.horizonGrey.clone().multiplyScalar(0.74);
+    this.cloudLit = new THREE.Color(preset.cloudTint);
+    this.cloudShade = this.horizonGrey.clone().multiplyScalar(0.86);
+    this.sceneFogColor = new THREE.Color().setRGB(
+      this.fogColor.r, this.fogColor.g, this.fogColor.b, THREE.SRGBColorSpace,
+    );
 
     const geo = new THREE.SphereGeometry(1, 32, 18);
     const mat = new THREE.ShaderMaterial({
@@ -117,6 +181,7 @@ export class Sky {
         uDiscColor: { value: new THREE.Color(preset.discColor) },
         uDiscBoost: { value: preset.discBoost },
         uStars: { value: preset.stars },
+        uWhite: { value: new THREE.Vector4(1, 1, 1, 0) },
       },
     });
     this.dome = new THREE.Mesh(geo, mat);
@@ -143,6 +208,14 @@ export class Sky {
     scene.add(this.sun);
     scene.add(this.sun.target);
 
+    // fair-weather puffs. With a deck they sit where cumulus would: poking
+    // through a broken layer, or as the lumps on top of a solid one (the
+    // deck writes depth, so from beneath those are simply hidden).
+    const deck = wx?.deck ?? null;
+    const band: [number, number] = !deck ? [850, 1750]
+      : deck.cover < 0.99 ? [deck.base - 40, deck.top + 160]
+      : [deck.top - 30, deck.top + 260];
+    cloudCount = Math.round(cloudCount * (wx?.puffs ?? 1));
     const tex = makeCloudTexture();
     for (let i = 0; i < cloudCount; i++) {
       const mat2 = new THREE.SpriteMaterial({
@@ -159,7 +232,7 @@ export class Sky {
       sp.scale.set(w, w * (0.3 + Math.random() * 0.18), 1);
       sp.position.set(
         (Math.random() - 0.5) * this.cloudSpan * 2,
-        850 + Math.random() * 900,
+        band[0] + Math.random() * (band[1] - band[0]),
         (Math.random() - 0.5) * this.cloudSpan * 2,
       );
       sp.renderOrder = 5;
@@ -170,6 +243,32 @@ export class Sky {
 
   setShadows(enabled: boolean): void {
     this.sun.castShadow = enabled;
+  }
+
+  /**
+   * Where the eye is relative to the weather, every frame: `under` 1 =
+   * beneath the cloud deck (grey light, grey sky) … 0 = above it (the day's
+   * own palette); `white` 0..1 = how deep inside cloud, when everything —
+   * sky included — goes to `cloud`. Fog colour follows, so haze, water and
+   * the dome's horizon stay one colour (the HAZE rules in CLAUDE.md).
+   */
+  setAir(under: number, white: number, cloud: THREE.Color): void {
+    const wx = this.wx;
+    const k = under * (wx?.grey ?? 0);
+    const u = (this.dome.material as THREE.ShaderMaterial).uniforms;
+    (u.uZenith.value as THREE.Color).lerpColors(this.zenith0, this.zenithGrey, k);
+    this.fogColor.lerpColors(this.horizon0, this.horizonGrey, k).lerp(cloud, white);
+    (u.uHorizon.value as THREE.Color).copy(this.fogColor);
+    (u.uGroundGlow.value as THREE.Color).copy(this.fogColor).multiplyScalar(this.preset.groundGlow);
+    this.sceneFogColor.setRGB(this.fogColor.r, this.fogColor.g, this.fogColor.b, THREE.SRGBColorSpace);
+    u.uGlowAmt.value = this.preset.glowAmt * (1 - k);
+    u.uDiscBoost.value = this.preset.discBoost * (1 - k);
+    u.uStars.value = this.preset.stars * (1 - k);
+    (u.uWhite.value as THREE.Vector4).set(cloud.r, cloud.g, cloud.b, white);
+    const light = 1 + ((wx?.light ?? 1) - 1) * under;
+    this.sun.intensity = this.preset.sunIntensity * light;
+    this.hemi.intensity = this.preset.hemiIntensity * (0.7 + 0.3 * light);
+    this.puffFade = 1 - white;
   }
 
   update(center: THREE.Vector3, fogFar = 7000, dt = 0.016): void {
@@ -202,7 +301,7 @@ export class Sky {
       // fade out near the wrap boundary so a recycled puff never pops
       const dist = Math.hypot(c.position.x - center.x, c.position.z - center.z);
       const fade = 1 - clamp((dist / span - 0.78) / 0.2, 0, 1);
-      (c.material as THREE.SpriteMaterial).opacity = this.cloudBaseOpacity[i] * fade;
+      (c.material as THREE.SpriteMaterial).opacity = this.cloudBaseOpacity[i] * fade * this.puffFade;
     }
   }
 }

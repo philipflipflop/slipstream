@@ -272,6 +272,72 @@ function approachSurface(ap: AirfieldDef, dax: number, daz: number): number {
 }
 
 /** Procedural airfield grid: one candidate per CELL×CELL region. */
+/** crop tones of the field quilt, with how common each is */
+const CROPS: Array<[number, number, number, number]> = [
+  [0.33, 0.55, 0.2, 0.26],   // pasture
+  [0.2, 0.42, 0.16, 0.18],   // deep green crop
+  [0.45, 0.58, 0.3, 0.16],   // young crop
+  [0.68, 0.6, 0.3, 0.15],    // wheat
+  [0.6, 0.55, 0.34, 0.11],   // stubble
+  [0.4, 0.3, 0.17, 0.1],     // ploughed
+  [0.72, 0.68, 0.2, 0.04],   // oilseed
+];
+/** the quilt's average tone: what it fades to where a mesh cannot carry it */
+const FIELD_MEAN = CROPS.reduce(
+  (m, c) => [m[0] + c[0] * c[3], m[1] + c[1] * c[3], m[2] + c[2] * c[3]], [0, 0, 0],
+);
+const FIELD_TMP = [0, 0, 0];
+const FIELD_SIZE = 210;
+
+/**
+ * Colour of the field a point lies in. Fields are the cells of a jittered
+ * lattice under the Chebyshev metric (boxy plots with the odd diagonal
+ * boundary, not honeycomb), turned off the mesh axes. `texel` fades the
+ * quilt to its mean where the sampling mesh is coarser than the plots — an
+ * under-sampled quilt is moiré (same rule as the city street grid).
+ */
+function fieldTone(x: number, z: number, texel: number, out: number[]): void {
+  const gk = texel > 0 ? 1 - smoothstep(70, 240, texel) : 1;
+  if (gk <= 0) {
+    out[0] = FIELD_MEAN[0]; out[1] = FIELD_MEAN[1]; out[2] = FIELD_MEAN[2];
+    return;
+  }
+  // plots are half as long again as they are wide
+  const u = (x * 0.921 + z * 0.39) / (FIELD_SIZE * 1.5);
+  const v = (z * 0.921 - x * 0.39) / FIELD_SIZE;
+  const iu = Math.floor(u);
+  const iv = Math.floor(v);
+  let best = 9;
+  let bu = 0;
+  let bv = 0;
+  for (let j = -1; j <= 1; j++) {
+    for (let i = -1; i <= 1; i++) {
+      const cu = iu + i;
+      const cv = iv + j;
+      const du = Math.abs(u - (cu + 0.5 + (hash2(cu * 3 + 1, cv * 5 + 2) - 0.5) * 0.55));
+      const dv = Math.abs(v - (cv + 0.5 + (hash2(cu * 7 - 4, cv * 11 + 9) - 0.5) * 0.55));
+      const d = du > dv ? du : dv;
+      if (d < best) { best = d; bu = cu; bv = cv; }
+    }
+  }
+  let pick = hash2(bu * 13 + 7, bv * 17 - 3);
+  let c = CROPS[0];
+  for (const crop of CROPS) {
+    c = crop;
+    if (pick < crop[3]) break;
+    pick -= crop[3];
+  }
+  // each plot a shade of its own
+  const k = 0.93 + hash2(bu * 5 - 9, bv * 3 + 4) * 0.14;
+  out[0] = lerp(FIELD_MEAN[0], c[0] * k, gk);
+  out[1] = lerp(FIELD_MEAN[1], c[1] * k, gk);
+  out[2] = lerp(FIELD_MEAN[2], c[2] * k, gk);
+}
+
+/** volcanoes: one candidate per cell of this size (archipelago) */
+const VOLC_CELL = 56000;
+interface Volcano { x: number; z: number; r: number; h: number; crater: number }
+
 const CELL = 12000;
 const cellKey = (cx: number, cz: number) => (cx + 8192) * 16384 + (cz + 8192);
 
@@ -300,6 +366,7 @@ export class WorldGen {
   private town: Simplex2;
   private fieldCache = new Map<number, AirfieldDef | null>();
   private intlCache = new Map<number, AirfieldDef | null>();
+  private volcCache = new Map<number, Volcano | null>();
   private scratch: AirfieldDef[] = [];
 
   constructor(public readonly seed = 20260610, public readonly theme: WorldTheme = 'archipelago') {
@@ -316,10 +383,19 @@ export class WorldGen {
     const wx = x + t.noise(x * 0.00022 + 53.1, z * 0.00022) * 1300;
     const wz = z + t.noise(x * 0.00022, z * 0.00022 + 97.7) * 1300;
 
+    // ... but only the broad MASKS (continents, ranges, river courses) ride
+    // the full warp. It folds — its Jacobian reaches ~0.15 — and anything
+    // with fine structure sampled through a fold is smeared 5–7× along it:
+    // hills, ridges and coasts all came out as parallel streaks, like
+    // dragged paint. Relief is sampled through a quarter of the warp, which
+    // bends it without ever folding.
+    const hx = x + (wx - x) * 0.25;
+    const hz = z + (wz - z) * 0.25;
+
     let e: number;
-    if (this.theme === 'mesa') e = this.mesaHeight(x, z, wx, wz);
-    else if (this.theme === 'metro') e = this.metroHeight(x, z, wx, wz);
-    else e = this.islandHeight(x, z, wx, wz);
+    if (this.theme === 'mesa') e = this.mesaHeight(x, z, wx, wz, hx, hz);
+    else if (this.theme === 'metro') e = this.metroHeight(x, z, wx, wz, hx, hz);
+    else e = this.islandHeight(x, z, wx, wz, hx, hz);
 
     // drain the marginal band around sea level: terrain that barely skims
     // the waterline either deepens into a proper lake or stays clearly dry.
@@ -332,46 +408,180 @@ export class WorldGen {
   }
 
   /** Original theme: island chains, forests, big alpine ranges. */
-  private islandHeight(x: number, z: number, wx: number, wz: number): number {
+  private islandHeight(x: number, z: number, wx: number, wz: number, hx: number, hz: number): number {
     const t = this.terra;
 
     // continental mask — guarantee solid ground around the spawn airfield
     let c = t.fbm(wx * 0.000095, wz * 0.000095, 3);
-    c += this.spawnBoost(x, z);
+    const sb = this.spawnBoost(x, z);
+    c += sb;
     const land = smoothstep(-0.32, 0.22, c);
 
     // continental shelf: deep ocean → coastal plains
     let e = lerp(-70, 16, land);
 
     // rolling hills on land
-    e += t.fbm(wx * 0.0011, wz * 0.0011, 4) * 26 * land;
+    // (hollows are shallower than the rises are tall, or the plain is
+    // pocked with ponds wherever a dip reaches the waterline)
+    const roll = t.fbm(hx * 0.0011, hz * 0.0011, 4);
+    e += (roll < 0 ? roll * 0.62 : roll) * 26 * land;
+    // ... and whole regions of proper hill country between plain and alp
+    if (land > 0.01) e += this.hillCountry(wx, wz, hx, hz) * land;
 
     // mountain ranges where the mountain mask bites; range height itself
     // varies regionally so some massifs tower over their neighbours
     const mm = smoothstep(0.22, 0.62, t.fbm(wx * 0.00016 + 777.7, wz * 0.00016, 3)) * land;
     if (mm > 0.001) {
       const amp = 680 + (t.noise(wx * 0.00007 + 31.7, wz * 0.00007) * 0.5 + 0.5) * 420;
-      e += t.ridged(wx * 0.00042, wz * 0.00042, 5) * amp * mm;
+      e += t.ridged(hx * 0.00042, hz * 0.00042, 5) * amp * mm;
     }
 
     // fine surface detail
-    e += t.noise(wx * 0.0065, wz * 0.0065) * 2.2 * land;
+    e += t.noise(hx * 0.0065, hz * 0.0065) * 2.2 * land;
+
+    // landmark volcanoes (rising from land or straight out of the sea), then
+    // the rivers that drain the low country
+    e += this.volcanoAt(x, z);
+    return this.carveRiver(e, wx, wz, sb);
+  }
+
+  /**
+   * Hill country: regions tens of kilometres across where the lowland rolls
+   * up into rounded 100–200 m downs with flat-floored valleys between them.
+   * (Without it everything that was not an alpine range was a ±26 m plain.)
+   */
+  private hillCountry(wx: number, wz: number, hx: number, hz: number): number {
+    const t = this.terra;
+    const region = smoothstep(0.02, 0.5, t.noise(wx * 0.00005 + 211.3, wz * 0.00005 - 87.1));
+    if (region < 0.002) return 0;
+    const n = clamp(t.fbm(hx * 0.00042 + 13.7, hz * 0.00042 + 7.9, 3) * 0.62 + 0.5, 0, 1);
+    return n * n * 235 * region;
+  }
+
+  /**
+   * Rivers: the zero lines of a slow noise field are long winding curves;
+   * low country is cut down to a channel below sea level along them (the one
+   * water sheet then fills it), inside a broad levelled flood plain. They
+   * rise where the land climbs past ~100 m and widen and narrow along the
+   * run. `keepOut` (the fixed-field boost) keeps them off the home airfields.
+   */
+  private carveRiver(e: number, wx: number, wz: number, keepOut: number): number {
+    if (e > 125 || e < -5) return e;
+    const t = this.terra;
+    const v = Math.abs(t.noise(wx * 0.00008 + 400.5, wz * 0.00008 - 311.2));
+    if (v > 0.24) return e;
+    const low = smoothstep(120, 40, e) * (1 - smoothstep(0.03, 0.3, keepOut));
+    if (low <= 0) return e;
+    const wid = 0.03 * (1 + 0.5 * t.noise(wx * 0.00021 - 77.7, wz * 0.00021 + 12.3));
+    const vale = smoothstep(wid * 5, wid * 1.2, v) * low;
+    if (e > 5) e = lerp(e, 5, vale * 0.85);
+    const core = smoothstep(wid, wid * 0.4, v) * low;
+    if (e > -5) e = lerp(e, -5, core);
     return e;
   }
 
+  /** The volcano of a 56 km cell, if it has one (memoised). */
+  private volcano(cx: number, cz: number): Volcano | null {
+    const key = cellKey(cx, cz);
+    let v = this.volcCache.get(key);
+    if (v !== undefined) return v;
+    v = null;
+    if (this.theme === 'archipelago' && hash2(cx * 7 + 3, cz * 13 - 5) < 0.42) {
+      const r = 5200 + hash2(cx + 91, cz - 37) * 3200;
+      const span = VOLC_CELL - 2 * r - 1500;
+      const x = (cx + 0.5) * VOLC_CELL + (hash2(cx * 3 + 1, cz * 5 + 2) - 0.5) * span;
+      const z = (cz + 0.5) * VOLC_CELL + (hash2(cx * 11 - 6, cz * 3 + 8) - 0.5) * span;
+      // never beside a hand-placed field (procedural ones probe the ground
+      // and so site themselves clear)
+      let clear = true;
+      for (const ap of AIRPORTS) {
+        if (Math.hypot(x - ap.x, z - ap.z) < r + (ap.intl ? 22000 : 14000)) clear = false;
+      }
+      if (clear) {
+        v = {
+          x, z, r,
+          h: 780 + hash2(cx * 5 - 2, cz * 9 + 4) * 760,
+          crater: 320 + hash2(cx - 13, cz + 29) * 240,
+        };
+      }
+    }
+    this.volcCache.set(key, v);
+    return v;
+  }
+
+  /** Height a volcano adds at (x, z): a concave cone steepening to ~27° at
+   *  the summit, gullied flanks, a crater bitten out of the top. */
+  private volcanoAt(x: number, z: number): number {
+    if (this.theme !== 'archipelago') return 0;
+    const v = this.volcano(Math.floor(x / VOLC_CELL), Math.floor(z / VOLC_CELL));
+    if (!v) return 0;
+    const dx = x - v.x;
+    const dz = z - v.z;
+    const d2 = dx * dx + dz * dz;
+    if (d2 >= v.r * v.r) return 0;
+    const d = Math.sqrt(d2);
+    const u = 1 - d / v.r;
+    let h = v.h * (0.12 * u + 0.88 * u * u * u);
+    h *= 1 + this.terra.noise(x * 0.0009 + 9.1, z * 0.0009 - 4.4) * 0.2 * (1 - u);
+    if (d < v.crater * 1.3) h -= smoothstep(v.crater * 1.25, v.crater * 0.35, d) * v.h * 0.16;
+    return h;
+  }
+
+  /** 0 off a volcano … 1 at its summit (paints the ash cone). */
+  volcanoMaskAt(x: number, z: number): number {
+    if (this.theme !== 'archipelago') return 0;
+    const v = this.volcano(Math.floor(x / VOLC_CELL), Math.floor(z / VOLC_CELL));
+    if (!v) return 0;
+    const d = Math.hypot(x - v.x, z - v.z);
+    return d >= v.r ? 0 : 1 - d / v.r;
+  }
+
+  /** 0..1 dune sea (mesa theme): where the benches drown in sand. */
+  duneAt(x: number, z: number): number {
+    if (this.theme !== 'mesa') return 0;
+    return smoothstep(0.22, 0.55, this.moist.noise(x * 0.00005 - 120.3, z * 0.00005 + 64.2));
+  }
+
+  /**
+   * Free-standing mesas and buttes (mesa theme): one candidate per 4.2 km
+   * cell, sheer-walled, flat-capped, 280–800 m across the cap with a talus
+   * skirt. Big enough that the 450 m far-shell lattice still finds them.
+   */
+  private butteAt(x: number, z: number): number {
+    const C = 4200;
+    const cx = Math.floor(x / C);
+    const cz = Math.floor(z / C);
+    if (hash2(cx * 17 + 5, cz * 29 - 11) > 0.34) return 0;
+    const R = 280 + hash2(cx - 31, cz + 57) * 520;
+    const span = C - 3.5 * R - 100;
+    const dx = x - ((cx + 0.5) * C + (hash2(cx * 3 + 1, cz * 7 + 2) - 0.5) * span);
+    const dz = z - ((cz + 0.5) * C + (hash2(cx * 13 - 4, cz * 5 + 6) - 0.5) * span);
+    if (Math.abs(dx) > R * 1.75 || Math.abs(dz) > R * 1.75) return 0;
+    // stretched along a hashed axis: ridged mesas as well as round buttes
+    const a = hash2(cx + 5, cz - 9) * Math.PI;
+    const ca = Math.cos(a);
+    const sa = Math.sin(a);
+    let d = Math.hypot(dx * ca + dz * sa, (dz * ca - dx * sa) * (1 + hash2(cx * 9, cz * 4 + 1) * 1.1));
+    if (d > R * 1.75) return 0;
+    d *= 1 + this.terra.noise(x * 0.0031 + 40.1, z * 0.0031 - 18.6) * 0.16; // ragged rim
+    const H = 60 + hash2(cx * 5 - 3, cz * 3 + 8) * 170;
+    return H * (smoothstep(R, R * 0.8, d) * 0.82 + smoothstep(R * 1.45, R * 0.85, d) * 0.18);
+  }
+
   /** Desert theme: stacked plateau terraces cut by winding canyon systems. */
-  private mesaHeight(x: number, z: number, wx: number, wz: number): number {
+  private mesaHeight(x: number, z: number, wx: number, wz: number, hx: number, hz: number): number {
     const t = this.terra;
 
     // almost all land; distant inland seas only
     let c = t.fbm(wx * 0.00006, wz * 0.00006, 3) + 0.5;
-    c += this.spawnBoost(x, z);
+    const sb = this.spawnBoost(x, z);
+    c += sb;
     const land = smoothstep(-0.45, 0.05, c);
     let e = lerp(-45, 24, land);
 
     // terraced uplift: quantize a broad noise field into benches with sharp
     // risers — the classic stepped-mesa profile
-    const h01 = clamp(t.fbm(wx * 0.00032, wz * 0.00032, 4) * 0.5 + 0.5, 0, 1);
+    const h01 = clamp(t.fbm(hx * 0.00032, hz * 0.00032, 4) * 0.5 + 0.5, 0, 1);
     const bands = h01 * 4.3;
     const bench = Math.floor(bands);
     const riser = smoothstep(0.6, 0.96, bands - bench);
@@ -384,32 +594,54 @@ export class WorldGen {
     e -= smoothstep(0.16, 0.015, can) * canDepth * land;
 
     // sculpt: rocky shoulders + fine grit
-    e += t.ridged(wx * 0.0014, wz * 0.0014, 3) * 9 * land;
-    e += t.noise(wx * 0.006, wz * 0.006) * 2.4 * land;
+    e += t.ridged(hx * 0.0014, hz * 0.0014, 3) * 9 * land;
+    e += t.noise(hx * 0.006, hz * 0.006) * 2.4 * land;
+
+    if (land > 0.01) {
+      // monument country: free-standing mesas and buttes, in swarms
+      const swarm = smoothstep(-0.15, 0.3, t.noise(x * 0.00007 + 300.3, z * 0.00007 + 150.6));
+      const open = (1 - smoothstep(0.03, 0.3, sb)) * land;
+      if (swarm > 0.002) e += this.butteAt(x, z) * swarm * open;
+      // dune seas: long crests across the prevailing wind, wandering
+      const dn = this.duneAt(x, z);
+      if (dn > 0) {
+        const q = (x * 0.8 + z * 0.6) * 0.0095 + t.noise(x * 0.0007 + 3.3, z * 0.0007) * 1.6;
+        const crest = 1 - Math.abs(Math.sin(q));
+        e += (crest * crest * 15 - 4) * dn * land;
+      }
+    }
     return e;
   }
 
   /** Metro theme: a sheltered bay, flat coastal plain, city districts, hills inland. */
-  private metroHeight(x: number, z: number, wx: number, wz: number): number {
+  private metroHeight(x: number, z: number, wx: number, wz: number, hx: number, hz: number): number {
     const t = this.terra;
 
     let c = t.fbm(wx * 0.00009, wz * 0.00009, 3) + 0.18;
-    c += this.spawnBoost(x, z);
+    const sb = this.spawnBoost(x, z);
+    c += sb;
     // carve the bay east of the home peninsula
     c -= smoothstep(10500, 4200, Math.hypot(x - 10500, z + 4500)) * 1.25;
     const land = smoothstep(-0.32, 0.22, c);
 
     let e = lerp(-48, 11, land);
-    e += t.fbm(wx * 0.0009, wz * 0.0009, 4) * 13 * land; // gentle plain
+    e += t.fbm(hx * 0.0009, hz * 0.0009, 4) * 13 * land; // gentle plain
 
     // green hills well inland
     const mm = smoothstep(0.34, 0.72, t.fbm(wx * 0.00013 + 777.7, wz * 0.00013, 3)) * land;
-    if (mm > 0.001) e += t.ridged(wx * 0.0004, wz * 0.0004, 4) * 420 * mm;
+    if (mm > 0.001) e += t.ridged(hx * 0.0004, hz * 0.0004, 4) * 420 * mm;
 
-    e += t.noise(wx * 0.0065, wz * 0.0065) * 1.6 * land;
+    e += t.noise(hx * 0.0065, hz * 0.0065) * 1.6 * land;
+
+    // downs behind the coastal plain and rivers across it — both stop at
+    // the city limits (districts are graded level below)
+    const cm = this.cityMaskAt(x, z);
+    if (land > 0.01 && cm < 0.6) {
+      e += this.hillCountry(wx, wz, hx, hz) * 0.7 * land * (1 - smoothstep(0, 0.6, cm));
+    }
+    e = this.carveRiver(e, wx, wz, sb + cm);
 
     // city districts sit on graded, almost-flat ground
-    const cm = this.cityMaskAt(x, z);
     if (cm > 0.001) {
       e = lerp(e, 6.5 + t.noise(x * 0.0007, z * 0.0007) * 1.4, cm * 0.94);
     }
@@ -504,12 +736,19 @@ export class WorldGen {
       const dax = x - ap.x;
       const daz = z - ap.z;
       const outer = ap.length * 1.05 + 800;
-      if (Math.abs(dax) > outer || Math.abs(daz) > outer) continue;
+      if (Math.abs(dax) > outer * 1.42 || Math.abs(daz) > outer * 1.42) continue;
       // rotate into the runway frame: `along` runs down the centreline
       const along = dax * ap.sinH - daz * ap.cosH;
+      const aAl = Math.abs(along);
+      if (aAl >= outer) continue;
       const across = dax * ap.cosH + daz * ap.sinH;
       const fr = Math.hypot(across, along * 0.45);
-      const flat = smoothstep(outer, ap.length * 0.3 + 250, fr);
+      // The footprint is an ellipse stretched 2.2× along the runway but it
+      // ENDS at ±outer — and has to fade out there. (It used to stop dead,
+      // on a world-axis box: the ground stepped from 88% flattened to
+      // untouched along a ruler-straight line 4–5 km off each runway end —
+      // a wall as tall as the hills behind it.)
+      const flat = smoothstep(outer, ap.length * 0.3 + 250, fr) * smoothstep(outer, outer * 0.76, aAl);
       if (flat > 0) e = lerp(e, ap.elev, flat);
     }
     return e;
@@ -761,6 +1000,23 @@ export class WorldGen {
     return d;
   }
 
+  /**
+   * 0..1 cultivation (temperate themes): farmland fills the level lowland
+   * around the settlements — same noise field as `settlementAt`, a far
+   * wider threshold — and stops at woods, slopes, beaches and city limits.
+   */
+  farmAt(x: number, z: number, h: number, slope: number, forest: number): number {
+    if (this.theme === 'mesa' || h < WATER_LEVEL + 5 || h > 150 || slope > 0.035) return 0;
+    const s = this.town.fbm(x * 0.00035 + 31.4, z * 0.00035, 2);
+    let f = smoothstep(-0.02, 0.22, s);
+    if (f <= 0) return 0;
+    f *= smoothstep(150, 95, h) * smoothstep(WATER_LEVEL + 5, WATER_LEVEL + 9, h);
+    f *= 1 - smoothstep(0.014, 0.035, slope);
+    f *= 1 - smoothstep(0.3, 0.55, forest);
+    if (this.theme === 'metro') f *= 1 - smoothstep(0.1, 0.25, this.cityMaskAt(x, z));
+    return f;
+  }
+
   /** 0..1 dryness used to tint grass. */
   drynessAt(x: number, z: number): number {
     return clamp(this.moist.noise(x * 0.0003 + 500, z * 0.0003) * 0.5 + 0.5, 0, 1);
@@ -843,19 +1099,87 @@ export class WorldGen {
         const v = smoothstep(16, 5, h) * 0.55;
         r = lerp(r, 0.32, v); g = lerp(g, 0.46, v); b = lerp(b, 0.24, v);
       }
+      // the rock itself changes by region: ochre and cream country in one
+      // direction, deep red and purple in the other
+      const reg = this.moist.noise(x * 0.00007 + 20.2, z * 0.00007 - 40.4);
+      r *= 1 + reg * 0.05; g *= 1 + reg * 0.2; b *= 1 + reg * 0.17;
+      // dune seas: pale sand, a touch brighter on the crests
+      const dn = this.duneAt(x, z);
+      if (dn > 0) {
+        const k = dn * 0.88 * (1 - smoothstep(0.1, 0.35, slope));
+        r = lerp(r, 0.83, k); g = lerp(g, 0.67, k); b = lerp(b, 0.43, k);
+      }
       // scrub flecks
-      const fr2 = forest * 0.5;
+      const fr2 = forest * 0.5 * (1 - dn);
       r = lerp(r, 0.25, fr2); g = lerp(g, 0.38, fr2); b = lerp(b, 0.2, fr2);
-    } else if (h > 520 + dry * 160) {
-      const sn = smoothstep(520, 700, h);
-      r = lerp(0.45, 0.93, sn); g = lerp(0.42, 0.95, sn); b = lerp(0.4, 0.99, sn); // rock → snow
     } else {
-      // grassland, tinted by dryness and darkened under forest
+      // ---- temperate (archipelago, metro): lowland → upland → alp → snow ----
+      // grassland, tinted by dryness
       r = lerp(0.3, 0.52, dry);
       g = lerp(0.52, 0.5, dry);
       b = lerp(0.22, 0.3, dry);
-      const fr2 = forest * 0.55;
-      r = lerp(r, 0.12, fr2); g = lerp(g, 0.3, fr2); b = lerp(b, 0.12, fr2);
+
+      // cultivated lowland: a quilt of fields around the settlements, woods
+      // left standing between them
+      const farm = this.farmAt(x, z, h, slope, forest);
+      if (farm > 0.01) {
+        fieldTone(x, z, texel, FIELD_TMP);
+        const k = farm * 0.92;
+        r = lerp(r, FIELD_TMP[0] * (0.94 + dry * 0.12), k);
+        g = lerp(g, FIELD_TMP[1], k);
+        b = lerp(b, FIELD_TMP[2], k);
+      }
+
+      // upland: grass gives way to heath and moor — olive in the wet,
+      // russet in the dry
+      const up = smoothstep(140, 330, h + dry * 50) * 0.8;
+      if (up > 0) {
+        r = lerp(r, lerp(0.36, 0.47, dry), up);
+        g = lerp(g, lerp(0.41, 0.37, dry), up);
+        b = lerp(b, lerp(0.22, 0.24, dry), up);
+      }
+
+      // woods: broadleaf (lighter, yellower) in the moist lowland, dark
+      // conifer above and in the dry — thinning out at the treeline, which
+      // is where buildScatter stops planting
+      const fr2 = forest * 0.55 * (1 - smoothstep(400, 470, h));
+      if (fr2 > 0) {
+        const leaf = (1 - smoothstep(150, 230, h)) * (1 - smoothstep(0.42, 0.6, dry));
+        r = lerp(r, lerp(0.11, 0.17, leaf), fr2);
+        g = lerp(g, lerp(0.28, 0.34, leaf), fr2);
+        b = lerp(b, lerp(0.13, 0.1, leaf), fr2);
+      }
+
+      // volcanoes: ash and cinder from mid-slope up
+      const vu = this.volcanoMaskAt(x, z);
+      if (vu > 0.2) {
+        const ash = smoothstep(0.2, 0.55, vu) * 0.9;
+        const red = this.terra.noise(x * 0.0015 + 61.1, z * 0.0015 - 9.9) * 0.5 + 0.5;
+        r = lerp(r, lerp(0.24, 0.36, red), ash);
+        g = lerp(g, lerp(0.22, 0.24, red), ash);
+        b = lerp(b, lerp(0.22, 0.2, red), ash);
+      }
+
+      // alpine: scree above the last grass, then snow. The snowline wanders
+      // (aspect, drifts) and steep faces shed it.
+      const alp = smoothstep(430 + dry * 90, 570 + dry * 90, h);
+      if (alp > 0) {
+        r = lerp(r, 0.46, alp); g = lerp(g, 0.43, alp); b = lerp(b, 0.41, alp);
+        const line = 575 + dry * 120 + this.terra.noise(x * 0.0016 + 3.7, z * 0.0016 + 8.2) * 45;
+        const sn = smoothstep(line - 45, line + 65, h) * (1 - smoothstep(0.5, 0.8, slope) * 0.85);
+        r = lerp(r, 0.93, sn); g = lerp(g, 0.95, sn); b = lerp(b, 0.99, sn);
+      }
+    }
+
+    // broad swathes a little lighter or darker than their neighbours, so
+    // open country does not read as one flat fill (fades out where the mesh
+    // is too coarse to carry a 400 m pattern)
+    if (h > WATER_LEVEL + 3.2) {
+      const tv = texel > 0 ? 1 - smoothstep(110, 300, texel) : 1;
+      if (tv > 0) {
+        const m = 1 + this.moist.noise(x * 0.0023 + 5.5, z * 0.0023 - 8.1) * 0.085 * tv;
+        r *= m; g *= m; b *= m;
+      }
     }
 
     // metro: paint the urban fabric — asphalt street grid between concrete

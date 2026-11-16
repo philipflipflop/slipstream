@@ -63,6 +63,92 @@ Cloudflare builds with **npm 10.9.2**; local npm is 11. Two rules:
   vertex paint beneath it. Ground-plane z-stack: parallels E+0.04,
   connectors/RETs +0.048, stand pads +0.052, hold bars +0.055, runways
   +0.06 — planes in the same class must never overlap each other.
+- TERRAIN SHAPE (heightfield.ts `baseHeightAt`), rules learned from
+  top-down hill-shaded maps (`node tests/map-probe.mjs theme cx cz span px
+  out.ppm` — LOOK at terrain from above when changing it; from the cockpit
+  the faults below went unseen for months):
+  · The domain warp FOLDS (Jacobian down to ~0.15). Only the broad masks
+    (continents, mountain regions, river courses, canyons) may ride the
+    full warp (`wx, wz`); relief — hills, ridges, terraces, grit — is
+    sampled through a quarter of it (`hx, hz`). Through the full warp
+    every hill and coast was smeared 5–7× into parallel streaks.
+  · Variety is regional: hill country (rounded 100–200 m downs), rivers
+    (zero lines of a slow noise, cut BELOW sea level so the one water sheet
+    fills them, only where land is under ~100 m), volcanoes (archipelago:
+    one candidate per 56 km cell, memoised, never near a hand-placed
+    field), free-standing mesas and dune seas (mesa). Rivers and buttes
+    are kept off the fixed fields via the spawn boost. Features narrower
+    than the far-shell lattice (450 m) dissolve at range — rivers become a
+    chain of ponds beyond the chunk disc; keep new landmarks ≥ ~600 m.
+  · The airfield flattening footprint must FADE to zero at its ends
+    (`smoothstep(outer, outer*0.76, |along|)`). It used to stop dead on a
+    world-axis box: an 88%-flattened surface met untouched hills along a
+    ruler-straight wall 4–5 km off each runway end.
+  · Colour: farmland is a jittered-lattice quilt (`fieldTone`, Chebyshev
+    cells) that fades to its MEAN tone by texel like the city grid; upland
+    heath, treeline (matches buildScatter's 460 m), scree, a wandering
+    snowline that steep faces shed; the temperate branch must stay
+    CONTINUOUS in height (the old `h > 520 + dry*160` test jumped from
+    grass to 97% snow in dry country).
+  · Ring Rush plans its gate heights with look-ahead (rings.ts) — a hill
+    the course cannot climb in one leg starts the climb earlier.
+- VISIBILITY: `GROUND_VIEW` (lod.ts) is how far you see at ground level —
+  7 / 11.5 / 16.5 km — and no longer the chunk radius; it must stay inside
+  the far shell's own limit (tests/22). Above ~1,200 m `visibility()` adds
+  height × 17; caps are 74 / 142 / 200 km (`SHELL_PRESETS.fogCap`, bounded
+  by the horizon shell's radius, whose vertex count must stay ≤ 65,535).
+- WEATHER (`src/world/weather.ts` pure + `clouds.ts`, tests/24): a preset
+  is a cloud DECK (base, top, coverage), a visibility beneath it, rain, a
+  wind range and turbulence; fixed at construction like the time of day
+  (`?wx=clear|fair|broken|overcast|rain|fog`, changing it reloads). The
+  deck is a real layer and everything keys off where the EYE is:
+  `beneath()` (1 under the base … 0 above the top) picks whose light, sky
+  palette and visibility apply (`sky.setAir`), `densityAt()` closes the
+  view to `cloudVis` inside cloud. Rules:
+  · main keeps the CLEAR-air visibility damped (`hazeFar`) and applies the
+    weather on top of it undamped — entering cloud must not take seconds.
+  · `sky.setAir` moves the fog colour every frame; the three places that
+    hold a copy must follow or the HAZE rules break: `scene.fog.color`
+    (THREE.Fog copies the Color it is given), `water.setFogColor`, and the
+    deck's own uniform (it shares `sky.fogColor` by reference).
+  · The deck's two sheets are analytic per pixel like the water (ray ∩
+    plane, depth from that) and WRITE depth: cumulus sprites and anything
+    else transparent beyond them is hidden by them. A sheet seen from above
+    is lit, from below shaded — do not go back to "top face only from
+    above": in a gap inside a broken layer both must show.
+  · Coverage is ONE byte field (`makeCoverField`, histogram-equalised so a
+    threshold of 1 − cover gives exactly that coverage) uploaded as the
+    texture AND sampled by the sim (`sampleField`): a gap you can see is a
+    gap you can fly through. Keep the GLSL threshold and `coverAt` the same.
+  · Rain streaks are world-space drops wrapped into a camera-following box;
+    the wrap offset is computed on the CPU in doubles (a float `mod` of a
+    100 km coordinate has no precision left).
+- ENGINE FAILURES (X; tests/23): `inp.enginesOut` kills engines one at a
+  time (No.1 = left first). `spec.engines` / `spec.asymYaw` describe twins;
+  a dead engine windmills (extra drag), one of two swings the nose toward
+  the dead side by thrust × asymYaw. `bestGlideSpeed(spec, y)` is TRUE
+  airspeed (what the tape shows) and so rises with altitude — the first
+  version ignored density and was 36% slow at 6 km. Sign conventions that
+  cost an hour: +rollAngle is LEFT bank (hold wings level with
+  `roll = +rollAngle·k`), +angVel.y is yaw LEFT, +inp.yaw is right rudder.
+- THE TOWER (`src/nav/radio.ts` pure, tests/25): landing clearance once
+  established on final to a towered field (international or `major`) —
+  "continue approach" while `traffic.runwayOccupied(app)`, "go around" if
+  still occupied at 1.5 km — and traffic advisories once per aircraft.
+  `traffic.blips()` feeds both it and the map (`minimap.setTraffic`:
+  airborne = filled cyan arrowhead + relative height in hundreds of feet,
+  on the runway = hollow, ships = grey ticks).
+- JOBS (`src/nav/jobs.ts` pure, tests/26; mode `job` = "Charter"): the
+  board at `spawnField` (`jobsFrom`: destinations the aircraft's
+  `jobClass` can use — airliners internationals only, jets regional and up
+  — within ~17 min of block time, deterministic per field/aircraft/serial).
+  Taking one puts the destination in the flight plan and on the map;
+  `stepJob` runs the clock and the ride (`Comfort`: g outside 0.5–1.7,
+  bank past 40°, a hard arrival); stopped on the destination (`atField`)
+  pays `scoreJob` = fee × punctuality × landing grade × ride, and the
+  destination becomes `spawnField` with a fresh board. A fixed-wing
+  arrival that was not a graded runway landing AT the destination gets no
+  landing credit (0.6); helicopters are not graded (0.9).
 - `src/world/lod.ts` — the terrain LOD POLICY, pure and fully tested
   (tests/19). Detail is a function of DISTANCE, not time: each chunk level
   (res 14/28/56/112) has a blend BAND, and swaps happen only in the dead
@@ -80,6 +166,48 @@ Cloudflare builds with **npm 10.9.2**; local npm is 11. Two rules:
   old timed geomorph more exact never removed the "pop", because arcs of
   tiles sharpening together every 900 m of travel is a temporal event the
   eye catches however exact the start frame is.
+- THE HORIZON (lod.ts "shells", tests/22): beyond the chunk disc the world
+  is two nested coarse lattices — the far shell S (450/600 m cells, 27–40 km
+  radius) and the horizon shell H (1800 m cells, 90–216 km; `SHELL_PRESETS`).
+  S hands over to H exactly as chunks hand over to S: every S vertex carries
+  H's look (`buildFarPayload` with `parentCell`) and blends to it by distance
+  inside `shellBand`, so re-centring S is a swap between identical surfaces
+  and H's hole can be cut anywhere S is collapsed. Rules:
+  · H's rim is the ONLY un-morphed edge left, so full haze must close inside
+    it: `fogCap ≤ H radius − H_DRIFT − STREAM_LEAD` (asserted), and main
+    clamps the haze to `terrain.viewLimit()` while H is missing or late.
+  · S re-centres every ~2–3 km (it loses `S_DRIFT` of reach to drift, so
+    frequent beats large); that is only affordable because the builder
+    copies every lattice point the previous build had (`prev`: 13 ms vs
+    180 ms). Every shell vertex must stay a PURE FUNCTION of its world
+    lattice point (padded lattice → true central differences at the rim) or
+    reuse stops being exact and the horizon swims.
+  · The blend edge (`sEdge`) is slew-limited and H's hole follows the EDGE
+    (`horizonHole`), never the reverse. Inward slew must exceed the fastest
+    aircraft (coverage shrinks at flight speed while a rebuild is late).
+  · A collapsed S sits EXACTLY on H (`SHELL_LIFT = 0`). 1.5 m of lift
+    re-drew every low coast as the overlap moved; coplanar z-fight between
+    two identical surfaces is invisible.
+  · H is plain terrain (no lower envelope — at 1800 m it would shave the
+    mountains off the horizon) and is hidden while fully hazed
+    (`hazeFar`) or while S does not yet cover the chunk disc.
+  WHY IT EXISTS: the world used to end ~35 km out. At 39,000 ft that put
+  the "horizon" 17–22° below eye level (real: 3.5°) — most of the screen
+  was haze-coloured sky — and its rim popped into view.
+- HAZE (sky.ts, lod.visibility): three things had to be true before distant
+  terrain would melt into the sky instead of popping in as an outline.
+  (1) Fog is TRUE distance, per fragment (ShaderChunk patch at the top of
+  sky.ts). three.js fogs by view depth, ~25% short at the screen corners:
+  the rim stayed half-visible at the sides. Take the length per FRAGMENT —
+  per vertex it is wrong across long triangles (runways under your wheels).
+  (2) THREE.Fog gets `sky.sceneFogColor`, not `fogColor`. The dome and
+  water shaders write linear values straight to the screen while three's
+  materials sRGB-encode, so the same Color came out (198,211,224) on hazed
+  terrain and (144,166,190) on the sky behind it: far land was a pale
+  cut-out against the horizon however thick the haze. (3) The sun's glow
+  on the dome stops at the horizon — below it the dome must be exactly the
+  fog colour or the rim shows as an arc under a low sun. Water uses the
+  same smoothstep falloff as the scene fog (it was linear).
 - `src/world/terrainBuilder.ts` — pure payload builder (no three.js/DOM), runs in
   `terrain.worker.ts` with a synchronous fallback. Every payload carries its
   PARENT look: `baseY` / `baseCols` / `baseNrms` sampled on the parent
@@ -103,10 +231,12 @@ Cloudflare builds with **npm 10.9.2**; local npm is 11. Two rules:
   `stats` (swaps / late / fresh / lateFresh / dropped) is in the autofly
   tab title as `lod=`; after the initial fill `late` must stop growing —
   that is the in-browser proof swaps are seamless. Debug: `?lodtint=1`
-  (tint by level, darkened by collapse — bands show as rings),
-  `?lodlog=1` (console.warn each non-seamless swap), `?shellonly=1`.
-  Shell builds only when the chunk queue is idle (first build) — keep it
-  that way.
+  (tint by level, darkened by collapse — bands show as rings; far shell
+  violet), `?lodlog=1` (console.warn each non-seamless swap),
+  `?shellonly=1`. The FIRST far shell builds only when the chunk queue is
+  idle (never delay spawn terrain) and the horizon shell waits for it —
+  keep it that way. `sh=S/H±` in the title counts shell builds (+ = the
+  horizon shell is being drawn), `fog=` is the haze reach in km.
 - Distant furniture grows in: airports (airport.ts) and parked NPC rows
   (traffic.ts) built more than 8 km away rise out of the ground over ~6 s
   (smoothstep scale.y about FIELD ELEVATION — scaling about world 0 sinks
@@ -154,14 +284,48 @@ Cloudflare builds with **npm 10.9.2**; local npm is 11. Two rules:
   reads as "rubber-banding".
 - Ground physics: below 1.5 m/s ground speed, aero yaw moments are zeroed
   (static tire grip) — parked aircraft must not weathervane or slide in
-  wind (pinned in tests/14). The parked-stance PITCH spring fades with
+  wind (pinned in tests/14). Same idea in pitch: on the wheels the alpha
+  spring only acts in air arriving from AHEAD (`pitchVane` × forward-flow
+  bite) — with the wind abeam or astern the AoA reads up to ±180° and the
+  spring sat every aircraft back on its tail at spawn (10–19° nose-up; free
+  flight rolls a random wind, so about half of all starts). Drag and side
+  force use `skid` (the slip angle measured against whichever end faces
+  the wind): 0.5·slip² was Cd ≈ 4.9 in a tailwind and blew a parked trainer
+  down the runway. Below 2 m/s the tyres PROJECT the velocity onto the nose
+  axis instead of rotating it there (rotation turns a beam-wind push into a
+  forward creep). The parked-stance PITCH spring fades with
   weight-on-wheels (1 − L/W): without that, transport wing loadings (A320)
   can never rotate — the G-limit cap shrinks pitch authority with speed
   while the spring never weakened, pinning the nose at ~2° forever.
   Heavies take off with CONF-2 flap and a firm pull (see tests/16).
-- Mobile rendering: touch devices skip the logarithmic depth buffer, so they rely
-  on the AGL-scaled near plane (main.ts frame()) + the water sheet's polygon
-  offset/raise (`Water` `coarseDepth` flag) to avoid shoreline z-fighting.
+- WATER / THE SHORELINE (water.ts header): the shoreline is NEVER left to
+  the depth buffer, on any device. Every terrain shader discards fragments
+  below the waterline (TerrainManager `clipY`) — exact per fragment at any
+  range — and the opaque water sheet fills what is left. Anything new that
+  renders terrain needs the same discard. Two more rules, both learned the
+  hard way when the horizon work put 100+ km of coast on screen:
+  · The sheet's world position AND depth are computed per pixel in its
+    fragment shader (view ray ∩ plane, uniforms set in `onBeforeRender`),
+    never interpolated: across two 420 km triangles the rasteriser is
+    metres out and the error moves with the camera — shorelines flickered
+    and the seabed shell z-fought through in strips ("gridlines on the
+    water").
+  · Even with exact depths a depth test is only good to a few ppm of range
+    (±3–4 cm of height from 20,000 ft, worse higher) — hundreds of coast
+    pixels flipping per frame. Hence the discard; with log depth the sheet
+    is still depth-tested (hulls sink into it) but pushed BACK 2e-4 of
+    range so land above the waterline always wins.
+  · The cut is ANTI-ALIASED (`shoreCut` / `shoreCoverage` in terrain.ts):
+    alpha = share of the pixel above the waterline + alpha-to-coverage. A
+    bare discard left the coast the one stair-stepped, crawling edge in the
+    scene (hard full-contrast pixel flips fell 4–6× with it). The blend
+    state keeps that alpha OUT of the canvas (dst alpha preserved) — the
+    canvas alpha channel is live and the page showed through.
+  Touch + low skips the logarithmic depth buffer (`coarseDepth`); there the
+  sheet is drawn FIRST and untested, and the AGL-stepped near plane
+  (main.ts frame()) serves everything else. Never bias the sheet TOWARD
+  the eye (polygon offset): its slope term is kilometres per pixel at
+  altitude and drowned every coast under ~50–100 m.
 - `src/aircraft/flightModel.ts` — `stepFlight` branches to `stepHeli` when
   `spec.engine === 'heli'` (Bell 505): throttle = collective, cyclic is
   attitude-command (`inp.pitch·0.45` / `−inp.roll·0.6` are the target Euler
@@ -236,6 +400,22 @@ Cloudflare builds with **npm 10.9.2**; local npm is 11. Two rules:
   phugoid rings against the autothrottle — a ±800 fpm porpoise down the
   glide path that only shows in a time-series trace (tests/20 asserts the
   sink-rate swing, not just the touchdown).
+  ARMED FROM CRUISE (tests/20 section 6 — the first tests only ever started
+  on final, and a playtester's Vector "overshot the runway"): the mode must
+  end in a landing in the zone or a GO-AROUND with a stated reason
+  (`ap.goAround`, toasted by main), never anything else. What that took:
+  managed speed from the moment of arming (LOC phase slows to 1.45 × clean
+  approach speed; the mode may put the speedbrake out and stows only what
+  it put out; section 6 caps en-route terrain with `terrainCap` — the
+  world has real mountains outside the approach surfaces and the mode has
+  no terrain avoidance, that is the pilot's job); the centreline aim point at least ~0.9 turn radii ahead (at
+  400 kt the old fixed 3.2 km lead flew 1–4 km through the beam); the
+  glideslope taken only once ESTABLISHED (inside the beam AND tracking
+  along it — position alone captured while crossing at 90° and descended
+  into the hills); and the gates: > 6.5° to the station = too high, at
+  ~300 ft gear/height/centreline, at ~100 ft speed, past mid-runway in the
+  flare = long. Gear and flaps stay with the pilot by design. Armed above
+  the path it used to "land" 5–6 km past the far end.
 - `src/nav/landing.ts` — pure landing rubric: sink (40) / centreline (30) /
   touchdown zone (30). main.gradeTouchdown scores every runway touchdown
   after a real airborne segment (> 15 m — bounces don't re-grade); Final
@@ -261,6 +441,24 @@ Cloudflare builds with **npm 10.9.2**; local npm is 11. Two rules:
   must NOT castShadow — a flier crossing the sun's ±420 m player-chasing
   shadow box sweeps a popping shadow over shorelines ("water edge
   flicker"). No collision, like the rest of the airport furniture.
+  Two of the cruisers are overflights at 9–12 km with contrails
+  (`trailGeo`: vertex-alpha ribbons; the same builder makes ship wakes).
+  RUNWAY MOVEMENTS (`updateOps`/`stepOps`, internationals + regionals):
+  kinematic arrivals down the 3° path and departures, on the INTO-WIND end
+  (`traffic.setWind`, fed by main.rollWind with the flightModel vector).
+  Invariants, all in test 17: internationals use only the EASTERN runway
+  (`approachesOf` entries 2–3 — the player spawns on the western one); one
+  aircraft MOVING on the runway at a time; an arrival that finds it busy at
+  900 m — NPC or the player on/over it — goes around, a departure holds;
+  nobody passes through terrain (finals and climb-outs stay inside the
+  approach surfaces' protection). A departure only taxis on into a gap
+  that will still be there when it rolls (~60 s later).
+  SHIPS: two each of freighter / ferry / boat on water deeper than 14 m
+  within 13 km, steering off shoaling water ahead; hulls are modelled from
+  the WATERLINE up (the phone path draws water first, untested).
+  traffic.update gets dt 0 while paused (it used to fly on behind the
+  pause menu). `npc=` in the autofly title: movements/landings+departures/
+  ships.
 - Autopilot bank caps scale by airframe class (gLimit ≥ 7 → ~54°, ≤ 3 →
   airline ~30°, else 24°): a fixed light-aircraft cap turns fast jets into
   0.5°/s barges that "don't turn" (pinned in test 05).
@@ -280,16 +478,17 @@ Cloudflare builds with **npm 10.9.2**; local npm is 11. Two rules:
   inertial. Heli ground-contact checks must use GROUND speed, not air.
   main.rollWind(): random 3–15 kt in free flight, calm in races/autofly,
   `?wind=hdg,kt` override; windsock orientation via Airport.setWind.
-- Streaming is EUCLIDEAN (disc, not Chebyshev square): scan, hole and
-  removal all use hypot from the continuous streaming centre; the far
-  shell's OUTER edge is also trimmed to a disc and the below-horizon sky
-  dome (groundGlow = 1) must stay at the fog colour or the shell edge
+- Streaming is EUCLIDEAN (disc, not Chebyshev square): scan, holes and
+  removal all use hypot from the continuous streaming centre; both shells'
+  OUTER edges are trimmed to discs and the below-horizon sky dome
+  (groundGlow = 1, no sun glow) must stay at the fog colour or the rim
   ghosts through as a colour step at altitude. Keep any new ring logic
   circular.
-- far-shell cellSize MUST have a small LCM with CHUNK_SIZE (900) — the
-  recenter snap grid is that LCM. 450→900, 600→1800 are fine; 380/460/680
-  gave 17–30 km snap grids and the horizon lurched forward in giant jumps
-  ("deficit builds then the edge pops in one go" at cruise).
+- shell cell sizes MUST have a small LCM with CHUNK_SIZE (900) — the
+  recentre snap grid is that LCM — and the horizon cell must be a multiple
+  of the far cell (lattices nest). 450→900, 600→1800, 1800→1800 are fine;
+  380/460/680 gave 17–30 km snap grids and the horizon lurched forward in
+  giant jumps ("deficit builds then the edge pops in one go" at cruise).
 - Minimap sampling is LED ~15 s ahead along the ground track (pan
   overrides the lead) — a lazily trailing sample centre leaves a black
   band hatching in at the map's leading edge at speed. The expanded chart
@@ -325,7 +524,37 @@ Cloudflare builds with **npm 10.9.2**; local npm is 11. Two rules:
   --virtual-time-budget=N --screenshot=...` works with retries (a ~93 kB PNG
   is the boot screen).
   Dev URL params: `?autofly=1&ff=N&ac=vector&apt=N&ap=1&tod=night&q=low`,
-  `&mode=approach` (autofly then flies the ILS to an autoland); telemetry
-  is in the tab title (`lod=`, `fps=`, `appr=`, `ldg=`, `warn=`). Dark
-  screenshots legitimately compress below 100 kB — don't use a large
-  min-size gate to detect boot-screen captures on night scenes.
+  `&mode=approach` (autofly then flies the ILS to an autoland), `&alt=M`
+  (jump to a cruise altitude after the fast-forward — horizon work without
+  a five-minute climb), `&hdg=deg`, `&touch=1` (the phone render path);
+  `&wx=rain` (weather), `&ap=1` (hold the `alt=` altitude — without it the
+  autofly climbs out of whatever layer you wanted to look at);
+  telemetry is in the tab title (`lod=`, `sh=`, `fog=`, `fps=`, `appr=`,
+  `ldg=`, `warn=`). Dark screenshots legitimately compress below 100 kB —
+  don't use a large min-size gate to detect boot-screen captures on night
+  scenes.
+- UI FLOWS without clicking through menus: `__sim` only exists with
+  `autofly=1`; from there `__sim.save.mode = 'job'; __sim.openJobs()`,
+  `document.querySelector('.job-card').click()`, `__sim.finishJob()` walk
+  the whole Charter loop for screenshots.
+- PIXEL-DIFF PROOFS: with autofly the sim is on `window.__sim`. To prove a
+  streaming change is seamless in the real renderer, `__sim.pause()`, hide
+  every DOM node except `__sim.renderer.domElement`, screenshot, perturb,
+  screenshot, and diff (PIL `ImageChops.difference`). For shells:
+  `__sim.terrain.debugShiftShell(slot, dx, dz)` rebuilds S (0) or H (1)
+  with its centre offset, as if the last re-centre had happened there. Any
+  offset inside the drift allowance must change ≤ a handful of pixels of
+  790,000; always include one deliberately out-of-range shift (9 km on S →
+  ~30,000 px) to prove the diff can see. This is what caught the 1.5 m
+  shell lift redrawing coastlines — a thing no unit test was looking for.
+  A paused frame at altitude is otherwise static (two captures 1 s apart
+  diff to 0).
+- FLICKER PROOFS (z-fight, shimmer): same paused set-up, then step the
+  camera by a fraction of a pixel (`__sim.flightCam.camera.rotateY(4e-5)`,
+  ~0.025 px) six times, capturing each. A real edge sweeping past changes a
+  pixel ONE way; a pixel whose luminance goes there AND back is flicker.
+  Count those. Freeze the wave clock first (`__sim.water.update = () => {}`)
+  or the swell drowns the measurement. At 6,100 m the depth-tested
+  shoreline scored ~440 flicker pixels of 790,000 (and ~4,000 changed per
+  step with the interpolated sheet); the analytic shoreline scores
+  ~100–200, all sub-pixel features (ridgelines, ponds, runway edges).

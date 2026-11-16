@@ -9,20 +9,25 @@ import './styles.css';
 
 import { WorldGen, AIRPORTS, WORLDS, WorldTheme, AirfieldDef } from './world/heightfield';
 import { daylightById, DAYLIGHTS, DaylightPreset, TimeOfDay } from './world/daylight';
+import { weatherById, weatherVisibility, beneath, WEATHERS, WeatherPreset } from './world/weather';
+import { CloudDeckView, Rain } from './world/clouds';
 import { TerrainManager, CHUNK_SIZE } from './world/terrain';
-import { Water } from './world/water';
+import { visibility, GROUND_VIEW, HAZE_NEAR } from './world/lod';
+import { Water, WATER_SURFACE_Y } from './world/water';
 import { Sky } from './world/sky';
 import { Airport } from './world/airport';
 import { RingCourse, RING_COUNT } from './world/rings';
-import { Traffic } from './world/traffic';
+import { Traffic, TrafficBlip } from './world/traffic';
+import { Tower, RadioTraffic } from './nav/radio';
 import { GunneryRange } from './combat/range';
 import { ObstacleField } from './world/obstacles';
-import { setTurbulence, setWind, crash, approachSpeed, stallSpeed } from './aircraft/flightModel';
+import { setTurbulence, setWind, crash, approachSpeed, stallSpeed, bestGlideSpeed } from './aircraft/flightModel';
 import { Route, bearingTo, distanceTo } from './nav/route';
 import {
   IlsApproach, tuneIls, solveIls, approachesOf, LOC_FULL_SCALE, GS_FULL_SCALE,
 } from './nav/ils';
 import { runwayUnder, scoreLanding, LandingScore, RunwayContact } from './nav/landing';
+import { Job, jobsFrom, scoreJob, atField, Comfort } from './nav/jobs';
 import { Aircraft } from './aircraft/aircraft';
 import { specById } from './aircraft/catalog';
 import { Autopilot } from './aircraft/autopilot';
@@ -72,7 +77,6 @@ class Game {
   private save = loadSave();
   private baseFogNear = 2500;
   private baseFogFar = 7000;
-  private fogFarCap = 26000;
   private coarseDepth = false; // touch + low preset: no log depth buffer
   private nearIdx = 0;         // stepped near-plane band on the coarse path
 
@@ -99,6 +103,27 @@ class Game {
   // steady wind for this flight (aviation: heading it blows FROM + knots)
   private windFromDeg = 0;
   private windKt = 0;
+  /** the wind as a velocity (same vector the flight model gets), m/s */
+  private windVX = 0;
+  private windVZ = 0;
+  private wx: WeatherPreset;
+  private tower = new Tower();
+  /** the job being flown (Charter mode), and how it is going */
+  private job: Job | null = null;
+  private jobTime = 0;
+  private jobComfort = new Comfort();
+  private jobLanding: number | null = null;
+  private jobSerial = 0;
+  private jobLineT = 0;
+  private jobWrong = false;
+  private blipBuf: TrafficBlip[] = [];
+  private radioBuf: RadioTraffic[] = [];
+  private toweredCache = new Map<string, boolean>();
+  private deck: CloudDeckView;
+  private rain: Rain | null = null;
+  /** clear-air visibility, smoothed — the weather acts on top of it, at once */
+  private hazeFar = 7000;
+  private cloudCol = new THREE.Color();
 
   // ILS receiver: auto-tunes the best runway end ahead about once a second
   // and then HOLDS the station like a real tuned radio; I toggles it off
@@ -122,6 +147,7 @@ class Game {
   private warn: string | null = null;
   private warnHold = 0;
   private lastApprPhase = 'off';
+  private autoArmed = false; // autofly approach smoke test has armed APPR
 
   private daylight: DaylightPreset;
   private lodTint = false;
@@ -143,6 +169,11 @@ class Game {
       todParam && DAYLIGHTS.some((d) => d.id === todParam) ? todParam : this.save.tod,
     );
     this.save.tod = this.daylight.id; // menu chips reflect the active preset
+
+    // weather: ?wx= overrides the saved choice
+    const wxParam = new URLSearchParams(location.search).get('wx');
+    this.wx = weatherById(wxParam && WEATHERS.some((w) => w.id === wxParam) ? wxParam : this.save.wx);
+    this.save.wx = this.wx.id;
 
     // graphics quality: ?q=low|medium|high overrides the saved choice (smoke tests)
     const qParam = new URLSearchParams(location.search).get('q');
@@ -166,22 +197,30 @@ class Game {
     this.renderer.toneMappingExposure = 1.05;
     document.getElementById('app')!.appendChild(this.renderer.domElement);
 
-    this.sky = new Sky(this.scene, touch ? 26 : 56, this.daylight);
-    this.scene.fog = new THREE.Fog(this.sky.fogColor, 2500, 7000);
+    this.sky = new Sky(this.scene, touch ? 26 : 56, this.daylight, this.wx);
+    this.deck = new CloudDeckView(this.scene, this.wx, this.sky.fogColor, this.sky.cloudLit, this.sky.cloudShade);
+    if (this.wx.rain > 0) this.rain = new Rain(this.scene, touch ? 500 : 1500, new THREE.Color(0.78, 0.82, 0.88));
+    this.scene.fog = new THREE.Fog(this.sky.sceneFogColor, 2500, 7000);
     this.scene.background = null; // dome handles it
 
-    this.terrain = new TerrainManager(this.scene, this.gen, this.daylight.windowGlow);
-    // without the log depth buffer the water needs the depth-bias path
+    // terrain cuts itself off at the waterline; the water sheet fills in
+    // (water.ts — the shoreline is never left to the depth buffer)
+    this.terrain = new TerrainManager(this.scene, this.gen, this.daylight.windowGlow, WATER_SURFACE_Y);
     this.water = new Water(this.scene, this.sky.fogColor, this.sky.sunDir, this.coarseDepth, this.daylight);
     this.airport = new Airport(this.scene, this.gen, this.daylight.landingLight);
     this.rings = new RingCourse(this.scene, this.gen);
     this.traffic = new Traffic(this.scene, this.gen);
+    this.traffic.onPlayerBlock = (field) => {
+      if (this.state !== 'flying') return;
+      this.sound.radio();
+      this.screens.toast(`${field.replace(/ INTL$/, '')} TOWER — TRAFFIC ON FINAL IS GOING AROUND: YOU ARE ON THE ACTIVE RUNWAY`, 5000);
+    };
     this.obstacles = new ObstacleField(this.gen);
     this.range = new GunneryRange(this.scene, this.gen);
     this.range.onHit = (hits, total) => this.screens.toast(`TARGET DOWN — ${hits}/${total}`);
     this.range.onClear = () => this.screens.toast('RANGE CLEAR — ALL TARGETS DESTROYED');
     this.range.solid = (x, y, z) => this.obstacles.solidAt(x, y, z);
-    setTurbulence(0.45); // light chop down low; tests run with 0
+    setTurbulence(this.wx.turb); // light chop down low in fair weather; tests run with 0
 
     this.aircraft = new Aircraft(specById(this.save.aircraft));
     this.aircraft.addExteriorLights(this.daylight.landingLight);
@@ -203,6 +242,8 @@ class Game {
 
     const params = new URLSearchParams(location.search);
     this.autoFly = params.get('autofly') === '1';
+    // smoke tests drive the sim from the DevTools console (see CLAUDE.md)
+    if (this.autoFly) (window as unknown as { __sim: unknown }).__sim = this;
     // ?lodtint=1 — tint chunks by LOD level, darkened by how far each vertex
     // is collapsed toward its parent look (debug: the distance blend bands
     // become rings; level boundaries must sit where fine = dark, coarse = lit)
@@ -274,7 +315,7 @@ class Game {
   private wireUi(): void {
     const s = this.screens;
     s.onAnyClick = () => this.sound.init();
-    s.onFly = () => this.startFlight();
+    s.onFly = () => (this.save.mode === 'job' ? this.openJobs() : this.startFlight());
     s.onAircraft = (id) => this.swapAircraft(id);
     s.onMode = () => { persist(this.save); };
     s.onWorld = (w) => {
@@ -291,12 +332,22 @@ class Game {
       persist(this.save);
       location.reload();
     };
+    s.onWeather = (w) => {
+      // the weather picks the sky's palette, the cloud deck and the light
+      this.save.wx = w;
+      persist(this.save);
+      location.reload();
+    };
     s.onSettings = () => { this.applyQuality(this.save.quality); this.applySettings(); persist(this.save); };
     s.onResume = () => {
       if (this.state === 'paused') this.resume();
       else if (this.state === 'flying') this.pause();
     };
-    s.onRestart = () => { this.sound.uiClick(); this.startFlight(); };
+    s.onRestart = () => {
+      this.sound.uiClick();
+      if (this.save.mode === 'job') this.openJobs();
+      else this.startFlight();
+    };
     s.onHangar = () => this.toHangar();
     s.onApAdjust = (kind, dir) => this.apAdjust(kind, dir);
     s.onApproach = () => this.toggleApproach();
@@ -488,10 +539,30 @@ class Game {
     } else this.autopilot.adjustSpeed(dir * 5.144, this.aircraft.spec.vne * 0.92);
   }
 
-  /** Practice engine failure (helicopter only): X cuts and relights. */
+  /**
+   * Practice engine failure: X. Helicopter — cuts and relights. Fixed-wing —
+   * singles lose the engine; twins lose No.1 (the left one) first, then
+   * both; one more press relights everything.
+   */
   private toggleEngineCut(): void {
-    if (this.state !== 'flying' || this.aircraft.spec.engine !== 'heli') return;
+    if (this.state !== 'flying') return;
     const c = this.input.controls;
+    const spec = this.aircraft.spec;
+    if (spec.engine !== 'heli') {
+      const n = spec.engines ?? 1;
+      c.enginesOut = ((c.enginesOut ?? 0) + 1) % (n + 1);
+      this.sound.gearThunk();
+      const glide = Math.round(bestGlideSpeed(spec, this.aircraft.state.pos.y) * MS_TO_KT);
+      this.screens.toast(
+        c.enginesOut === 0
+          ? (n > 1 ? 'ENGINES RELIT' : 'ENGINE RELIT')
+          : c.enginesOut < n
+            ? 'ENGINE 1 FAILURE — RIGHT RUDDER, HOLD THE SPEED UP'
+            : `${n > 1 ? 'BOTH ENGINES OUT' : 'ENGINE FAILURE'} — BEST GLIDE ${glide} KT, PICK A FIELD`,
+        4200,
+      );
+      return;
+    }
     c.engineCut = !c.engineCut;
     this.sound.gearThunk();
     this.screens.toast(
@@ -539,31 +610,14 @@ class Game {
     // a continuous function of distance and altitude — no rings, no tiers)
     const t = this.terrain;
     t.setQuality(q);
-    // far horizon shell density, and how far the fog may open up at altitude
-    // (the cap stays well inside the shell so its edge is never visible).
-    // Shell cellSize MUST share a small LCM with CHUNK_SIZE (900): the
-    // recenter grid is that LCM, so 380/460/680-m cells made the horizon
-    // lurch forward in 17–30 km jumps ("deficit builds, then the edge pops
-    // in one go") — 450/600 recenter every 900–1800 m, imperceptibly
-    let view: number; // ground-level visibility the fog is tuned to, m
-    if (q === 'low') {
-      t.configureFar(90, 600); // 54 km shell
-      this.fogFarCap = 15000;
-      view = 4 * CHUNK_SIZE;
-    } else if (q === 'medium') {
-      t.configureFar(150, 450); // 67.5 km shell
-      this.fogFarCap = 23000;
-      view = 6 * CHUNK_SIZE;
-    } else {
-      t.configureFar(180, 450); // 81 km shell
-      this.fogFarCap = 30000;
-      view = 8 * CHUNK_SIZE;
-    }
-    this.baseFogNear = view * 0.38;
-    this.baseFogFar = view * 0.96;
+    // (shell lattices and the altitude haze cap are in lod.ts SHELL_PRESETS)
+    // ground-level visibility the fog is tuned to, m
+    this.baseFogFar = GROUND_VIEW[q];
+    this.baseFogNear = this.baseFogFar * HAZE_NEAR;
     const fog = this.scene.fog as THREE.Fog;
     fog.near = this.baseFogNear;
     fog.far = this.baseFogFar;
+    this.hazeFar = this.baseFogFar;
     this.water.setFogRange(fog.near, fog.far);
     // force material recompile for shadow toggle
     this.scene.traverse((o) => {
@@ -609,19 +663,134 @@ class Game {
       const off = (25 + Math.random() * 85) * (Math.random() < 0.5 ? -1 : 1);
       const from = (appr.course * 180) / Math.PI + off;
       this.windFromDeg = Math.round(((from % 360) + 360) % 360);
-      this.windKt = Math.round(4 + Math.random() * 12);
+      this.windKt = Math.round(Math.max(4, this.wx.wind[0]) + Math.random() * (Math.max(16, this.wx.wind[1]) - Math.max(4, this.wx.wind[0])) * (this.wx.wind[1] > 16 ? 1 : 0.75));
     } else if (this.save.mode === 'race' || this.autoFly) {
       this.windFromDeg = 0;
       this.windKt = 0;
     } else {
+      // the weather sets how hard it blows
       this.windFromDeg = Math.floor(Math.random() * 360);
-      this.windKt = Math.round(3 + Math.random() * 12);
+      this.windKt = Math.round(this.wx.wind[0] + Math.random() * (this.wx.wind[1] - this.wx.wind[0]));
     }
     const ms = this.windKt / MS_TO_KT;
     const rad = (this.windFromDeg * Math.PI) / 180;
     // wind vector points TOWARD from-heading + 180°
+    this.windVX = -Math.sin(rad) * ms;
+    this.windVZ = Math.cos(rad) * ms;
     setWind(-Math.sin(rad) * ms, Math.cos(rad) * ms);
+    this.traffic.setWind(-Math.sin(rad) * ms, Math.cos(rad) * ms);
     this.airport.setWind(rad, this.windKt);
+  }
+
+  /**
+   * Charter mode: the job board of the field you are at. Picking a job puts
+   * you on its runway with the destination in the flight plan; delivering it
+   * makes the destination your new base, with a fresh board.
+   */
+  private openJobs(): void {
+    this.sound.init();
+    this.job = null;
+    this.state = 'menu';
+    this.sound.silence();
+    this.autopilot.disengage();
+    this.screens.setApPanel(false);
+    this.hud.visible = false;
+    this.hud.clear();
+    this.minimap.show(false);
+    this.touch?.show(false);
+    this.rings.stop();
+    this.screens.setJobLine(null);
+    this.aircraft.resetOnRunway(this.heightFn, this.spawnField);
+    const spec = this.aircraft.spec;
+    const jobs = jobsFrom(this.gen, this.spawnField, spec, this.jobSerial);
+    const mmss = (s: number): string => `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, '0')}`;
+    this.screens.showJobs(
+      this.spawnField.name, spec.name,
+      jobs.map((j) => ({
+        kind: j.kind, title: j.title, to: j.to.name, km: j.distance / 1000, bearing: j.bearing,
+        par: mmss(j.par), pay: j.pay,
+        note: j.to.intl ? 'international' : j.to.major ? 'regional field' : `${Math.round(j.to.length)} m strip`,
+      })),
+      this.save.credits,
+      (i) => {
+        this.sound.uiClick();
+        this.job = jobs[i];
+        this.startFlight();
+      },
+    );
+  }
+
+  /** Per-frame job bookkeeping: the clock, the ride, the strip, the arrival. */
+  private stepJob(dt: number): void {
+    const job = this.job;
+    if (!job) return;
+    const st = this.aircraft.state;
+    this.jobTime += dt;
+    this.jobComfort.step(dt, st.gForce, st.rollAngle, st.onGround);
+    const km = Math.hypot(job.to.x - st.pos.x, job.to.z - st.pos.z) / 1000;
+    const mmss = (s: number): string => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
+    if ((this.jobLineT -= dt) <= 0) {
+      this.jobLineT = 0.25;
+      this.screens.setJobLine(
+        `${job.title} → ${job.to.name} · ${km.toFixed(km < 10 ? 1 : 0)} KM · ${mmss(this.jobTime)} / PAR ${mmss(job.par)}` +
+        (job.comfort ? ` · RIDE ${Math.round(this.jobComfort.value * 100)}%` : ''),
+      );
+    }
+    // delivered once you are down and stopped on the destination field
+    if (this.touchedDown && st.onGround && Math.hypot(st.vel.x, st.vel.z) < 1.2) {
+      this.stopTimer += dt;
+      if (this.stopTimer > 1.2) {
+        if (atField(job.to, st.pos.x, st.pos.z)) {
+          this.finishJob();
+        } else if (!this.jobWrong) {
+          this.jobWrong = true;
+          this.screens.toast(`THIS IS NOT ${job.to.name} — ${km.toFixed(0)} KM TO GO`, 4200);
+        }
+      }
+    } else {
+      this.stopTimer = 0;
+      if (!st.onGround) this.jobWrong = false;
+    }
+  }
+
+  private finishJob(): void {
+    const job = this.job;
+    if (!job) return;
+    const heli = this.aircraft.spec.engine === 'heli';
+    // fixed-wing: the fee expects wheels on a runway (no grade = no credit
+    // for the landing); helicopters are not graded
+    const landing = heli ? null : this.jobLanding ?? 0;
+    const res = scoreJob(job, { time: this.jobTime, landing, comfort: this.jobComfort.value });
+    this.save.credits += res.pay;
+    this.save.jobs++;
+    this.save.bestJob = Math.max(this.save.bestJob, res.pay);
+    persist(this.save);
+    // the destination is home now, with a fresh board
+    this.spawnField = job.to;
+    this.jobSerial++;
+    this.job = null;
+    this.state = 'victory';
+    this.sound.silence();
+    if (res.grade.startsWith('A')) this.sound.finishFanfare();
+    this.autopilot.disengage();
+    this.screens.setApPanel(false);
+    this.hud.visible = false;
+    this.hud.clear();
+    this.minimap.show(false);
+    this.minimap.setDestination(null);
+    this.route.clear();
+    this.touch?.show(false);
+    this.screens.setJobLine(null);
+    const mmss = (s: number): string => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
+    this.screens.showJobDone({
+      title: job.title, to: job.to.name, grade: res.grade, fee: job.pay, pay: res.pay,
+      time: mmss(this.jobTime), par: mmss(job.par), timePct: res.timeMul,
+      landing: heli ? 'not graded' : this.jobLanding === null ? 'off the runway' : `${Math.round(this.jobLanding)} / 100`,
+      landPct: res.landMul,
+      comfort: job.comfort ? `${Math.round(this.jobComfort.value * 100)}%` : null,
+      comfortPct: res.comfortMul,
+      credits: this.save.credits, jobs: this.save.jobs,
+    }, this.debrief());
   }
 
   private startFlight(): void {
@@ -659,6 +828,7 @@ class Game {
     this.wasOnGround = !appr;
     this.airMaxAgl = appr ? 999 : 0;
     this.touchedDown = false;
+    this.autoArmed = false;
     this.stopTimer = 0;
     this.lastLanding = null;
     this.warn = null;
@@ -669,6 +839,26 @@ class Game {
       this.rings.stop();
     }
     this.autopilot.disengage();
+    this.tower.reset(appr || this.job ? 6.5 : 3);
+    if (this.save.mode === 'job' && this.job) {
+      // the destination goes into the flight plan and onto the map
+      const to = this.job.to;
+      this.route.clear();
+      this.route.add({
+        x: to.x, z: to.z, name: to.name,
+        airfield: { code: to.code, heading: to.heading, elev: to.elev, length: to.length },
+      });
+      this.minimap.setDestination(to);
+      this.jobTime = 0;
+      this.jobComfort = new Comfort();
+      this.jobLanding = null;
+      this.jobWrong = false;
+      this.jobLineT = 0;
+    } else {
+      this.job = null;
+      this.minimap.setDestination(null);
+      this.screens.setJobLine(null);
+    }
     this.screens.setApPanel(false);
     this.ilsTuned = appr; // on final the receiver is already on the runway
     this.ilsTimer = appr ? 1 : 0;
@@ -678,19 +868,45 @@ class Game {
     this.minimap.show(true);
     this.touch?.show(true);
     this.touch?.setThrottle(this.input.controls.throttle);
-    const windTxt = this.windKt > 0
-      ? `WIND ${String(this.windFromDeg).padStart(3, '0')}° AT ${this.windKt} KT`
-      : 'WIND CALM';
+    const windTxt = this.windText();
+    const sky = this.skyText();
     this.screens.toast(
-      appr
-        ? `FINAL APPROACH — RWY ${appr.ident} · ${windTxt} · LAND AND STOP`
+      this.job
+        ? `${this.job.title} → ${this.job.to.name} · ${(this.job.distance / 1000).toFixed(0)} KM ON ${String(this.job.bearing).padStart(3, '0')}° · ${windTxt}${sky}`
+        : appr
+        ? `FINAL APPROACH — RWY ${appr.ident} · ${windTxt}${sky} · LAND AND STOP`
         : this.save.mode === 'race'
         ? 'RING RUSH — GO!'
-        : this.windKt > 0
-          ? `CLEARED FOR TAKEOFF — WIND ${String(this.windFromDeg).padStart(3, '0')}° AT ${this.windKt} KT`
-          : 'CLEARED FOR TAKEOFF',
-      appr ? 4200 : 2800,
+        : `CLEARED FOR TAKEOFF — ${windTxt}${sky}`,
+      this.job ? 6000 : appr || sky ? 4600 : 2800,
     );
+  }
+
+  /** The wind as the tower says it. */
+  private windText(): string {
+    return this.windKt > 0
+      ? `WIND ${String(this.windFromDeg).padStart(3, '0')}° AT ${this.windKt} KT`
+      : 'WIND CALM';
+  }
+
+  /** The sky as the tower says it ("" in fair weather). */
+  private skyText(): string {
+    const d = this.wx.deck;
+    if (!d) return '';
+    if (this.wx.id === 'fog') return ` · FOG, VISIBILITY ${this.wx.vis} M`;
+    const ft = (Math.round((d.base * M_TO_FT) / 100) * 100).toLocaleString('en-US');
+    return ` · ${this.wx.rain > 0 ? 'RAIN, ' : ''}${d.cover < 0.99 ? 'BROKEN' : 'OVERCAST'} ${ft} FT`;
+  }
+
+  /** A field with a tower: internationals and the regional fields. */
+  private isTowered(app: IlsApproach): boolean {
+    let t = this.toweredCache.get(app.fieldName);
+    if (t === undefined) {
+      t = this.gen.airfieldsNear(app.thrX, app.thrZ, 6000, this.landingFields)
+        .some((f) => f.name === app.fieldName && (f.intl === true || f.major === true));
+      this.toweredCache.set(app.fieldName, t);
+    }
+    return t;
   }
 
   private pause(): void {
@@ -721,6 +937,9 @@ class Game {
     this.minimap.show(false);
     this.touch?.show(false);
     this.rings.stop();
+    this.job = null;
+    this.minimap.setDestination(null);
+    this.screens.setJobLine(null);
     this.aircraft.resetOnRunway(this.heightFn, this.spawnField);
     this.screens.show('menu');
     this.screens.refreshMenu();
@@ -729,6 +948,8 @@ class Game {
   private onCrash(): void {
     this.state = 'crashed';
     this.crashTimer = 1.1;
+    this.job = null; // undelivered
+    this.screens.setJobLine(null);
     this.flightCam.addShake(1.4);
     this.sound.crashBoom();
     this.hud.visible = false;
@@ -783,6 +1004,10 @@ class Game {
     this.airMaxAgl = 0;
     if (!real || this.rings.active) return;
     this.touchedDown = true;
+    if (this.job) {
+      this.jobComfort.touchdown(sink);
+      this.jobLanding = null; // only a graded landing on the destination counts
+    }
     // helicopters land anywhere — only Final Approach grades them
     if (spec.engine === 'heli' && this.save.mode !== 'approach') return;
     const gs = Math.hypot(st.vel.x, st.vel.z);
@@ -798,6 +1023,7 @@ class Game {
       sink, cross: rw.cross, past: rw.past, length: rw.length, width: rw.width,
     });
     this.lastLanding = { score, rw };
+    if (this.job && atField(this.job.to, st.pos.x, st.pos.z)) this.jobLanding = score.score;
     const prev = this.save.bestLandings[spec.id];
     this.landingWasRecord = prev === undefined || score.score > prev;
     if (this.landingWasRecord) this.save.bestLandings[spec.id] = score.score;
@@ -910,23 +1136,52 @@ class Game {
     const leadZ = st.pos.z + clamp(st.vel.z * 5, -4500, 4500);
     this.terrain.update(leadX, leadZ, agl, dt);
 
-    // fog opens out with the streamed radius and, above that, with altitude:
-    // the far shell carries the horizon out to ~30 km, so the higher you fly
-    // the further the eye is allowed to reach before the haze closes in
+    // haze opens out with the streamed radius and, above that, with
+    // altitude (lod.visibility): the horizon shell carries terrain out to
+    // 90–216 km, so at cruise the eye reaches almost to the true horizon.
+    // It never opens past what is actually built (viewLimit) — the rim of
+    // the outermost shell must stay under full haze.
     const fog = this.scene.fog as THREE.Fog;
     const scale = this.terrain.fogScale();
-    const farT = Math.min(this.baseFogFar * scale + Math.max(agl - 400, 0) * 6, this.fogFarCap);
-    const nearT = farT * (this.baseFogNear / this.baseFogFar);
-    fog.near = clamp(damp(fog.near, nearT, 0.8, dt), 100, 40000);
-    fog.far = clamp(damp(fog.far, farT, 0.8, dt), 200, 41000);
+    const farT = Math.min(
+      visibility(this.baseFogFar * scale, agl, this.terrain.fogCap()),
+      Math.max(this.terrain.viewLimit(), this.baseFogFar),
+    );
+    this.hazeFar = clamp(damp(this.hazeFar, farT, 0.8, dt), 200, 240000);
+    // WEATHER acts on the clear-air figure, and at once (the damping above
+    // is for the slow breathing of haze with height — entering cloud is not
+    // slow): beneath the deck the weather's visibility, inside it a few
+    // hundred metres, and the light and sky colour of wherever the eye is.
+    const eye = this.flightCam.camera.position;
+    const deckDef = this.wx.deck;
+    const dens = this.deck.densityAt(eye.x, eye.y, eye.z);
+    const under = beneath(deckDef, eye.y);
+    fog.far = weatherVisibility(this.wx, this.hazeFar, eye.y, dens);
+    fog.near = fog.far * (this.baseFogNear / this.baseFogFar) * (1 - 0.9 * dens);
+    if (deckDef) {
+      this.cloudCol.lerpColors(
+        this.sky.cloudShade, this.sky.cloudLit,
+        clamp((eye.y - deckDef.base) / (deckDef.top - deckDef.base), 0, 1),
+      );
+    }
+    this.sky.setAir(under, dens, this.cloudCol);
+    fog.color.copy(this.sky.sceneFogColor);
+    this.water.setFogColor(this.sky.fogColor);
+    this.terrain.hazeFar = fog.far;
     this.water.setFogRange(fog.near, fog.far);
+    this.deck.update(eye, fog.near, fog.far, dt, this.windVX, this.windVZ);
+    if (this.rain) {
+      // rain falls from the deck: none once you are up in the top of it
+      const wet = deckDef ? 1 - clamp((eye.y - (deckDef.top - 400)) / 300, 0, 1) : 1;
+      this.rain.update(eye, st.vel, this.wx.rain * wet, dt, this.windVX, this.windVZ);
+    }
 
     this.water.update(this.simTime, this.flightCam.camera.position);
     this.sky.update(st.pos, fog.far, dt);
     this.airport.update(this.simTime, st.pos.x, st.pos.z, st.pos.y);
     // NPC traffic: parked aircraft everywhere; the airborne layer stays out
     // of Ring Rush so the course reads clean
-    this.traffic.update(dt, st.pos.x, st.pos.z, this.simTime, !this.rings.active);
+    this.traffic.update(this.state === 'paused' ? 0 : dt, st.pos.x, st.pos.z, this.simTime, !this.rings.active, agl);
 
     // coarse-depth fallback (touch + low, no log buffer): step the near
     // plane out with altitude to reclaim precision. Discrete bands with
@@ -1022,6 +1277,25 @@ class Game {
             const p = this.aircraft.state.pos;
             this.terrain.forceFarBuild(p.x, p.z);
           }
+          // &alt=metres — jump straight to a cruise altitude on the current
+          // heading (horizon / far-terrain captures without a 5-minute climb)
+          const altP = Number(new URLSearchParams(location.search).get('alt') ?? NaN);
+          if (Number.isFinite(altP) && altP > 0) {
+            const s = this.aircraft.state;
+            const sp = this.aircraft.spec;
+            _menuDir.set(0, 0, -1).applyQuaternion(s.quat);
+            const hdg = Math.atan2(_menuDir.x, -_menuDir.z);
+            const v = sp.engine === 'heli' ? 45 : sp.vne * 0.62;
+            s.pos.y = altP;
+            s.vel.set(Math.sin(hdg) * v, 0, -Math.cos(hdg) * v);
+            s.quat.setFromEuler(new THREE.Euler(0.03, -hdg, 0, 'YXZ'));
+            s.angVel.set(0, 0, 0);
+            s.airspeed = v; // the autopilot captures this as its speed target
+            s.onGround = false;
+            this.input.controls.gearDown = false;
+            this.input.controls.flaps = 0;
+            this.wasOnGround = false;
+          }
           // &ap=1 — engage the autopilot after the fast-forward (smoke test)
           if (new URLSearchParams(location.search).get('ap') === '1' && !this.aircraft.state.onGround) {
             this.toggleAutopilot();
@@ -1096,11 +1370,22 @@ class Game {
         if (appr && ap.apprPhase !== this.lastApprPhase) {
           this.lastApprPhase = ap.apprPhase;
           if (ap.apprPhase === 'gs') {
-            const cfg = this.aircraft.spec.retractableGear && !this.input.controls.gearDown
-              ? 'GEAR DOWN, SET FLAPS' : 'SET LANDING FLAPS';
-            this.screens.toast(`GLIDESLOPE CAPTURED — ${cfg}`, 3200);
+            // gear and flap stay with the pilot (the mode flies the speed for
+            // whatever flap is set, and goes around rather than land gear-up)
+            const c = this.input.controls;
+            const cfg = this.aircraft.spec.retractableGear && !c.gearDown
+              ? ' — YOUR JOB: GEAR DOWN, THEN FLAPS'
+              : c.flaps < 0.99 ? ' — YOUR JOB: SET LANDING FLAPS' : '';
+            this.screens.toast(`GLIDESLOPE CAPTURED${cfg}`, 3600);
           } else if (ap.apprPhase === 'flare') this.screens.toast('FLARE — RETARD', 1600);
           else if (ap.apprPhase === 'rollout') this.screens.toast('ROLLOUT — AUTOBRAKE', 2200);
+        }
+        if (ap.goAround) {
+          // the approach could not end on the runway: back in the basic
+          // modes, climbing on runway heading — say why
+          this.screens.toast(ap.goAround, 5200);
+          ap.goAround = null;
+          this.lastApprPhase = 'off';
         }
         if (!ap.engaged) {
           // the approach mode hands the aircraft back once it has stopped
@@ -1124,6 +1409,32 @@ class Game {
     }
 
     this.aircraft.update(this.input.controls, dt, this.heightFn);
+
+    // other traffic: onto the map, and to the tower — which clears you to
+    // land (or tells you to keep coming / go around) and calls conflicts
+    {
+      const n = this.traffic.blips(this.blipBuf);
+      this.minimap.setTraffic(this.blipBuf, n, st.pos.y);
+      if (!this.rings.active) {
+        let nAir = 0;
+        for (let i = 0; i < n; i++) {
+          const b = this.blipBuf[i];
+          if (b.kind !== 0) continue;
+          const r = this.radioBuf[nAir] ?? (this.radioBuf[nAir] = { id: 0, x: 0, y: 0, z: 0 });
+          r.id = b.id; r.x = b.x; r.y = b.y; r.z = b.z;
+          nAir++;
+        }
+        const app = this.ilsTuned && this.isTowered(this.ilsTuned) ? this.ilsTuned : null;
+        const call = this.tower.update(
+          dt, { x: st.pos.x, y: st.pos.y, z: st.pos.z, hdg: st.heading, onGround: st.onGround },
+          app, app ? this.traffic.runwayOccupied(app) : false, this.windText(), this.radioBuf, nAir,
+        );
+        if (call) {
+          this.sound.radio();
+          this.screens.toast(call, 4600);
+        }
+      }
+    }
 
     // ILS receiver: retune to the best approach ahead about once a second
     this.ilsTimer -= dt;
@@ -1175,7 +1486,10 @@ class Game {
       this.wasOnGround = st.onGround;
 
       // Final Approach ends once the aircraft has come to rest
-      if (this.save.mode === 'approach' && this.touchedDown && st.onGround &&
+      if (this.job) {
+        this.stepJob(dt);
+        if (this.state !== 'flying') return;
+      } else if (this.save.mode === 'approach' && this.touchedDown && st.onGround &&
           Math.hypot(st.vel.x, st.vel.z) < 1.2) {
         this.stopTimer += dt;
         if (this.stopTimer > 0.9) {
@@ -1224,6 +1538,7 @@ class Game {
       heli ? st.rotorRpm : 1,
       heli && !st.onGround && st.rotorRpm < 0.9, // low-rotor-RPM horn
       this.warn !== null,
+      1 - (this.input.controls.enginesOut ?? 0) / (this.aircraft.spec.engines ?? 1),
     );
     this.hud.draw(this.hudData(), dt);
     this.minimap.update(
@@ -1239,8 +1554,8 @@ class Game {
       this.input.controls.airbrake,
       this.aircraft.spec.airbrakeCd > 0,
       this.aircraft.spec.flapsCl > 0,
-      this.aircraft.spec.engine === 'heli',
-      this.input.controls.engineCut === true,
+      true,
+      this.input.controls.engineCut === true || (this.input.controls.enginesOut ?? 0) > 0,
     );
     this.screens.setPortraitWarning(true);
   }
@@ -1252,7 +1567,8 @@ class Game {
     if (this.save.mode === 'approach') {
       // smoke test: let the autopilot fly the ILS to a full autoland
       if (this.aircraft.spec.engine !== 'heli') {
-        if (!this.touchedDown && !st.onGround && !this.autopilot.approach && this.ilsTuned) {
+        if (!this.autoArmed && !this.touchedDown && !st.onGround && !this.autopilot.approach && this.ilsTuned) {
+          this.autoArmed = true; // once: a go-around must not be re-armed in a loop
           this.autopilot.engage(st, c.throttle, 30);
           this.autopilot.armApproach(this.ilsTuned);
         }
@@ -1285,7 +1601,8 @@ class Game {
       `v=${st.airspeed.toFixed(1)} x=${st.pos.x.toFixed(0)} y=${st.pos.y.toFixed(1)} z=${st.pos.z.toFixed(0)} ` +
       `gnd=${st.onGround} thr=${c.throttle.toFixed(2)} tf=${st.thrustFrac.toFixed(2)} ` +
       `pit=${st.pitchAngle.toFixed(2)} crash=${st.crashed} flds=${apDbg.size} bcn=${beacons} ` +
-      `lod=${ts.swaps}/${ts.late}/${ts.fresh}/${ts.lateFresh}/${ts.dropped} fps=${this.fps} ` +
+      `lod=${ts.swaps}/${ts.late}/${ts.fresh}/${ts.lateFresh}/${ts.dropped} sh=${this.terrain.shellInfo()} npc=${this.traffic.info()} ` +
+      `fog=${((this.scene.fog as THREE.Fog).far / 1000).toFixed(0)} fps=${this.fps} ` +
       `appr=${this.autopilot.apprPhase} ldg=${this.lastLanding ? this.lastLanding.score.score : '-'} ` +
       `warn=${this.warn ?? '-'} state=${this.state}`;
   }
@@ -1348,6 +1665,13 @@ class Game {
       stalled: st.stalled,
       afterburner: !!spec.afterburner && c.throttle >= 0.995,
       vne: spec.vne,
+      engFail: (() => {
+        const out = c.enginesOut ?? 0;
+        if (out === 0 || spec.engine === 'heli') return null;
+        return out < (spec.engines ?? 1)
+          ? 'ENG 1 OUT'
+          : `ENG OUT · GLIDE ${Math.round(bestGlideSpeed(spec, st.pos.y) * MS_TO_KT)}`;
+      })(),
       wind: this.windKt > 0 ? { fromDeg: this.windFromDeg, kt: this.windKt } : null,
       heli: spec.engine === 'heli'
         ? {

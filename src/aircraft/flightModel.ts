@@ -20,6 +20,9 @@ export interface ControlInputs {
   brakes: boolean;   // wheel brakes
   airbrake: boolean; // speed brake / spoilers (aircraft with airbrakeCd > 0)
   engineCut?: boolean; // helicopter practice engine failure (X) — absent/false = running
+  /** fixed-wing practice failures: how many engines are dead (No.1 — the
+   *  LEFT one — goes first). Absent/0 = all running. */
+  enginesOut?: number;
 }
 
 export interface FlightState {
@@ -146,6 +149,12 @@ export function stepFlight(
     slip = Math.atan2(_vLocal.x, -_vLocal.z);
   }
   st.aoa = aoa;
+  // skid angle for drag and side force, measured against whichever END of
+  // the airframe faces the wind. `slip` runs to ±180° for air arriving from
+  // behind, and 0.5·slip² then made the drag coefficient ~4.9: a parked
+  // trainer was blown 24 m down the runway by a 15 kt tailwind. Identical
+  // to `slip` for any flow from the front hemisphere (all normal flight).
+  const skid = _vLocal.z <= 0 ? slip : Math.atan2(_vLocal.x, _vLocal.z);
 
   const qbar = 0.5 * rho * V * V;
   const S = spec.wingArea;
@@ -172,7 +181,7 @@ export function stepFlight(
     const cd =
       spec.cd0 +
       cdInduced +
-      0.5 * slip * slip + // skidding through the air costs energy
+      0.5 * skid * skid + // skidding through the air costs energy
       spec.flapsCd * inp.flaps +
       (inp.airbrake ? spec.airbrakeCd : 0) +
       (inp.gearDown && spec.retractableGear ? spec.gearCd : 0) +
@@ -182,7 +191,7 @@ export function stepFlight(
     _liftDir.crossVectors(_right, _wDir).normalize();
     const L = qbar * S * cl * (1 + 0.07 * ge * ge);
     const D = qbar * S * cd;
-    const Y = qbar * S * -1.1 * slip; // sideforce opposes slip
+    const Y = qbar * S * -1.1 * skid; // sideforce opposes slip
     liftFrac = L / (spec.mass * GRAV);
 
     _force.addScaledVector(_liftDir, L);
@@ -202,9 +211,14 @@ export function stepFlight(
   if (spec.afterburner && inp.throttle >= 0.995 && st.spool > 0.96) thrustMul *= spec.afterburner;
   const speedLoss = 1 - spec.propFalloff * clamp(V / spec.vne, 0, 1);
   const altLoss = spec.engine === 'jet' ? 0.45 + 0.55 * (rho / 1.225) : 0.6 + 0.4 * (rho / 1.225);
-  const T = spec.maxThrust * thrustMul * speedLoss * altLoss;
+  // practice engine failures: dead engines give nothing and windmill (an
+  // unfeathered propeller is a barn door; a fan less so)
+  const nEng = spec.engines ?? 1;
+  const dead = clamp(inp.enginesOut ?? 0, 0, nEng);
+  const T = spec.maxThrust * thrustMul * speedLoss * altLoss * ((nEng - dead) / nEng);
   st.thrustFrac = (T / spec.maxThrust) || 0;
   _force.z -= T;
+  if (dead > 0) _force.z += qbar * S * (spec.engine === 'prop' ? 0.016 : 0.006) * (dead / nEng);
 
   // g-force (aero+thrust accel along body up, in g)
   st.gForce = _force.y / (spec.mass * GRAV) + Math.max(0, 1 - V * 0.002);
@@ -278,9 +292,10 @@ export function stepFlight(
 
   // command terms scale with vDamp too, so damping shapes the response but
   // doesn't erode the achievable rates at speed
+  const pitchVane = (aoa - st.trimAoA) * 5.5 * spec.stability * eff * vStiff;
   let aaX =
     pitchCmd * pitchRate * 5.2 * eff * vDamp -
-    (aoa - st.trimAoA) * 5.5 * spec.stability * eff * vStiff -
+    pitchVane -
     av.x * (4.2 * eff * vDamp + 0.35);
   let aaY =
     -inp.yaw * spec.yawRate * 2.4 * eff * vDamp -
@@ -298,6 +313,16 @@ export function stepFlight(
     const lowV = clamp(1 - V / 45, 0, 1);
     aaZ += (T / spec.mass) * 0.05 * lowV;
     aaY += (T / spec.mass) * 0.04 * lowV;
+  }
+
+  // asymmetric thrust: with one of a pair dead, the live engine swings the
+  // nose toward the dead one (and the yaw drags that wing down). It takes
+  // rudder TOWARD the live engine — "dead foot, dead engine" — and the
+  // lower the speed and the higher the power, the more of it.
+  if (dead > 0 && dead < nEng && spec.asymYaw) {
+    const swing = (T / spec.mass) * spec.asymYaw;
+    aaY += swing;
+    aaZ += swing * 0.35;
   }
 
   // light turbulence: smooth deterministic gusts, strongest down low where
@@ -384,14 +409,22 @@ export function stepFlight(
     aaY += (steer - av.y) * 6;
 
     // wheels keep the velocity tracking the nose
-    if (gs > 0.5) {
-      _fwd.set(0, 0, -1).applyQuaternion(st.quat);
-      _fwd.y = 0;
-      _fwd.normalize();
+    _fwd.set(0, 0, -1).applyQuaternion(st.quat);
+    _fwd.y = 0;
+    _fwd.normalize();
+    if (gs > 2) {
       const sign = _hVel.normalize().dot(_fwd) >= 0 ? 1 : -1;
       const k = clamp(8 * dt, 0, 1);
       st.vel.x = THREE.MathUtils.lerp(st.vel.x, _fwd.x * gs * sign, k);
       st.vel.z = THREE.MathUtils.lerp(st.vel.z, _fwd.z * gs * sign, k);
+    } else {
+      // parked or crawling: the tyres simply hold the airframe sideways.
+      // Only the along-the-nose part of the velocity survives, so a beam
+      // wind cannot pump sideways push into a forward creep (rotating the
+      // velocity onto the nose, as above, preserves its magnitude).
+      const along = st.vel.x * _fwd.x + st.vel.z * _fwd.z;
+      st.vel.x = _fwd.x * along;
+      st.vel.z = _fwd.z * along;
     }
 
     // ground springs the attitude toward its parked stance. The PITCH
@@ -407,6 +440,15 @@ export function stepFlight(
     const wow = clamp(1 - liftFrac, 0.12, 1);
     aaZ += (0 - roll) * 9 - av.z * 6;
     aaX += (spec.groundPitch - pitch) * 5.5 * wow - av.x * 3.2;
+    // The tail only weathervanes in air arriving from AHEAD. Parked with
+    // the wind on the beam or the tail, the angle of attack reads anything
+    // up to ±180° and the alpha spring (a kinematic stand-in, far stronger
+    // than a real stabiliser at 15 kt) heaved the nose 10–19° up: every
+    // aircraft sat back on its tail at spawn whenever the random wind came
+    // from the rear half. On the wheels that moment is the gear's to react;
+    // the spring bites as forward airflow builds (full by 4 m/s — the
+    // takeoff roll and a tail-dragger's tail-rise are untouched).
+    aaX += pitchVane * (1 - clamp(-_vLocal.z / 4, 0, 1));
     st.gForce = 1;
   } else {
     st.onGround = false;
@@ -683,6 +725,16 @@ export function stallSpeed(spec: AircraftSpec, flaps: number): number {
 /** Reference approach speed: 1.3 × the stall speed in the configuration. */
 export function approachSpeed(spec: AircraftSpec, flaps: number): number {
   return stallSpeed(spec, flaps) * 1.3;
+}
+
+/** Best-glide speed, m/s TRUE (what the tape shows) at altitude `y`: where
+ *  lift/drag peaks (CL² = CD0·π·e·AR), clean. What to pitch for when the
+ *  engines have gone quiet — it rises with height as the air thins. */
+export function bestGlideSpeed(spec: AircraftSpec, y = 0): number {
+  const clMax = spec.cl0 + spec.clSlope * spec.stallAoA;
+  const cl = Math.min(Math.sqrt(spec.cd0 * Math.PI * 0.72 * spec.aspect), clMax * 0.75);
+  const rho = 1.225 * Math.exp(-Math.max(y, 0) / 8500);
+  return Math.sqrt((2 * spec.mass * GRAV) / (rho * spec.wingArea * cl));
 }
 
 /** A runway end to fly to (structurally an IlsApproach — kept local so the

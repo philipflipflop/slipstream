@@ -291,3 +291,174 @@ console.log('  ✓ …and again with a 14 kt crosswind: crab emerges from track-
   assert.ok(!s2.crashed && s2.onGround, 'fixed-gear landing must ignore the gear lever');
   console.log('  ✓ a gear-up touchdown writes off a retractable; fixed gear is unaffected');
 }
+
+/* ------------------------------ 6. APPR armed the way a player arms it ---- */
+// Section 4 starts every aircraft already set up on final. A player presses
+// APPR from cruise: fast, clean, level, at an angle to the runway, sometimes
+// far too high. The mode must then either fly a proper landing or go around
+// and say why — it may never descend off the centreline, touch down beyond
+// the touchdown zone, or leave the runway. (It used to do all three: armed
+// above the glide path it "landed" 5–6 km past the far end; crossing the
+// beam at 90° it captured the glideslope and flew into the hills.)
+function armFrom(id, {
+  distKm = 12, kt = 300, altM = 600, offLat = 0, hdgOff = 0, flaps = 0, gear = true, field = 0, seconds = 600,
+  // cap the terrain this far above the field: for cases that are about the
+  // MODE's logic from arbitrary set-ups. The world has real mountains beyond
+  // the protected approach surfaces (452 m on Meridian's own extended
+  // centreline, 16 km out) and keeping clear of them en route to the beam
+  // is the pilot's business, not the autoland's.
+  terrainCap = Infinity,
+} = {}) {
+  const gen = new WorldGen();
+  const capY = AIRPORTS[field].elev + terrainCap;
+  const h = (x, z) => Math.min(gen.heightAt(x, z), capY);
+  const spec = specById(id);
+  setWind(0, 0);
+  const apps = [];
+  approachesOf(AIRPORTS[field], apps);
+  const app = apps[0];
+  const st = createState();
+  spawnOnApproach(spec, st, app, distKm * 1000, flaps, offLat, 0);
+  // level at altM above the field, at kt, pointing hdgOff degrees off the course
+  const v = kt / KT;
+  const hd = app.course + (hdgOff * Math.PI) / 180;
+  st.pos.y = app.elev + altM;
+  st.quat.setFromAxisAngle({ x: 0, y: 1, z: 0 }, -hd);
+  st.heading = hd;
+  st.vel.set(Math.sin(hd) * v, 0, -Math.cos(hd) * v);
+  st.airspeed = v;
+  const dirX = Math.sin(app.course), dirZ = -Math.cos(app.course);
+  const inp = { pitch: 0, roll: 0, yaw: 0, throttle: 0.6, flaps, gearDown: gear, brakes: false, airbrake: false };
+  const ap = new Autopilot();
+  stepFlight(spec, st, inp, 1 / 180, h);
+  ap.engage(st, inp.throttle);
+  ap.armApproach(app);
+  const dt = 1 / 60;
+  const side = Math.sign(offLat) || 1;
+  let td = null, wasGround = false, goAround = null, locOver = 0, offBeamDescent = 0, minRaAfterGa = Infinity, t = 0;
+  for (; t < seconds; t += dt) {
+    inp.brakes = false;
+    const ra = st.pos.y - Math.max(h(st.pos.x, st.pos.z), 0) - spec.gearHeight;
+    ap.update(spec, st, inp, dt, ra);
+    if (ap.goAround && !goAround) goAround = { why: ap.goAround, ra, t };
+    for (let i = 0; i < 3; i++) stepFlight(spec, st, inp, dt / 3, h);
+    if (st.crashed) break;
+    const relX = st.pos.x - app.thrX, relZ = st.pos.z - app.thrZ;
+    const toGo = -(relX * dirX + relZ * dirZ);
+    const cross = relX * -dirZ + relZ * dirX;
+    if (cross * side < 0) locOver = Math.max(locOver, Math.abs(cross));
+    // descending on the glide path while well outside the beam
+    if (ap.apprPhase === 'gs' && Math.abs(cross) > Math.max(toGo * 0.09, 150)) offBeamDescent += dt;
+    if (goAround) minRaAfterGa = Math.min(minRaAfterGa, ra);
+    if (st.onGround && !wasGround && !td) {
+      td = { rw: runwayUnder([AIRPORTS[field]], st.pos.x, st.pos.z, Math.atan2(st.vel.x, -st.vel.z)), kt: st.airspeed * KT };
+    }
+    wasGround = st.onGround;
+    if (!ap.engaged) break;
+    if (goAround && t > goAround.t + 45) break;
+  }
+  const end = runwayUnder([AIRPORTS[field]], st.pos.x, st.pos.z, app.course);
+  return { spec, st, ap, app, inp, td, end, goAround, locOver, offBeamDescent, minRaAfterGa };
+}
+
+/** a proper landing: in the zone, on the line, stopped on the runway, AP handed back */
+function assertLanded(r, tag) {
+  assert.ok(!r.st.crashed, `${tag}: crashed — ${r.st.crashReason}`);
+  assert.ok(!r.goAround, `${tag}: went around (${r.goAround?.why})`);
+  assert.ok(r.td && r.td.rw, `${tag}: did not touch down on the runway`);
+  assert.ok(r.td.rw.past > 150 && r.td.rw.past < 700, `${tag}: touched down ${r.td.rw.past.toFixed(0)} m in`);
+  assert.ok(Math.abs(r.td.rw.cross) < 3.5, `${tag}: ${r.td.rw.cross.toFixed(1)} m off the centreline`);
+  assert.ok(r.end && r.end.past < r.end.length - 300 && !r.ap.engaged, `${tag}: rollout ended ${JSON.stringify(r.end)}`);
+  assert.equal(r.offBeamDescent, 0, `${tag}: descended on the glide path outside the localizer beam`);
+}
+
+/** a go-around: never touched anything, climbing away under the autopilot, speedbrake stowed */
+function assertWentAround(r, tag, why) {
+  assert.ok(!r.st.crashed, `${tag}: crashed — ${r.st.crashReason}`);
+  assert.ok(r.goAround && why.test(r.goAround.why), `${tag}: expected ${why}, got ${r.goAround?.why ?? 'a landing'}`);
+  assert.ok(!r.td, `${tag}: touched down at ${r.td?.kt.toFixed(0)} kt`);
+  assert.ok(r.ap.engaged && !r.ap.approach, `${tag}: autopilot should be holding in the basic modes`);
+  assert.ok(r.minRaAfterGa > 12, `${tag}: sank to ${r.minRaAfterGa.toFixed(0)} m during the go-around`);
+  assert.ok(r.st.pos.y > r.app.elev + 250 && !r.st.stalled, `${tag}: not climbing away (${(r.st.pos.y - r.app.elev).toFixed(0)} m)`);
+  assert.ok(!r.inp.airbrake, `${tag}: speedbrake left out`);
+}
+
+{
+  // fast intercepts at 30°, 45° and 90°, clean: on the centreline without
+  // sailing through it, slowed to the reference speed, landed in the zone
+  // [aircraft, kt from 14 km out, kt from 9 km out (40 s from the threshold at 400 kt is not an approach)]
+  const cases = [
+    ['vector', 400, 300], ['typhoon', 380, 300], ['a320', 290, 290], ['meridian', 250, 250],
+    ['falcon', 200, 200], ['islander', 140, 140], ['skylark', 110, 110],
+  ];
+  let worstOver = 0;
+  for (const [id, kt, ktClose] of cases) {
+    const a = armFrom(id, { distKm: 14, kt, altM: 600, offLat: 3500, hdgOff: -30 });
+    assertLanded(a, `${id} 30° intercept at ${kt} kt`);
+    const b = armFrom(id, { distKm: 9, kt: ktClose, altM: 420, offLat: -1500, hdgOff: 45 });
+    assertLanded(b, `${id} 45° intercept at ${ktClose} kt`);
+    for (const r of [a, b]) {
+      assert.ok(r.locOver < 300, `${id}: flew ${r.locOver.toFixed(0)} m through the localizer`);
+      assert.ok(r.td.kt < approachSpeed(r.spec, 0) * KT + 12, `${id}: touched down at ${r.td.kt.toFixed(0)} kt`);
+      worstOver = Math.max(worstOver, r.locOver);
+    }
+  }
+  // base leg at 90°, low enough that the path is still above the join
+  // (the 40° closing leg uses up ~1.2 km of final per km of offset)
+  for (const [id, kt, lat] of [['vector', 400, 6000], ['a320', 290, 6000], ['skylark', 110, 2500]]) {
+    const r = armFrom(id, { distKm: 17, kt, altM: 450, offLat: lat, hdgOff: -90, terrainCap: 150 });
+    assertLanded(r, `${id} 90° intercept at ${kt} kt`);
+    assert.ok(r.locOver < 300, `${id}: flew ${r.locOver.toFixed(0)} m through the localizer from base`);
+    worstOver = Math.max(worstOver, r.locOver);
+  }
+  console.log(`  ✓ armed from cruise at 30°/45°/90° to the runway: all land in the zone (worst localizer overshoot ${worstOver.toFixed(0)} m)`);
+}
+
+{
+  // above the glide path beyond recovery: refuses at once, holds height
+  for (const [id, kt] of [['vector', 350], ['a320', 290], ['skylark', 110]]) {
+    const r = armFrom(id, { distKm: 8, kt, altM: 1800 });
+    assertWentAround(r, `${id} armed 1,800 m up at 8 km`, /TOO HIGH/);
+    assert.ok(r.goAround.t < 2, `${id}: took ${r.goAround.t.toFixed(0)} s to say it was too high`);
+  }
+  // joined the centreline from base with the path already far below
+  assertWentAround(armFrom('a320', { distKm: 12, kt: 290, altM: 700, offLat: 6000, hdgOff: -90 }), 'a320 high base leg', /TOO HIGH/);
+  // far too fast to be slowed in the room available
+  assertWentAround(armFrom('vector', { distKm: 8, kt: 400, altM: 400 }), 'vector 400 kt at 8 km', /TOO FAST/);
+  // wheels forgotten: a go-around, not a write-off
+  const gearUp = armFrom('vector', { distKm: 12, kt: 250, altM: 600, gear: false });
+  assertWentAround(gearUp, 'vector gear up', /GEAR/);
+  assert.ok(gearUp.goAround.ra > 60, `gear check came at ${gearUp.goAround.ra.toFixed(0)} m`);
+  // never established before the runway went by
+  const late = armFrom('typhoon', { distKm: 5, kt: 450, altM: 450, offLat: -2500, hdgOff: 60 });
+  assert.ok(!late.st.crashed && !late.td && late.goAround, `typhoon late arm: ${late.goAround?.why ?? 'no call'}`);
+  console.log('  ✓ too high, too fast, gear up or too late: goes around and says why — no touchdown, no crash');
+}
+
+{
+  // whatever the set-up, the outcome is a landing in the zone or a go-around:
+  // sweep the Vector across speed × distance × height × intercept angle
+  let landed = 0, around = 0;
+  for (const kt of [220, 320, 420]) {
+    for (const distKm of [6, 10, 16]) {
+      for (const altM of [350, 900, 1600]) {
+        for (const [offLat, hdgOff] of [[0, 0], [2500, -40]]) {
+          const r = armFrom('vector', { distKm, kt, altM, offLat, hdgOff, terrainCap: 150 });
+          const tag = `vector ${kt} kt, ${distKm} km, ${altM} m, ${hdgOff}°`;
+          assert.ok(!r.st.crashed, `${tag}: crashed — ${r.st.crashReason}`);
+          assert.equal(r.offBeamDescent, 0, `${tag}: descended outside the beam`);
+          if (r.td) {
+            assert.ok(r.td.rw && r.td.rw.past > 150 && r.td.rw.past < 700 && Math.abs(r.td.rw.cross) < 3.5,
+              `${tag}: touched down ${r.td.rw ? r.td.rw.past.toFixed(0) + ' m in, ' + r.td.rw.cross.toFixed(1) + ' m off' : 'off the runway'}`);
+            assert.ok(r.end && r.end.past < r.end.length - 300, `${tag}: overran`);
+            landed++;
+          } else {
+            assert.ok(r.goAround, `${tag}: neither landed nor went around`);
+            around++;
+          }
+        }
+      }
+    }
+  }
+  console.log(`  ✓ Vector armed from 54 set-ups: ${landed} landings in the zone, ${around} go-arounds, nothing else`);
+}

@@ -193,18 +193,21 @@ export class SoundEngine {
    *  master warning (terrain / gear / overspeed): a two-tone whoop. */
   update(
     throttle: number, thrustFrac: number, airspeed: number, stalled: boolean,
-    time: number, nr = 1, horn = false, alarm = false,
+    time: number, nr = 1, horn = false, alarm = false, live = 1,
   ): void {
     if (!this.ctx) return;
     const t = this.ctx.currentTime;
+    // `live` = fraction of the engines still running (practice failures):
+    // a dead engine windmills — low, quiet — and the note thins out
+    const lv = 0.18 + 0.82 * live;
 
     if (this.kind === 'prop') {
-      const rpm = 0.14 + throttle * 0.86;
+      const rpm = (0.14 + throttle * 0.86) * (0.3 + 0.7 * live);
       const f = 38 + rpm * 92;
       this.oscA.frequency.setTargetAtTime(f + Math.sin(time * 13) * 1.6, t, 0.05);
       this.oscB.frequency.setTargetAtTime(f * 0.5, t, 0.05);
       this.engineFilter.frequency.setTargetAtTime(380 + rpm * 1500, t, 0.08);
-      this.engineGain.gain.setTargetAtTime(0.07 + rpm * 0.17, t, 0.08);
+      this.engineGain.gain.setTargetAtTime((0.07 + rpm * 0.17) * lv, t, 0.08);
       this.jetNoiseGain.gain.setTargetAtTime(0.012 + rpm * 0.025, t, 0.1); // a little engine wash
       this.jetFilter.frequency.setTargetAtTime(500, t, 0.1);
       this.whineGain.gain.setTargetAtTime(0, t, 0.1);
@@ -226,9 +229,9 @@ export class SoundEngine {
       const spool = 0.12 + thrustFrac * 0.88;
       this.engineGain.gain.setTargetAtTime(0.0, t, 0.1);
       this.jetFilter.frequency.setTargetAtTime(220 + spool * 1400, t, 0.18);
-      this.jetNoiseGain.gain.setTargetAtTime(0.05 + spool * 0.3, t, 0.15);
+      this.jetNoiseGain.gain.setTargetAtTime((0.05 + spool * 0.3) * lv, t, 0.15);
       this.whine.frequency.setTargetAtTime(1500 + spool * 2600, t, 0.15);
-      this.whineGain.gain.setTargetAtTime(0.004 + spool * 0.012, t, 0.15);
+      this.whineGain.gain.setTargetAtTime((0.004 + spool * 0.012) * lv, t, 0.15);
     }
 
     const w = clamp(airspeed / 180, 0, 1.4);
@@ -284,6 +287,11 @@ export class SoundEngine {
   }
 
   uiClick(): void { this.blip(1800, 0.06, 0.05, 'triangle', -600); }
+  /** squelch break before a radio call */
+  radio(): void {
+    this.blip(1750, 0.045, 0.03, 'square');
+    setTimeout(() => this.blip(1320, 0.05, 0.026, 'square'), 80);
+  }
   gearThunk(): void { this.thumpNoise(0.28, 0.3, 320); this.blip(140, 0.2, 0.12, 'sine', -60); }
   touchdown(): void { this.thumpNoise(0.4, 0.42, 240); }
   ringChime(): void { this.blip(1244, 0.5, 0.14, 'sine', 240); this.blip(932, 0.4, 0.1, 'sine', 0); }

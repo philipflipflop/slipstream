@@ -1,15 +1,17 @@
 /** localStorage persistence for settings, best times and the logbook. */
 import type { WorldTheme } from './world/heightfield';
 import type { TimeOfDay } from './world/daylight';
+import type { WeatherId } from './world/weather';
 
 export type Quality = 'low' | 'medium' | 'high';
-export type GameMode = 'free' | 'race' | 'approach';
+export type GameMode = 'free' | 'race' | 'approach' | 'job';
 
 export interface SaveData {
   aircraft: string;
   mode: GameMode;
   world: WorldTheme;
   tod: TimeOfDay;
+  wx: WeatherId;
   quality: Quality;
   /** quality-heuristic schema version — bump to re-derive saved defaults */
   qv: number;
@@ -21,6 +23,10 @@ export interface SaveData {
   bestLandings: Record<string, number>;
   /** graded runway landings logged, all aircraft */
   landings: number;
+  /** charter work: money earned, jobs delivered, best single fee */
+  credits: number;
+  jobs: number;
+  bestJob: number;
 }
 
 const QUALITY_VERSION = 2; // v2: 6-core phones (iPhones) rate medium
@@ -33,6 +39,7 @@ export function loadSave(): SaveData {
     mode: 'free',
     world: 'archipelago',
     tod: 'day',
+    wx: 'fair',
     quality: defaultQuality(),
     qv: QUALITY_VERSION,
     invertY: false,
@@ -41,6 +48,9 @@ export function loadSave(): SaveData {
     bestTimes: {},
     bestLandings: {},
     landings: 0,
+    credits: 0,
+    jobs: 0,
+    bestJob: 0,
   };
   try {
     const raw = localStorage.getItem(KEY);

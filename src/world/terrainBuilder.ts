@@ -634,28 +634,59 @@ export function payloadTransfers(p: ChunkPayload): ArrayBuffer[] {
   ] as ArrayBuffer[]; // typed arrays here are always plain ArrayBuffer-backed
 }
 
-/* ---------------------------------------------------- far shell ---- */
+/* ---------------------------------------------------- far shells ---- */
 
 export interface FarPayload {
   far: true;
+  /** which shell this is: 0 = far shell S, 1 = horizon shell H */
+  slot: number;
   ox: number;
   oz: number;
   cells: number;
   cellSize: number;
+  /** lattice coords of vertex (0, 0), in cells */
+  gx0: number;
+  gz0: number;
+  /** cell size of the PARENT lattice this shell blends to (0 = none) */
+  parentCell: number;
+  envelope: boolean;
   positions: Float32Array; // relative to (ox, 0, oz)
   normals: Float32Array;
   colors: Float32Array;
+  /** parent look (see ChunkPayload) — present when parentCell > 0 */
+  baseY: Float32Array | null;
+  baseCols: Float32Array | null;
+  baseNrms: Float32Array | null;
+  /** how many vertices were copied from the previous build (telemetry) */
+  reused: number;
 }
 
+/** collapsed shell surfaces sit exactly on their parent (see lod.SHELL_LIFT
+ *  for why there is no lift) */
+const FAR_LIFT = 0;
+
 /**
- * One coarse mega-mesh of the whole horizon: a (cells+1)² lattice centred on
- * (ox, oz) covering cells·cellSize metres a side. It sits underneath the
- * detailed chunk ring and extends the visible world out to ~30 km, so at
- * altitude the eye meets fogged terrain instead of the edge of the chunk grid.
+ * One coarse mega-mesh of terrain: a (cells+1)² lattice centred on (ox, oz)
+ * covering cells·cellSize metres a side. Two of these underlie the detailed
+ * chunk disc (lod.ts "shells"): the far shell S and, beyond it, the horizon
+ * shell H.
  *
- * Heights take the MINIMUM of the centre and four half-step samples, then
- * drop a few metres more: a conservative lower envelope, so wherever detailed
- * chunks exist they always render strictly above the shell.
+ * `envelope` (S): heights take the MINIMUM of the centre and four half-step
+ * samples, then drop a few metres more — a conservative lower envelope, so
+ * detailed chunks always render strictly above the shell. H uses the plain
+ * height: nothing detailed ever overlaps it, and an envelope at 1800 m cells
+ * would shave every mountain range off the horizon.
+ *
+ * `parentCell` > 0 (S): every vertex also carries the PARENT lattice's look
+ * — its plain heights, its normals, its colours at its texel, interpolated
+ * with the mesh diagonal split — so the shader can collapse S onto exactly
+ * what H renders.
+ *
+ * Every value is a pure function of the vertex's world lattice point (the
+ * height lattice is padded, so even rim normals are true central
+ * differences). Two consequences: the horizon never "swims" between
+ * re-centres, and a rebuild may copy every vertex the PREVIOUS build
+ * (`prev`) already had — a re-centre then costs only the new strip.
  */
 export function buildFarPayload(
   gen: WorldGen,
@@ -663,38 +694,112 @@ export function buildFarPayload(
   oz: number,
   cells: number,
   cellSize: number,
+  parentCell = 0,
+  envelope = true,
+  prev: FarPayload | null = null,
+  slot = 0,
 ): FarPayload {
   const n = cells + 1;
   const half = (cells * cellSize) / 2;
   // the lattice origin lands on whole cell multiples (recentre snapping
-  // guarantees it), so shellVertexHeight grid coords are exact integers
+  // guarantees it), so lattice coords are exact integers
   const gx0 = Math.round((ox - half) / cellSize);
   const gz0 = Math.round((oz - half) / cellSize);
-  const lat = new Float32Array(n * n);
-  for (let j = 0; j < n; j++) {
-    const wz = oz - half + j * cellSize;
-    for (let i = 0; i < n; i++) {
-      lat[j * n + i] = gen.heightAt(ox - half + i * cellSize, wz);
+
+  // raw heights, padded one cell all round, evaluated on demand (a rebuild
+  // that reuses most of the previous shell touches only the new strip)
+  const padN = n + 2;
+  const lat = new Float32Array(padN * padN).fill(NaN);
+  const latH = (i: number, j: number): number => {
+    const o = (j + 1) * padN + (i + 1);
+    let h = lat[o];
+    if (h !== h) {
+      h = gen.heightAt((gx0 + i) * cellSize, (gz0 + j) * cellSize);
+      lat[o] = h;
+      h = lat[o]; // float32-rounded, like every later read
     }
-  }
-  const latH = (i: number, j: number) =>
-    lat[Math.min(Math.max(j, 0), cells) * n + Math.min(Math.max(i, 0), cells)];
+    return h;
+  };
 
   const positions = new Float32Array(n * n * 3);
   const normals = new Float32Array(n * n * 3);
   const colors = new Float32Array(n * n * 3);
+  const hasBase = parentCell > 0;
+  const baseY = hasBase ? new Float32Array(n * n) : null;
+  const baseCols = hasBase ? new Float32Array(n * n * 3) : null;
+  const baseNrms = hasBase ? new Float32Array(n * n * 3) : null;
   const colorTmp: number[] = [0, 0, 0];
+
+  // parent lattice values (height, colour, normal), cached per point
+  const pCache = new Map<number, Float32Array>();
+  const pRaw = new Map<number, number>();
+  const pKey = (gx: number, gz: number): number => (gx + 1048576) * 2097152 + (gz + 1048576);
+  const pH = (gx: number, gz: number): number => {
+    const k = pKey(gx, gz);
+    let h = pRaw.get(k);
+    if (h === undefined) {
+      h = Math.fround(gen.heightAt(gx * parentCell, gz * parentCell));
+      pRaw.set(k, h);
+    }
+    return h;
+  };
+  const parentAt = (gx: number, gz: number): Float32Array => {
+    const k = pKey(gx, gz);
+    let p = pCache.get(k);
+    if (p === undefined) {
+      p = new Float32Array(7);
+      const hc = pH(gx, gz);
+      const nx = pH(gx - 1, gz) - pH(gx + 1, gz);
+      const nz = pH(gx, gz - 1) - pH(gx, gz + 1);
+      const ny = 2 * parentCell;
+      const il = 1 / Math.hypot(nx, ny, nz);
+      gen.colorAt(gx * parentCell, gz * parentCell, hc, 1 - ny * il, colorTmp, parentCell);
+      p[0] = hc;
+      p[1] = colorTmp[0]; p[2] = colorTmp[1]; p[3] = colorTmp[2];
+      p[4] = nx * il; p[5] = ny * il; p[6] = nz * il;
+      pCache.set(k, p);
+    }
+    return p;
+  };
+
+  const canReuse = prev !== null && prev.cellSize === cellSize &&
+    prev.parentCell === parentCell && prev.envelope === envelope;
+  const dI = canReuse ? gx0 - prev!.gx0 : 0;
+  const dJ = canReuse ? gz0 - prev!.gz0 : 0;
+  const pn = canReuse ? prev!.cells + 1 : 0;
+  let reused = 0;
 
   let v = 0;
   for (let j = 0; j < n; j++) {
-    const wz = oz - half + j * cellSize;
-    for (let i = 0; i < n; i++) {
-      const wx = ox - half + i * cellSize;
-      const hc = lat[j * n + i];
-      const h = shellVertexHeight(gen, gx0 + i, gz0 + j, cellSize);
+    const wz = (gz0 + j) * cellSize;
+    const pj = j + dJ;
+    for (let i = 0; i < n; i++, v++) {
+      const wx = (gx0 + i) * cellSize;
       positions[v * 3] = wx - ox;
-      positions[v * 3 + 1] = h;
       positions[v * 3 + 2] = wz - oz;
+
+      const pi = i + dI;
+      if (canReuse && pi >= 0 && pi < pn && pj >= 0 && pj < pn) {
+        const pv = pj * pn + pi;
+        const pp = prev!;
+        positions[v * 3 + 1] = pp.positions[pv * 3 + 1];
+        for (let c = 0; c < 3; c++) {
+          normals[v * 3 + c] = pp.normals[pv * 3 + c];
+          colors[v * 3 + c] = pp.colors[pv * 3 + c];
+        }
+        if (hasBase) {
+          baseY![v] = pp.baseY![pv];
+          for (let c = 0; c < 3; c++) {
+            baseCols![v * 3 + c] = pp.baseCols![pv * 3 + c];
+            baseNrms![v * 3 + c] = pp.baseNrms![pv * 3 + c];
+          }
+        }
+        reused++;
+        continue;
+      }
+
+      const hc = latH(i, j);
+      positions[v * 3 + 1] = envelope ? shellVertexHeight(gen, gx0 + i, gz0 + j, cellSize) : hc;
 
       const nx = latH(i - 1, j) - latH(i + 1, j);
       const nz = latH(i, j - 1) - latH(i, j + 1);
@@ -708,13 +813,55 @@ export function buildFarPayload(
       colors[v * 3] = colorTmp[0];
       colors[v * 3 + 1] = colorTmp[1];
       colors[v * 3 + 2] = colorTmp[2];
-      v++;
+
+      if (hasBase) {
+        const gx = Math.floor(wx / parentCell);
+        const gz = Math.floor(wz / parentCell);
+        const tx = wx / parentCell - gx;
+        const tz = wz / parentCell - gz;
+        const a = parentAt(gx, gz);
+        const b = parentAt(gx + 1, gz);
+        const c2 = parentAt(gx, gz + 1);
+        const d = parentAt(gx + 1, gz + 1);
+        baseY![v] = splitLerp(a[0], b[0], c2[0], d[0], tx, tz) + FAR_LIFT;
+        let bx = 0, by = 0, bz = 0;
+        for (let c = 0; c < 3; c++) {
+          baseCols![v * 3 + c] = splitLerp(a[1 + c], b[1 + c], c2[1 + c], d[1 + c], tx, tz);
+          const nn = splitLerp(a[4 + c], b[4 + c], c2[4 + c], d[4 + c], tx, tz);
+          if (c === 0) bx = nn; else if (c === 1) by = nn; else bz = nn;
+        }
+        const bl = Math.hypot(bx, by, bz);
+        baseNrms![v * 3] = bx / bl;
+        baseNrms![v * 3 + 1] = by / bl;
+        baseNrms![v * 3 + 2] = bz / bl;
+      }
     }
   }
 
-  return { far: true, ox, oz, cells, cellSize, positions, normals, colors };
+  return {
+    far: true, slot, ox, oz, cells, cellSize, gx0, gz0, parentCell, envelope,
+    positions, normals, colors, baseY, baseCols, baseNrms, reused,
+  };
+}
+
+/** A detached copy to keep as the next build's `prev` (the original's
+ *  buffers are transferred to the main thread). */
+export function cloneFar(p: FarPayload): FarPayload {
+  return {
+    ...p,
+    positions: p.positions.slice(),
+    normals: p.normals.slice(),
+    colors: p.colors.slice(),
+    baseY: p.baseY ? p.baseY.slice() : null,
+    baseCols: p.baseCols ? p.baseCols.slice() : null,
+    baseNrms: p.baseNrms ? p.baseNrms.slice() : null,
+  };
 }
 
 export function farTransfers(p: FarPayload): ArrayBuffer[] {
-  return [p.positions.buffer, p.normals.buffer, p.colors.buffer] as ArrayBuffer[];
+  const out = [p.positions.buffer, p.normals.buffer, p.colors.buffer];
+  if (p.baseY) out.push(p.baseY.buffer);
+  if (p.baseCols) out.push(p.baseCols.buffer);
+  if (p.baseNrms) out.push(p.baseNrms.buffer);
+  return out as ArrayBuffer[];
 }
