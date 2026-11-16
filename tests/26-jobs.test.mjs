@@ -75,7 +75,7 @@ for (const spec of CATALOG) {
   assert.ok(Math.abs(veryLate.pay / job.pay - 0.6) < 0.01, 'lateness should bottom out at −40%');
   assert.ok(thump.pay < onTime.pay && rough.pay < onTime.pay && rough.comfortMul < 1);
   assert.equal(scoreJob(cargo, { time: job.par, landing: 100, comfort: 0 }).pay, job.pay, 'freight does not mind the ride');
-  assert.ok(scoreJob(job, { time: job.par, landing: null, comfort: 1 }).landMul === 0.9, 'ungraded (helicopter) landing');
+  assert.equal(scoreJob(job, { time: job.par, landing: null, comfort: 1 }).pay, job.pay, 'an ungraded (helicopter) landing should be neutral');
   assert.ok(scoreJob(job, { time: job.par, landing: 0, comfort: 1 }).landMul === 0.6);
   let prev = Infinity;
   for (let t = 0.5; t <= 3; t += 0.05) {

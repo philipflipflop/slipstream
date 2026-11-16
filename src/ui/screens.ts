@@ -507,7 +507,10 @@ export class Screens {
 
   /** Arrival debrief: what the job paid, and why. */
   showJobDone(r: JobReport, stats: DebriefStats): void {
-    const pct = (k: number): string => `${k >= 1 ? '+' : '−'}${Math.abs(Math.round((k - 1) * 100))}%`;
+    const pct = (k: number): string => {
+      const p = Math.round((k - 1) * 100);
+      return p === 0 ? '±0%' : `${p > 0 ? '+' : '−'}${Math.abs(p)}%`;
+    };
     const extra = `
       <div class="cell"><div class="k">Paid</div><div class="v green">${r.pay.toLocaleString('en-US')} cr</div></div>
       <div class="cell"><div class="k">Fee</div><div class="v">${r.fee.toLocaleString('en-US')} cr</div></div>

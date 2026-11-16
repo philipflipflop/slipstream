@@ -112,3 +112,38 @@ for (const id of ['islander', 'a320', 'meridian', 'typhoon']) {
   assert.ok(st.thrustFrac > 0.5, 'relight gave no thrust');
   console.log('  ✓ singles: one press and it is a glider; relight restores thrust');
 }
+
+// ---- 4. the autopilot with an engine failure ----
+// One of two out: it still holds height and heading. Everything out: there
+// is no height to hold — it must fly best-glide speed (never the stall: left
+// chasing altitude it parked the Falcon IN the stall for two minutes).
+{
+  const { Autopilot } = await import('../.test-build/aircraft/autopilot.js');
+  for (const spec of fixed) {
+    const n = spec.engines ?? 1;
+    for (const out of n > 1 ? [1, n] : [n]) {
+      const v = stallSpeed(spec, 0) * 1.9;
+      const { st, inp } = airborne(spec, v, 2500, { throttle: 0.6 });
+      const ap = new Autopilot();
+      for (let t = 0; t < 5; t += dt) stepFlight(spec, st, inp, dt, flat);
+      ap.engage(st, inp.throttle);
+      let stalledFor = 0, worst = 0, y0 = 0;
+      for (let t = 0; t < 150 && st.pos.y > 300; t += dt) {
+        if (t > 8) inp.enginesOut = out;
+        ap.update(spec, st, inp, dt, st.pos.y);
+        stepFlight(spec, st, inp, dt, flat);
+        if (st.stalled) stalledFor += dt;
+        if (t > 70) worst = Math.max(worst, Math.abs(st.airspeed / bestGlideSpeed(spec, st.pos.y) - 1));
+        if (Math.abs(t - 8) < dt / 2) y0 = st.pos.y;
+      }
+      assert.ok(!st.crashed && stalledFor === 0, `${spec.id} ${out}/${n} out under AP: stalled ${stalledFor.toFixed(0)} s`);
+      if (out === n) {
+        assert.ok(ap.gliding, `${spec.id}: AP not in glide mode with every engine out`);
+        assert.ok(worst < 0.13, `${spec.id}: AP glide is ${(worst * 100).toFixed(0)}% off best-glide speed`);
+      } else {
+        assert.ok(!ap.gliding && Math.abs(st.pos.y - y0) < 60, `${spec.id}: lost ${(y0 - st.pos.y).toFixed(0)} m on one engine under AP`);
+      }
+    }
+  }
+  console.log('  ✓ autopilot: holds height and heading on one engine; with none it flies best-glide speed and never stalls');
+}

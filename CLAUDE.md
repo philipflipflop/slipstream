@@ -131,6 +131,15 @@ Cloudflare builds with **npm 10.9.2**; local npm is 11. Two rules:
   version ignored density and was 36% slow at 6 km. Sign conventions that
   cost an hour: +rollAngle is LEFT bank (hold wings level with
   `roll = +rollAngle·k`), +angVel.y is yaw LEFT, +inp.yaw is right rudder.
+  With EVERY engine out the autopilot's basic modes fly best-glide speed
+  through the vertical-speed loop (`ap.gliding`, annunciated AP · GLIDE) —
+  left holding altitude the speed protection parked each airframe just
+  above the stall and the Falcon in it; speed-on-pitch straight onto the
+  elevator rings at the phugoid, so don't "simplify" it to that.
+- `st.gForce` is aerodynamic force along body-up over weight: 1.0 in level
+  flight (pinned in tests/05). It carried a `+ (1 − V/500)` bias for a long
+  time — the G-meter read 1.7–1.9 straight and level — which only surfaced
+  when job passengers (`Comfort`) complained about a smooth ILS.
 - THE TOWER (`src/nav/radio.ts` pure, tests/25): landing clearance once
   established on final to a towered field (international or `major`) —
   "continue approach" while `traffic.runwayOccupied(app)`, "go around" if
@@ -148,7 +157,7 @@ Cloudflare builds with **npm 10.9.2**; local npm is 11. Two rules:
   pays `scoreJob` = fee × punctuality × landing grade × ride, and the
   destination becomes `spawnField` with a fresh board. A fixed-wing
   arrival that was not a graded runway landing AT the destination gets no
-  landing credit (0.6); helicopters are not graded (0.9).
+  landing credit (0.6); helicopters are not graded (neutral).
 - `src/world/lod.ts` — the terrain LOD POLICY, pure and fully tested
   (tests/19). Detail is a function of DISTANCE, not time: each chunk level
   (res 14/28/56/112) has a blend BAND, and swaps happen only in the dead
@@ -533,6 +542,12 @@ Cloudflare builds with **npm 10.9.2**; local npm is 11. Two rules:
   `ldg=`, `warn=`). Dark screenshots legitimately compress below 100 kB —
   don't use a large min-size gate to detect boot-screen captures on night
   scenes.
+- SWEEPS worth re-running after terrain or traffic changes (they found
+  nothing last time, which is the point): every runway of every field in
+  all three themes dry, level, glide path and NPC climb-out clear; every
+  towered field × 25 simulated minutes of movements with nothing
+  underground or off the runway; every (field, aircraft) job board
+  non-empty. tests/17, 20 and 26 only cover the home field.
 - UI FLOWS without clicking through menus: `__sim` only exists with
   `autofly=1`; from there `__sim.save.mode = 'job'; __sim.openJobs()`,
   `document.querySelector('.job-card').click()`, `__sim.finishJob()` walk

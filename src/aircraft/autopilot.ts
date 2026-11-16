@@ -12,7 +12,7 @@
  *
  * Pure logic — no DOM/scene dependencies, so it's unit-testable.
  */
-import { FlightState, ControlInputs, approachSpeed } from './flightModel';
+import { FlightState, ControlInputs, approachSpeed, bestGlideSpeed } from './flightModel';
 import type { AircraftSpec } from './types';
 import type { IlsApproach } from '../nav/ils';
 import { clamp, wrapAngle } from '../core/math';
@@ -37,6 +37,8 @@ export class Autopilot {
    *  bug — a vertical-speed selector, like the VS wheel on a real AP. */
   targetVs = 5.08;
   private minSpd = 30;
+  /** every engine is out: the basic modes fly best-glide speed, not altitude */
+  gliding = false;
   private thrInt = 0;
   private pitchTrim = 0;
 
@@ -184,6 +186,20 @@ export class Autopilot {
     const altErr = this.targetAlt - st.pos.y;
     let vsTarget = clamp(altErr * 0.15, -this.targetVs * 1.2, this.targetVs) * spdMargin;
     vsTarget -= (1 - spdMargin) * 5;
+
+    // EVERY ENGINE OUT: there is no altitude to hold. The elevator flies
+    // best-glide speed instead (speed on pitch) and the heading hold keeps
+    // working — the most range for the height you have, hands free while
+    // you pick a field. (Left chasing altitude, the speed protection parked
+    // each airframe just above its stall, and the Falcon IN it.)
+    this.gliding = (c.enginesOut ?? 0) >= (spec.engines ?? 1);
+    if (this.gliding) {
+      // through the vertical-speed loop, not straight onto the elevator
+      // (speed-on-pitch alone rings at the phugoid): sink at roughly the
+      // glide's own rate, less when fast, more when slow
+      const vg = bestGlideSpeed(spec, st.pos.y);
+      vsTarget = clamp(-vg / 10 + (st.airspeed - vg) * 0.4, -vg * 0.45, 2.5);
+    }
     const vsErr = vsTarget - st.vel.y;
 
     // trim integrator (with anti-windup) removes steady-state droop

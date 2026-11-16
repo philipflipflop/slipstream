@@ -1660,7 +1660,7 @@ class Game {
       apMode: this.autopilot.approach
         ? ({ loc: 'AP · LOC', gs: 'AP · G/S', flare: 'FLARE', rollout: 'ROLLOUT' } as Record<string, string>)[
             this.autopilot.apprPhase] ?? 'AP'
-        : this.route.engaged ? 'AP · NAV' : 'AP',
+        : this.autopilot.gliding ? 'AP · GLIDE' : this.route.engaged ? 'AP · NAV' : 'AP',
       warn: this.warn,
       stalled: st.stalled,
       afterburner: !!spec.afterburner && c.throttle >= 0.995,

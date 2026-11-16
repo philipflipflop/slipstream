@@ -220,8 +220,11 @@ export function stepFlight(
   _force.z -= T;
   if (dead > 0) _force.z += qbar * S * (spec.engine === 'prop' ? 0.016 : 0.006) * (dead / nEng);
 
-  // g-force (aero+thrust accel along body up, in g)
-  st.gForce = _force.y / (spec.mass * GRAV) + Math.max(0, 1 - V * 0.002);
+  // g-force: what the seat feels — aerodynamic force along body-up over
+  // weight (1.0 in level flight; the wheels make it 1 on the ground, below).
+  // It used to add a speed-dependent bias (1 − V/500) on top: the G-meter
+  // read 1.7–1.9 in steady level flight at every speed anyone flies.
+  st.gForce = _force.y / (spec.mass * GRAV);
 
   // body forces → world, add gravity
   _force.applyQuaternion(st.quat);

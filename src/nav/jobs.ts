@@ -170,7 +170,8 @@ export function scoreJob(job: Job, r: JobResult): JobPay {
   const timeMul = r.time <= job.par
     ? 1 + 0.15 * Math.min(1, (job.par - r.time) / (0.2 * job.par))
     : 1 - Math.min(0.4, (r.time - job.par) / job.par);
-  const landMul = r.landing === null ? 0.9 : 0.6 + 0.4 * (Math.max(0, Math.min(100, r.landing)) / 100);
+  // (no grade to give — helicopters — is neutral, not a deduction)
+  const landMul = r.landing === null ? 1 : 0.6 + 0.4 * (Math.max(0, Math.min(100, r.landing)) / 100);
   const comfortMul = job.comfort ? 0.75 + 0.25 * Math.max(0, Math.min(1, r.comfort)) : 1;
   const k = timeMul * landMul * comfortMul;
   return {

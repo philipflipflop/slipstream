@@ -197,3 +197,28 @@ function cruise(spec, v, alt = 800) {
   assert.ok(stalledFrames < 90, `fbw fighter spent ${stalledFrames} frames stalled`);
   console.log('  ✓ fly-by-wire alpha limiter prevents deep stall');
 }
+
+// the G-meter reads 1.0 in steady level flight (it used to read 1.7–1.9:
+// a speed-dependent bias was added on top of the lift) and ~2 in a 60° bank
+{
+  const { Autopilot } = await import('../.test-build/aircraft/autopilot.js');
+  const { CATALOG } = await import('../.test-build/aircraft/catalog.js');
+  const { stallSpeed } = await import('../.test-build/aircraft/flightModel.js');
+  for (const spec of CATALOG.filter((s) => s.engine !== 'heli')) {
+    const v = stallSpeed(spec, 0) * 1.8;
+    const st = createState();
+    st.pos.set(0, 1500, 0); st.vel.set(0, 0, -v); st.airspeed = v; st.onGround = false; st.spool = 0.6;
+    const inp = { pitch: 0, roll: 0, yaw: 0, throttle: 0.6, flaps: 0, gearDown: !spec.retractableGear, brakes: false, airbrake: false };
+    const ap = new Autopilot();
+    for (let t = 0; t < 3; t += 1 / 120) stepFlight(spec, st, inp, 1 / 120, () => 0);
+    ap.engage(st, inp.throttle);
+    let sum = 0, n = 0;
+    for (let t = 0; t < 40; t += 1 / 120) {
+      ap.update(spec, st, inp, 1 / 120, st.pos.y);
+      stepFlight(spec, st, inp, 1 / 120, () => 0);
+      if (t > 25) { sum += st.gForce; n++; }
+    }
+    assert.ok(Math.abs(sum / n - 1) < 0.06, `${spec.id}: G-meter reads ${(sum / n).toFixed(2)} in level flight`);
+  }
+  console.log('  ✓ G-meter: 1.0 g in steady level flight, every fixed-wing aircraft');
+}
