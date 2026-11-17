@@ -227,7 +227,9 @@ as cyan arrowheads with their height relative to yours in hundreds of feet, ship
 ticks — and the **tower talks**: "cleared to land" with the wind once you are established
 on final, "continue approach" if something is still on the runway, "go around" if it has
 not cleared by short final, and "traffic, 2 o'clock, 3 km, 500 ft above" when something
-gets close. Out at sea, **freighters,
+gets close. All of it is **solid** — other aircraft in the air and on the ground, apron
+vehicles, ships: fly or taxi into one and the flight is over (traffic on final breaks off
+rather than share a glide path with you). Out at sea, **freighters,
 ferries and small boats** trail wakes and steer clear of the shallows. Races
 keep the air to themselves.
 

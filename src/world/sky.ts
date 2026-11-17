@@ -250,15 +250,16 @@ export class Sky {
    * Where the eye is relative to the weather, every frame: `under` 1 =
    * beneath the cloud deck (grey light, grey sky) … 0 = above it (the day's
    * own palette); `white` 0..1 = how deep inside cloud, when everything —
-   * sky included — goes to `cloud`. Fog colour follows, so haze, water and
-   * the dome's horizon stay one colour (the HAZE rules in CLAUDE.md).
+   * sky included — goes to `cloud`; `veil` 0..1 = how much of the haze is
+   * that cloud. Fog colour follows, so haze, water and the dome's horizon
+   * stay one colour (the HAZE rules in CLAUDE.md).
    */
-  setAir(under: number, white: number, cloud: THREE.Color): void {
+  setAir(under: number, white: number, cloud: THREE.Color, veil = white): void {
     const wx = this.wx;
     const k = under * (wx?.grey ?? 0);
     const u = (this.dome.material as THREE.ShaderMaterial).uniforms;
     (u.uZenith.value as THREE.Color).lerpColors(this.zenith0, this.zenithGrey, k);
-    this.fogColor.lerpColors(this.horizon0, this.horizonGrey, k).lerp(cloud, white);
+    this.fogColor.lerpColors(this.horizon0, this.horizonGrey, k).lerp(cloud, veil);
     (u.uHorizon.value as THREE.Color).copy(this.fogColor);
     (u.uGroundGlow.value as THREE.Color).copy(this.fogColor).multiplyScalar(this.preset.groundGlow);
     this.sceneFogColor.setRGB(this.fogColor.r, this.fogColor.g, this.fogColor.b, THREE.SRGBColorSpace);

@@ -121,18 +121,47 @@ Cloudflare builds with **npm 10.9.2**; local npm is 11. Two rules:
     pixel on a full-screen triangle; `deckDensity` is what the sim flies
     through. Change the shape in BOTH places or what you see stops being
     what you fly into (tests/24 pins the TS side only).
-  · The march, and what each part is for: steps sized by clearance to the
-    surfaces (one lookup bounds the layer; the detail lookup only near
-    it); the entry point solved by false position (bisecting a 500 m far
-    step left 60 m terraces — contour lines on every distant cloud);
-    jitter on the FIRST step only (a per-step factor compounds with range:
-    far cloud turned to grain); geometry relaxing onto the mean surfaces
-    with range (`uFlat`) while lighting keeps full relief; extinction =
-    the sim's in-cloud visibility near the eye (or the chase-view aircraft
-    vanishes behind a wall), tightening with range. It writes depth
-    (analytic, both depth-buffer paths): transparent things beyond it are
-    hidden. Costs ~10–20% of frame rate on the dev Intel GPU; step budget
-    24 on touch/low, 40 otherwise.
+  · The march, and the fault each part answers (second playtest: "a tad
+    pixelated … squaring shapes/lines", "a bit of flicker in/on/amongst
+    them", "morph/grow/scale up when flying above them", "repeat similar
+    patterns"):
+    – SQUARES: the fields were 256² value noise in 8 bits — lattice-blocky,
+      a crease at every texel edge, a 1 m terrace per byte, all shown up by
+      the lighting. Now gradient noise on two half-offset lattices, 512²,
+      half-float texture with hand-built mips; the lighting slope is taken
+      across ≥ 1.5 texels.
+    – FLICKER: (1) no per-pixel jitter at all (static grain under a moving
+      picture sparkles); (2) every lookup is filtered for the pixel's
+      footprint ALONG the ray (`foot1`: ×20 at the horizon) — sampled at
+      its width the far tops shimmered in horizontal dashes; (3) the step
+      floor is half that footprint, not a share of the range (6% of the
+      range skipped whole crests on alternate frames); (4) entry solved by
+      false position (bisection left terraces → contour lines); (5) a ray
+      still skimming as the budget runs out strides on, and what is left
+      of it is painted as sunlit cloud about there.
+    – GROWING: relief keeps its full height to `uFlat`/2 (≥ 20 km) and
+      relaxes onto the mean surfaces beyond; never bring that inside the
+      range where relief is more than a few pixels high. Small lumps come
+      in through the footprint filter, at pixel scale.
+    – REPEATS: no lookup is on the plain 26 km tile grid — a slow warp
+      (sines of incommensurate wavelength), the detail lookup rotated, and
+      the regional character (`regionAt`: relief, towers) a quasi-periodic
+      function, not a tile. tests/24 pins "one tile on is different".
+    – BLOTCHES: brightness is set where the ray ENTERS (lit top / shaded
+      base), not by penetration depth (near cloud is thin to the eye); and
+      main hands `sky.setAir` a `veil` = share of the visibility the cloud
+      has taken, so haze inside a sunlit wisp is cloud-white, not horizon.
+    Extinction = the sim's in-cloud visibility near the eye (or the
+    chase-view aircraft vanishes behind a wall), tightening with range. It
+    writes depth (analytic, both depth-buffer paths). Step budget 44 on
+    touch/low, 64 otherwise.
+  · PROVING A MARCH CHANGE: sub-pixel camera sweeps do NOT show its faults
+    (both builds scored ~50 flicker pixels). Compare against brute force
+    instead: paused frame, screenshot, then on the deck material set
+    `defines.STEPS = 700; uniforms.uSlope.value = 4; needsUpdate = true`,
+    screenshot, diff. Pixels that differ are the ones that flicker in
+    motion. Now ~0.05% of pixels from above and ~0.15% skimming the tops
+    on desktop (skimming was 1.8%), ~0.8% skimming on the phone budget.
   · Per-weather character lives in the preset's deck (relief / towers /
     ragged / soft / lumpy): rain is smooth swells with towers (WMO:
     "diffuse and fairly smooth … cumulus may rise above its upper
@@ -466,7 +495,20 @@ Cloudflare builds with **npm 10.9.2**; local npm is 11. Two rules:
   30 km bubble, terrain look-ahead, drained during Ring Rush; airborne NPCs
   must NOT castShadow — a flier crossing the sun's ±420 m player-chasing
   shadow box sweeps a popping shadow over shorelines ("water edge
-  flicker"). No collision, like the rest of the airport furniture.
+  flicker").
+  NPCs ARE SOLID (`traffic.hit`, test 17): flying, runway, parked aircraft,
+  apron vehicles and ships, as boxes per fuselage / wing / tail in each
+  model's own frame (`SOLID_*` — change a model, change its boxes), swept
+  against relative motion (two jets close 8 m a frame). main crashes the
+  player on a hit, in the air AND on the ground, and cannon rounds stop on
+  them. What had to change so that solid NPCs never kill a player who did
+  nothing wrong — keep all four: `clearMovements` at every flight start
+  (a restart could put you on the spot where an NPC was lined up); no
+  movement is put on stage within 2.5 km of the player; a departure never
+  taxis onto a runway the player is on (`playerOn`) and gives way mid-taxi;
+  an NPC on final breaks off when the player is airborne within 1.8 km at
+  about its height (`update`'s `py`) — it would otherwise run a trainer
+  down from behind on its own glide path.
   Two of the cruisers are overflights at 9–12 km with contrails
   (`trailGeo`: vertex-alpha ribbons; the same builder makes ship wakes).
   RUNWAY MOVEMENTS (`updateOps`/`stepOps`, internationals + regionals):

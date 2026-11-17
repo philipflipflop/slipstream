@@ -329,6 +329,88 @@ interface Ship {
   checkT: number;
 }
 
+/* -------------------------------------------------- hit volumes ---- */
+
+/** A solid as boxes in the model's own frame (forward −Z, y from the wheels
+ *  or the waterline): [cx, cy, cz, half-x, half-y, half-z]. Fuselage, wing
+ *  and tail are separate boxes — you can fly under a wing, not through it. */
+type Box = readonly [number, number, number, number, number, number];
+const SOLID_AIRLINER: readonly Box[] = [
+  [0, 3.2, 1.5, 1.8, 1.8, 17.5],   // fuselage
+  [0, 2.1, 3.0, 15.5, 0.5, 4.5],   // wing (swept: the box spans the sweep)
+  [0, 7.4, 16.5, 0.4, 2.6, 2.8],   // fin
+  [0, 4.2, 17.5, 5.6, 0.3, 2.0],   // tailplane
+];
+const SOLID_GA: readonly Box[] = [
+  [0, 1.35, -0.5, 0.7, 0.75, 4.4],
+  [0, 2.2, -0.6, 5.1, 0.2, 0.8],
+  [0, 2.3, 3.5, 1.7, 0.8, 0.6],
+];
+const SOLID_VEHICLE: Record<VehicleKind, readonly Box[]> = {
+  tug: [[0, 0.9, -0.1, 0.8, 0.9, 2.3]],
+  fuel: [[0, 1.2, -0.1, 1.15, 1.2, 3.3]],
+  bus: [[0, 1.55, 0, 1.25, 1.55, 4.7]],
+  carts: [[0, 0.8, 0, 0.7, 0.8, 3.2]],
+};
+const SOLID_SHIP: Record<ShipKind, readonly Box[]> = {
+  cargo: [[0, 3.5, 0, 11, 4, 82], [0, 12.5, -10, 9, 5.5, 52], [0, 16, 64, 9.5, 8.5, 6.5], [0, 28, 67, 2.5, 4, 3]],
+  ferry: [[0, 2.5, 0, 7.5, 3, 42.5], [0, 9, 4, 6.5, 3.5, 28], [0, 15.5, 18, 2.5, 3, 3.5]],
+  boat: [[0, 0.8, -0.4, 2.3, 1.3, 8.6], [0, 3.2, 1.5, 1.6, 1.1, 2.2]],
+};
+/** bounding radius of each set of boxes, m (broad phase) */
+const reachOf = (s: readonly Box[]): number => {
+  let r = 0;
+  for (const b of s) r = Math.max(r, Math.hypot(Math.abs(b[0]) + b[3], Math.abs(b[1]) + b[4], Math.abs(b[2]) + b[5]));
+  return r;
+};
+const REACH = new Map<readonly Box[], number>();
+for (const s of [SOLID_AIRLINER, SOLID_GA, ...Object.values(SOLID_VEHICLE), ...Object.values(SOLID_SHIP)]) REACH.set(s, reachOf(s));
+
+const HIT_MIDAIR = 'MID-AIR COLLISION';
+const HIT_RUNWAY = 'COLLIDED WITH AN AIRCRAFT ON THE RUNWAY';
+const HIT_PARKED = 'HIT A PARKED AIRCRAFT';
+const HIT_VEHICLE = 'HIT A GROUND VEHICLE';
+const HIT_SHIP = 'FLEW INTO A SHIP';
+
+/** Sphere (radius r, at the model-frame point) against a set of boxes. */
+function boxesHit(shape: readonly Box[], bx: number, by: number, bz: number, r: number): boolean {
+  for (const b of shape) {
+    const dx = Math.max(Math.abs(bx - b[0]) - b[3], 0);
+    const dy = Math.max(Math.abs(by - b[1]) - b[4], 0);
+    const dz = Math.max(Math.abs(bz - b[2]) - b[5], 0);
+    if (dx * dx + dy * dy + dz * dz <= r * r) return true;
+  }
+  return false;
+}
+
+/**
+ * A sphere that moved (rvx, rvy, rvz)·dt RELATIVE to a solid over the last
+ * step, against that solid where it is now. Swept in sub-steps no longer
+ * than the sphere: two jets close at 500 m/s — 8 m a frame, more than a
+ * fuselage is wide — and an end-of-step test alone would pass through.
+ */
+function solidHit(
+  shape: readonly Box[], ox: number, oy: number, oz: number, yaw: number,
+  x: number, y: number, z: number, r: number, rvx: number, rvy: number, rvz: number, dt: number,
+): boolean {
+  const travel = Math.hypot(rvx, rvy, rvz) * dt;
+  const reach = REACH.get(shape)! + r + travel;
+  const ex0 = x - ox;
+  const ey0 = y - oy;
+  const ez0 = z - oz;
+  if (Math.abs(ex0) > reach || Math.abs(ez0) > reach || Math.abs(ey0) > reach) return false;
+  const c = Math.cos(yaw);
+  const s = Math.sin(yaw);
+  const n = Math.min(Math.max(Math.ceil(travel / Math.max(r, 1.5)), 1), 12);
+  for (let k = 0; k < n; k++) {
+    const back = (k / n) * dt;
+    const ex = ex0 - rvx * back;
+    const ez = ez0 - rvz * back;
+    if (boxesHit(shape, ex * c - ez * s, ey0 - rvy * back, ex * s + ez * c, r)) return true;
+  }
+  return false;
+}
+
 /* ---------------------------------------------- airport movements ---- */
 
 const TAN_GS = Math.tan((3 * Math.PI) / 180);
@@ -419,6 +501,9 @@ export class Traffic {
     grow: number;
     /** apron service vehicles doing slow laps of the stand row */
     movers: Array<{ m: THREE.Object3D; along: number; side: number; dir: number }>;
+    /** everything standing or driving on the aprons, with its hit volume
+     *  (positions are in the field's own heading-0 frame, like the meshes) */
+    solids: Array<{ m: THREE.Object3D; shape: readonly Box[]; reason: string }>;
     def: AirfieldDef;
     /** runway movements (internationals and regional fields) */
     ops: FieldOps | null;
@@ -507,6 +592,70 @@ export class Traffic {
     return false;
   }
 
+  /**
+   * Is a sphere of radius `r` at (x, y, z) touching an NPC — a parked,
+   * taxiing or flying aircraft, an apron vehicle, a ship? Returns the crash
+   * reason, or null. (vx, vy, vz) and `dt` are the sphere's own velocity and
+   * the step just taken: the test is swept against each mover's motion.
+   * Volumes are boxes per fuselage / wing / tail (see SOLID_*), tested where
+   * the models are DRAWN — same positions, same headings.
+   */
+  hit(x: number, y: number, z: number, r: number, vx = 0, vy = 0, vz = 0, dt = 0): string | null {
+    for (const f of this.flying) {
+      const p = f.group.position;
+      const shape = f.kind === 'airliner' ? SOLID_AIRLINER : SOLID_GA;
+      if (solidHit(shape, p.x, p.y, p.z, f.group.rotation.y, x, y, z, r,
+        vx - Math.sin(f.hdg) * f.spd, vy, vz + Math.cos(f.hdg) * f.spd, dt)) return HIT_MIDAIR;
+    }
+    for (const rec of this.parked.values()) {
+      const def = rec.def;
+      const dx = x - def.x;
+      const dz = z - def.z;
+      const span = def.length * 0.5 + 2600;
+      if (rec.grow >= 1 && rec.solids.length > 0 && y < def.elev + 14 + r && dx * dx + dz * dz < span * span) {
+        // into the field's heading-0 frame, where the apron furniture lives
+        const lx = def.x + dx * def.cosH + dz * def.sinH;
+        const lz = def.z - dx * def.sinH + dz * def.cosH;
+        const lvx = vx * def.cosH + vz * def.sinH;
+        const lvz = -vx * def.sinH + vz * def.cosH;
+        for (const sol of rec.solids) {
+          const p = sol.m.position;
+          if (solidHit(sol.shape, p.x, p.y, p.z, sol.m.rotation.y, lx, y, lz, r, lvx, vy, lvz, dt)) return sol.reason;
+        }
+      }
+      if (!rec.ops) continue;
+      for (const f of rec.ops.flights) {
+        if (f.fade < 0.95) continue;
+        const p = f.group.position;
+        const shape = f.kind === 'airliner' ? SOLID_AIRLINER : SOLID_GA;
+        const hdg = f.app.course + f.side * f.turn;
+        if (solidHit(shape, p.x, p.y, p.z, f.group.rotation.y, x, y, z, r,
+          vx - Math.sin(hdg) * f.v, vy, vz + Math.cos(hdg) * f.v, dt)) {
+          return f.y > f.app.elev + 2 ? HIT_MIDAIR : HIT_RUNWAY;
+        }
+      }
+    }
+    for (const s of this.ships) {
+      const p = s.group.position;
+      if (solidHit(SOLID_SHIP[s.kind], p.x, p.y, p.z, s.group.rotation.y, x, y, z, r, vx, vy, vz, dt)) return HIT_SHIP;
+    }
+    return null;
+  }
+
+  /**
+   * The player has just been put on a runway near (x, z): take the runway
+   * movements of the fields around it off the stage (they come back on
+   * schedule). Without this a restart can drop you onto the spot where an
+   * NPC is lined up — which, now that they are solid, ends the flight.
+   */
+  clearMovements(x: number, z: number): void {
+    for (const rec of this.parked.values()) {
+      if (!rec.ops || Math.hypot(rec.def.x - x, rec.def.z - z) > rec.def.length * 0.5 + 2600) continue;
+      for (const f of rec.ops.flights) this.scene.remove(f.group);
+      rec.ops.flights.length = 0;
+    }
+  }
+
   /** Telemetry: movements in progress, and ships afloat. */
   info(): string {
     let n = 0;
@@ -514,7 +663,9 @@ export class Traffic {
     return `${n}/${this.stats.landings}+${this.stats.departures}/${this.ships.length}`;
   }
 
-  update(dt: number, px: number, pz: number, time: number, airborneOn: boolean, pAgl = 1e9): void {
+  /** `py`: the player's altitude — NPCs on final break off rather than
+   *  share a glide path with you (omit it and they do not look). */
+  update(dt: number, px: number, pz: number, time: number, airborneOn: boolean, pAgl = 1e9, py = NaN): void {
     // ---- flying layer ----
     if (airborneOn && this.flying.length < Traffic.FLYING) {
       this.spawnFlyer(px, pz, this.flying.length);
@@ -567,7 +718,7 @@ export class Traffic {
     }
 
     // ---- runway movements, ships ----
-    for (const rec of this.parked.values()) this.updateOps(rec, dt, time, px, pz, pAgl, airborneOn);
+    for (const rec of this.parked.values()) this.updateOps(rec, dt, time, px, pz, pAgl, airborneOn, py);
     this.updateShips(dt, px, pz);
 
     // ---- parked layer: scan for nearby fields twice a second ----
@@ -620,16 +771,19 @@ export class Traffic {
       if ((f.phase === 'vacate' || f.phase === 'enter') && Math.abs(f.off) < 45) return true;
     }
     this.busyByPlayer = true;
-    if (pAgl < 25) {
-      const dx = px - app.thrX;
-      const dz = pz - app.thrZ;
-      const dirX = Math.sin(app.course);
-      const dirZ = -Math.cos(app.course);
-      const along = dx * dirX + dz * dirZ;
-      const cross = dx * -dirZ + dz * dirX;
-      if (along > -200 && along < app.length + 200 && Math.abs(cross) < 55) return true;
-    }
-    return false;
+    return this.playerOn(app, px, pz, pAgl, 55);
+  }
+
+  /** The player is on (or skimming) this runway, within `half` m of its centreline. */
+  private playerOn(app: IlsApproach, px: number, pz: number, pAgl: number, half: number): boolean {
+    if (pAgl >= 25) return false;
+    const dx = px - app.thrX;
+    const dz = pz - app.thrZ;
+    const dirX = Math.sin(app.course);
+    const dirZ = -Math.cos(app.course);
+    const along = dx * dirX + dz * dirZ;
+    const cross = dx * -dirZ + dz * dirX;
+    return along > -200 && along < app.length + 200 && Math.abs(cross) < half;
   }
 
   private spawnOps(o: FieldOps, def: AirfieldDef, phase: 'final' | 'enter', frac = 1): OpsFlight {
@@ -696,8 +850,15 @@ export class Traffic {
 
   private updateOps(
     rec: { def: AirfieldDef; ops: FieldOps | null },
-    dt: number, time: number, px: number, pz: number, pAgl: number, on: boolean,
+    dt: number, time: number, px: number, pz: number, pAgl: number, on: boolean, py: number,
   ): void {
+    // nobody is put on stage within 2.5 km of the player: they are solid
+    const spawnClear = (f: OpsFlight): void => {
+      const g = f.group.position;
+      if (Math.hypot(g.x - px, g.z - pz) > 2500) return;
+      this.scene.remove(f.group);
+      o!.flights.splice(o!.flights.indexOf(f), 1);
+    };
     const def = rec.def;
     if (!def.intl && !def.major) return;
     let o = rec.ops;
@@ -714,7 +875,7 @@ export class Traffic {
         nextDep: time + 15 + this.rng() * 40,
       };
       // someone is already established on final when the field comes into view
-      this.spawnOps(o, def, 'final', 0.3 + this.rng() * 0.45);
+      spawnClear(this.spawnOps(o, def, 'final', 0.3 + this.rng() * 0.45));
     }
     const p = OPS[o.kind];
 
@@ -729,12 +890,14 @@ export class Traffic {
       let farArr = Infinity;
       for (const f of o.flights) if (f.phase === 'final' && f.s < farArr) farArr = f.s;
       if (time >= o.nextArr && farArr > -(p.from - 6500)) {
-        this.spawnOps(o, def, 'final');
+        spawnClear(this.spawnOps(o, def, 'final'));
         o.nextArr = time + p.arr[0] + this.rng() * (p.arr[1] - p.arr[0]);
       }
       // a departure taxis on only into a gap that will still be there when
       // it rolls (~60 s later)
-      if (time >= o.nextDep && !entering && nearArr < -p.vApp * 100) {
+      // (…and never onto a runway the player is on or lined up beside)
+      if (time >= o.nextDep && !entering && nearArr < -p.vApp * 100 &&
+          !this.playerOn(this.activeApp(o), px, pz, pAgl, p.stub + 40)) {
         this.spawnOps(o, def, 'enter');
         o.nextDep = time + p.dep[0] + this.rng() * (p.dep[1] - p.dep[0]);
       }
@@ -742,7 +905,7 @@ export class Traffic {
 
     for (let i = o.flights.length - 1; i >= 0; i--) {
       const f = o.flights[i];
-      const keep = on && this.stepOps(f, o, dt, px, pz, pAgl);
+      const keep = on && this.stepOps(f, o, dt, px, pz, pAgl, py);
       if (keep) {
         this.placeOps(f, time);
       } else {
@@ -753,11 +916,23 @@ export class Traffic {
   }
 
   /** Advance one movement; false once it has left the stage. */
-  private stepOps(f: OpsFlight, o: FieldOps, dt: number, px: number, pz: number, pAgl: number): boolean {
+  private stepOps(f: OpsFlight, o: FieldOps, dt: number, px: number, pz: number, pAgl: number, py: number): boolean {
     const p = OPS[f.kind];
     const a = f.app;
     switch (f.phase) {
       case 'final': {
+        // the player is airborne close by, at about this height — ahead on
+        // the same approach, coming up behind, or crossing: break off and
+        // climb away (a 72 m/s airliner would otherwise run down a trainer
+        // on its own glide path, or be run down by a jet)
+        if (pAgl >= 25 && Math.abs(py - f.y) < 250 &&
+            Math.hypot(f.group.position.x - px, f.group.position.z - pz) < 1800) {
+          f.phase = 'climb';
+          f.timer = 0;
+          f.wentAround = true;
+          this.stats.goArounds++;
+          return true;
+        }
         f.s += f.v * dt;
         const path = (300 - f.s) * TAN_GS; // glide path height over the runway
         let above = f.y - a.elev;
@@ -809,6 +984,8 @@ export class Traffic {
           f.fade = Math.min(1, f.fade + dt / 2.5);
           return true;
         }
+        // give way to the player: nobody taxis onto a runway into someone
+        if (pAgl < 25 && Math.hypot(f.group.position.x - px, f.group.position.z - pz) < 90) return true;
         f.v = p.vTaxi * 0.8;
         if (f.off < f.v / 0.3 + 1.5) f.turn = Math.min(0, f.turn + 0.3 * dt);
         f.s += f.v * Math.cos(f.turn) * dt;
@@ -993,6 +1170,7 @@ export class Traffic {
   private buildParked(ap: AirfieldDef, key: string, growIn = false): void {
     const g = new THREE.Group();
     const movers: Array<{ m: THREE.Object3D; along: number; side: number; dir: number }> = [];
+    const solids: Array<{ m: THREE.Object3D; shape: readonly Box[]; reason: string }> = [];
     const seed = (a: number, b: number) => hash2(Math.round(ap.x) + a, Math.round(ap.z) + b);
 
     // place one NPC in the field's local (heading-0) frame; the group pivot
@@ -1002,6 +1180,7 @@ export class Traffic {
       m.position.set(ap.x + across, ap.elev, ap.z - along);
       m.rotation.y = yaw;
       g.add(m);
+      solids.push({ m, shape: kind === 'airliner' ? SOLID_AIRLINER : SOLID_GA, reason: HIT_PARKED });
     };
 
     if (ap.intl) {
@@ -1023,6 +1202,7 @@ export class Traffic {
           tug.position.set(ap.x + (seed(i, 2) > 0.5 ? 70 : -70), ap.elev, ap.z - pc - 60);
           tug.rotation.y = seed(i, 4) * Math.PI * 2;
           g.add(tug);
+          solids.push({ m: tug, shape: SOLID_VEHICLE.tug, reason: HIT_VEHICLE });
         }
         if (seed(i * 5 + 2, 6) > 0.55) {
           const fuel = new THREE.Mesh(vehicleGeo('fuel'), this.mat);
@@ -1030,6 +1210,7 @@ export class Traffic {
           fuel.position.set(ap.x + (seed(i, 9) > 0.5 ? 380 : -380), ap.elev, ap.z - pc + 90);
           fuel.rotation.y = Math.PI / 2;
           g.add(fuel);
+          solids.push({ m: fuel, shape: SOLID_VEHICLE.fuel, reason: HIT_VEHICLE });
         }
         if (seed(i * 7 + 4, 3) > 0.3) {
           const carts = new THREE.Mesh(vehicleGeo('carts'), this.mat);
@@ -1037,6 +1218,7 @@ export class Traffic {
           carts.position.set(ap.x + (seed(i, 11) > 0.5 ? 95 : -95), ap.elev, ap.z - pc + 40);
           carts.rotation.y = seed(i, 13) > 0.5 ? 0 : Math.PI / 2;
           g.add(carts);
+          solids.push({ m: carts, shape: SOLID_VEHICLE.carts, reason: HIT_VEHICLE });
         }
       }
       const lapKinds: VehicleKind[] = ['tug', 'fuel', 'bus', 'bus'];
@@ -1045,6 +1227,7 @@ export class Traffic {
         const m = new THREE.Mesh(vehicleGeo(kind), this.mat);
         m.castShadow = true;
         g.add(m);
+        solids.push({ m, shape: SOLID_VEHICLE[kind], reason: HIT_VEHICLE });
         movers.push({ m, along: (seed(3 + i, side) - 0.5) * 2400, side, dir: i < 2 ? side : -side });
       }
     } else if (ap.major) {
@@ -1070,6 +1253,6 @@ export class Traffic {
       root.scale.y = 0.001;
       root.position.y = ap.elev * 0.999;
     }
-    this.parked.set(key, { group: root, grow: growIn ? 0 : 1, movers, def: ap, ops: null });
+    this.parked.set(key, { group: root, grow: growIn ? 0 : 1, movers, solids, def: ap, ops: null });
   }
 }

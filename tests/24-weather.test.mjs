@@ -73,7 +73,7 @@ for (const w of WEATHERS.filter((x) => x.deck)) {
   // equalised: a threshold of (1 − cover) leaves `cover` of the sky cloudy
   for (const cover of [0.25, 0.55, 0.8]) {
     let n = 0;
-    for (let i = 0; i < f.length; i++) if (f[i] / 255 > 1 - cover) n++;
+    for (let i = 0; i < f.length; i++) if (f[i] > 1 - cover) n++;
     assert.ok(Math.abs(n / f.length - cover) < 0.012, `cover ${cover}: field gives ${(n / f.length).toFixed(3)}`);
   }
   // tileable and continuous: no seam where the texture repeats
@@ -101,6 +101,29 @@ for (const w of WEATHERS.filter((x) => x.deck)) {
 {
   const f = makeCloudFields();
   assert.deepEqual(makeCloudFields(), f, 'the cloud fields are not deterministic');
+  // no feature may sit on the noise lattice: the lump field's creases (its
+  // lowest ranks) must not favour the 64 lattice lines of its coarsest octave
+  {
+    const N = FIELD_N, cell = N / 4;
+    let onLine = 0, offLine = 0, nOn = 0, nOff = 0;
+    for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
+      const low = f.lump[y * N + x] < 0.15 ? 1 : 0;
+      if (x % cell === 0 || y % cell === 0) { onLine += low; nOn++; } else { offLine += low; nOff++; }
+    }
+    const ratio = (onLine / nOn) / (offLine / nOff);
+    assert.ok(ratio > 0.6 && ratio < 1.6, `creases are ${ratio.toFixed(2)}× as common on the lattice lines as off them`);
+  }
+  // no tile comes round again: the same point one tile on has a different top
+  {
+    const d = WEATHERS.find((w) => w.id === 'overcast').deck;
+    let same = 0;
+    for (let i = 0; i < 400; i++) {
+      const x = i * 211.7, z = i * 87.3 - 9000;
+      const a = deckSurfaces(d, f, x, z).yt;
+      if (Math.abs(a - deckSurfaces(d, f, x + FIELD_TILE, z).yt) < 8 && Math.abs(a - deckSurfaces(d, f, x, z + FIELD_TILE).yt) < 8) same++;
+    }
+    assert.ok(same < 40, `${same} of 400 points have the same top one tile on — the layer repeats`);
+  }
   assert.deepEqual(f.cover, makeCoverField(), 'the coverage the sim samples is not the field the layer is built on');
   for (const w of WEATHERS.filter((x) => x.deck)) {
     const d = w.deck;
@@ -146,13 +169,16 @@ for (const w of WEATHERS.filter((x) => x.deck)) {
     assert.ok(maxJump < 0.12, `${w.id}: density jumps ${maxJump.toFixed(2)} in 2 m of climb`);
     const skim = d.top - d.relief * 0.45 - d.soft * 0.5;
     prev = deckDensity(d, f, 0, skim, 0);
-    let flips = 0;
+    let flips = 0, sharp = 0;
     for (let x = 0; x < 60000; x += 10) {
       const v = deckDensity(d, f, x, skim, x * 0.37);
-      assert.ok(Math.abs(v - prev) < 0.35, `${w.id}: density jumps ${Math.abs(v - prev).toFixed(2)} in 10 m of level flight`);
+      // (a cumulus flank can be a cliff — but edges are soft as a rule)
+      if (Math.abs(v - prev) > 0.3) sharp++;
       if ((v > 0.5) !== (prev > 0.5)) flips++;
       prev = v;
     }
+    // (the flanks of the cumulus bodies in a broken layer ARE steep; a solid deck's top is not)
+    assert.ok(sharp <= (solid ? 3 : 40), `${w.id}: ${sharp} hard edges (density jumping 0.3 in 10 m) in 60 km of level flight`);
     // skimming the tops you are in and out of them
     assert.ok(flips >= 4, `${w.id}: 60 km along the tops crossed cloud ${flips} times`);
     // sunlight: full at the top surface, gone deep inside

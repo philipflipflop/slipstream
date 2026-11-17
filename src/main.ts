@@ -200,7 +200,7 @@ class Game {
     this.sky = new Sky(this.scene, touch ? 26 : 56, this.daylight, this.wx);
     this.deck = new CloudDeckView(
       this.scene, this.wx, this.sky.fogColor, this.sky.cloudLit, this.sky.cloudShade, this.sky.sunDir,
-      touch || this.save.quality === 'low' ? 24 : 40,
+      touch || this.save.quality === 'low' ? 44 : 64,
     );
     if (this.wx.rain > 0) this.rain = new Rain(this.scene, touch ? 500 : 1500, new THREE.Color(0.78, 0.82, 0.88));
     this.scene.fog = new THREE.Fog(this.sky.sceneFogColor, 2500, 7000);
@@ -222,7 +222,7 @@ class Game {
     this.range = new GunneryRange(this.scene, this.gen);
     this.range.onHit = (hits, total) => this.screens.toast(`TARGET DOWN — ${hits}/${total}`);
     this.range.onClear = () => this.screens.toast('RANGE CLEAR — ALL TARGETS DESTROYED');
-    this.range.solid = (x, y, z) => this.obstacles.solidAt(x, y, z);
+    this.range.solid = (x, y, z) => this.obstacles.solidAt(x, y, z) || this.traffic.hit(x, y, z, 0) !== null;
     setTurbulence(this.wx.turb); // light chop down low in fair weather; tests run with 0
 
     this.aircraft = new Aircraft(specById(this.save.aircraft));
@@ -823,6 +823,9 @@ class Game {
     } else {
       this.aircraft.resetOnRunway(this.heightFn, this.spawnField);
     }
+    // NPCs are solid: nobody may be lined up, rolling or on final where the
+    // player has just been put
+    this.traffic.clearMovements(this.spawnField.x, this.spawnField.z);
     this.sound.setEngineKind(this.aircraft.spec.engine);
     this.flightCam.set('chase');
     this.stats = { flightTime: 0, distanceKm: 0, maxAltFt: 0, maxSpdKt: 0 };
@@ -1165,7 +1168,12 @@ class Game {
       // the murk is as bright as the sunlight that gets down to the eye
       this.cloudCol.lerpColors(this.sky.cloudShade, this.sky.cloudLit, this.deck.lightAt(eye.x, eye.y, eye.z) * 0.9);
     }
-    this.sky.setAir(under, dens, this.cloudCol);
+    // what veils the view when cloud has cut the visibility IS cloud: the
+    // haze takes the cloud's colour by the share of the range it has taken,
+    // not by its density (a wisp at the sunlit top hazed everything below
+    // toward horizon-grey: dark blotches while skimming the tops)
+    const clearFar = dens > 0 ? weatherVisibility(this.wx, this.hazeFar, eye.y, 0) : fog.far;
+    this.sky.setAir(under, dens, this.cloudCol, clamp(1 - fog.far / clearFar, 0, 1));
     fog.color.copy(this.sky.sceneFogColor);
     this.water.setFogColor(this.sky.fogColor);
     this.terrain.hazeFar = fog.far;
@@ -1182,7 +1190,7 @@ class Game {
     this.airport.update(this.simTime, st.pos.x, st.pos.z, st.pos.y);
     // NPC traffic: parked aircraft everywhere; the airborne layer stays out
     // of Ring Rush so the course reads clean
-    this.traffic.update(this.state === 'paused' ? 0 : dt, st.pos.x, st.pos.z, this.simTime, !this.rings.active, agl);
+    this.traffic.update(this.state === 'paused' ? 0 : dt, st.pos.x, st.pos.z, this.simTime, !this.rings.active, agl, st.pos.y);
 
     // coarse-depth fallback (touch + low, no log buffer): step the near
     // plane out with altitude to reclaim precision. Discrete bands with
@@ -1466,6 +1474,16 @@ class Game {
     if (!st.crashed && !st.onGround) {
       const wall = this.obstacles.hit(st.pos.x, st.pos.y, st.pos.z, 2.5);
       if (wall) crash(st, wall);
+    }
+    // …and so is everything that moves, in the air and on the ground:
+    // other aircraft (flying, on the runway, parked), apron vehicles, ships
+    if (!st.crashed) {
+      const sp = this.aircraft.spec;
+      const npc = this.traffic.hit(
+        st.pos.x, st.pos.y, st.pos.z, clamp(Math.sqrt(sp.wingArea * sp.aspect) * 0.3, 2.5, 8),
+        st.vel.x, st.vel.y, st.vel.z, dt,
+      );
+      if (npc) crash(st, npc);
     }
 
     // cannon: brake control doubles as the trigger once airborne

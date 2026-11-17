@@ -31,8 +31,12 @@ desktop or phone.
       hard edges? Is the HUD readable over the white tops?
 - [ ] **Broken** — fly through a gap at 4,500–5,500 ft and past a cloud's
       side. Do the cloud bodies look solid from every angle?
+- [ ] **Clouds, second pass** (after "pixelated squares/lines", "flicker
+      amongst them", "they grow as you approach", "patterns repeat", "dark
+      blotches skimming the tops") — above Rain and Overcast, on the phone
+      and on desktop: each of those five gone, better, or still there?
 - [ ] **Cloud frame rate** — Rain/Overcast on the phone and on desktop High:
-      noticeably slower than Fair?
+      noticeably slower than Fair? (The march budget went up again.)
 - [ ] **Rain** — streaks parked, at 100 kt and at 300 kt. Too many, too few,
       too bright?
 - [ ] **Fog** — take off into it and land in it. Can you read the green HUD
@@ -86,6 +90,11 @@ desktop or phone.
 - [ ] **Tower calls** — "cleared to land" on final at an international. Do
       calls ever cover a message you needed, or come too often?
 - [ ] **Contrails and ships** — noticeable? Wakes look right from low level?
+- [ ] **Solid NPCs** — fly into an airliner, taxi into a parked aircraft or a
+      vehicle, hit a ship: each ends the flight with a sensible message? And
+      the reverse: did anything ever hit YOU when you had done nothing wrong
+      (at spawn, parked on a runway, flying an ILS behind or ahead of
+      traffic)? Does a near miss under a wing feel fair?
 
 ## 5. Sound (I cannot hear anything)
 

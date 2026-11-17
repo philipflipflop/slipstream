@@ -6,19 +6,30 @@
  * lumpy top with embedded cumulus standing out of it, a ragged base, lens-
  * shaped bodies in a broken layer — and the cloud thickens over `soft`
  * metres inside those surfaces. The fragment shader evaluates that SAME
- * formula from the SAME bytes (one RGB texture) along each view ray,
- * accumulating opacity, so tops have silhouettes and parallax, edges are
- * wisps, and where the picture shows a gap the sim (densityAt) has one.
+ * formula from the SAME numbers (one half-float texture) along each view
+ * ray, accumulating opacity, so tops have silhouettes and parallax, edges
+ * are wisps, and where the picture shows a gap the sim (densityAt) has one.
  * Drawn as one full-screen triangle; depth is written analytically from the
- * distance where the cloud was met (nothing is interpolated across
- * geometry, as with the water sheet). Rules that keep it cheap and stable:
- *   · steps are as long as the clearance to the surfaces allows (the top is
- *     a heightfield of bounded slope) and grow with distance; a per-pixel
- *     jitter turns what banding is left into grain.
- *   · geometry relaxes onto the mean surfaces with distance (`uFlat`), so a
- *     ray that runs out of steps meets the same flat cloud it would have
- *     been handed; LIGHTING keeps the full relief (a far top is a bump map).
- *   · extinction is the sim's own in-cloud visibility near the eye — the
+ * distance where the cloud was met. What keeps it STILL — each of these was
+ * a visible fault first:
+ *   · The lookups are filtered for the pixel's footprint ALONG the ray, not
+ *     across it: toward the horizon a pixel covers a hundred times more
+ *     cloud in depth than in width, and sampled at its width the tops
+ *     shimmered in horizontal dashes whenever the camera moved.
+ *   · Steps are as long as the clearance to the surfaces allows and never
+ *     shorter than half that footprint — the floor used to be 6% of the
+ *     range, which stepped clean over a 300 m crest at 5 km on one frame
+ *     and caught it on the next.
+ *   · No per-pixel jitter (it was grain at range); the entry point is
+ *     solved by false position, so the edge lies on the surface itself.
+ *   · Relief is NOT scaled down with distance inside ~20 km: clouds that
+ *     grow as you approach read as fake. It relaxes onto the mean surfaces
+ *     only far out (`uFlat`), where it is a few pixels high; small lumps
+ *     come in with the footprint filter instead, at pixel scale.
+ *   · Brightness is set where the ray ENTERS the cloud (lit top, shaded
+ *     underside), not by how deep the march got before it went opaque —
+ *     near cloud is thin to the eye and was coming out in dark blotches.
+ *   · Extinction is the sim's own in-cloud visibility near the eye — the
  *     aircraft in front of the camera must not vanish behind a wall — and
  *     tightens with distance so far cloud is solid in a step or two.
  *
@@ -30,7 +41,7 @@
 import * as THREE from 'three';
 import {
   WeatherPreset, CloudFields, makeCloudFields, deckDensity, deckLight, FIELD_N, FIELD_TILE, COVER_EDGE,
-  DETAIL_SCALE, DETAIL_OFF, MEAN_TOP, MEAN_BASE, CLOUD_ABSORB,
+  DETAIL_SCALE, DETAIL_OFF, DETAIL_COS, DETAIL_SIN, WARP, REGION, MEAN_TOP, MEAN_BASE, CLOUD_ABSORB,
 } from './weather';
 
 const VERT = /* glsl */ `
@@ -43,11 +54,12 @@ const VERT = /* glsl */ `
 `;
 
 const f1 = (v: number): string => v.toFixed(4);
+const fe = (v: number): string => v.toExponential(8);
 
 const FRAG = /* glsl */ `
   #include <common>
   #include <logdepthbuf_pars_fragment>
-  uniform sampler2D uField;  // R coverage, G lumps, B towers, A region
+  uniform sampler2D uField;  // R coverage, G lumps, B towers
   uniform vec2 uDrift;
   uniform vec4 uDeck;        // base, top, cover, extinction per m
   uniform vec4 uShape;       // relief, towers, ragged, soft
@@ -55,6 +67,7 @@ const FRAG = /* glsl */ `
   uniform vec3 uThick;       // thinnest the layer gets, 1 / its range, 1 / ragged
   uniform float uLumpy;
   uniform float uFlat;       // range at which the relief has relaxed, m
+  uniform float uSlope;      // steepest surface the clear-air step allows for
   uniform vec3 uLit;         // cloud in sunlight
   uniform vec3 uShade;       // cloud from beneath
   uniform vec3 uSunDir;
@@ -67,9 +80,11 @@ const FRAG = /* glsl */ `
   uniform mat3 uCamRot;
   uniform vec2 uDepthAB;     // projection [10], [14] — for the plain depth buffer
 
-  const float INV_TILE = ${(1 / FIELD_TILE).toExponential(8)};
+  const float INV_TILE = ${fe(1 / FIELD_TILE)};
   const float TEXEL = ${f1(FIELD_TILE / FIELD_N)};
   const float EDGE = ${f1(COVER_EDGE)};
+  const float INV_ABSORB = ${fe(1 / CLOUD_ABSORB)};
+  const mat2 DROT = mat2(${f1(DETAIL_COS * DETAIL_SCALE)}, ${f1(DETAIL_SIN * DETAIL_SCALE)}, ${f1(-DETAIL_SIN * DETAIL_SCALE)}, ${f1(DETAIL_COS * DETAIL_SCALE)});
 
   // weather.deckSurfaces, per pixel. fl = how far the geometry has relaxed
   // onto the mean surfaces; ht = the top with its full relief (lighting).
@@ -77,10 +92,18 @@ const FRAG = /* glsl */ `
   // lookup is only made when py is close enough for it to matter — in
   // clear air the bound is returned (yt high, yb low: clearance is safe).
   void surf(in vec2 xz, in float lod, in float fl, in float py, out float yt, out float yb, out float ht, out float gap) {
-    vec2 uv = (xz + uDrift) * INV_TILE;
-    vec4 a = textureLod(uField, uv, lod);
-    float amp = uShape.x * (0.4 + 0.6 * a.a);
-    float tw = uShape.y * smoothstep(0.8, 0.97, a.b) * smoothstep(0.35, 0.65, a.a) * (0.7 + 0.3 * a.g);
+    vec2 q = xz + uDrift;
+    float reg = clamp(0.5
+      + ${f1(REGION[0][0])} * sin(q.x * ${fe(REGION[0][1])} + q.y * ${fe(REGION[0][2])} + ${f1(REGION[0][3])})
+      + ${f1(REGION[1][0])} * sin(q.x * ${fe(REGION[1][1])} + q.y * ${fe(REGION[1][2])} + ${f1(REGION[1][3])})
+      + ${f1(REGION[2][0])} * sin(q.x * ${fe(REGION[2][1])} + q.y * ${fe(REGION[2][2])} + ${f1(REGION[2][3])}), 0.0, 1.0);
+    vec2 uv = (q + vec2(
+      ${f1(WARP[0][0])} * sin(q.y * ${fe(WARP[0][1])} + ${f1(WARP[0][2])}) + ${f1(WARP[1][0])} * sin((q.x + q.y) * ${fe(WARP[1][1])} + ${f1(WARP[1][2])}),
+      ${f1(WARP[2][0])} * sin(q.x * ${fe(WARP[2][1])} + ${f1(WARP[2][2])}) + ${f1(WARP[3][0])} * sin((q.x - q.y) * ${fe(WARP[3][1])} + ${f1(WARP[3][2])})
+    )) * INV_TILE;
+    vec3 a = textureLod(uField, uv, lod).rgb;
+    float amp = uShape.x * (0.4 + 0.6 * reg);
+    float tw = uShape.y * smoothstep(0.62, 0.97, a.b) * smoothstep(0.35, 0.65, reg) * (0.7 + 0.3 * a.g);
     float e = 1.0;
     float mid = 0.5 * (uDeck.x + uDeck.y);
     gap = 0.0;
@@ -102,12 +125,18 @@ const FRAG = /* glsl */ `
     yt = mid + (mix(ht, uMean.x, fl) - mid) * e;
     yb = mid - (mid - mix(hb, uMean.y, fl)) * e;
     if (py > yt || py < yb) return;
-    vec3 b = textureLod(uField, uv * ${f1(DETAIL_SCALE)} + vec2(${f1(DETAIL_OFF[0])}, ${f1(DETAIL_OFF[1])}), lod + ${f1(Math.log2(DETAIL_SCALE))}).rgb;
+    vec3 b = textureLod(uField, DROT * uv + vec2(${f1(DETAIL_OFF[0])}, ${f1(DETAIL_OFF[1])}), lod + ${f1(Math.log2(DETAIL_SCALE))}).rgb;
     ht = uDeck.y - amp * (1.0 - mix(a.g, b.g, uLumpy)) + tw;
     hb = uDeck.x + uShape.z * smoothstep(0.25, 0.8, b.r);
     yt = mid + (mix(ht, uMean.x, fl) - mid) * e;
     yb = mid - (mid - mix(hb, uMean.y, fl)) * e;
     ht = mid + (ht - mid) * e;
+  }
+
+  // what a sample contributes to the shade from beneath: dark under the
+  // thick places and where scud hangs low
+  float under(float yt, float yb) {
+    return clamp((yt - yb - uThick.x) * uThick.y, 0.0, 1.0) - 0.45 * clamp((yb - uDeck.x) * uThick.z, 0.0, 1.0);
   }
 
   void main() {
@@ -126,43 +155,49 @@ const FRAG = /* glsl */ `
     float tEnd = min(max(ta, tb), uFogFar * 1.03);   // beyond full haze cloud and sky are one colour
     if (tEnd <= t0) discard;
 
-    float pix = uProj.y * 2.0 / uRes.y;              // one pixel, as a tangent
-    float jit = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
-    float dsBase = max(uShape.w * 0.3, 14.0);
+    // one pixel as a tangent, and how much longer than wide its footprint
+    // on a level surface is (1.8 straight down … 20 at the horizon)
+    float pix = uProj.y * 2.0 / uRes.y;
+    float foot1 = pix * (1.2 + 0.6 / (abs(d.y) + 0.03));
+    float yMid = 0.5 * (uDeck.x + uDeck.y);
+    float aoLo = uDeck.y - uShape.x;
+    float aoK = 1.0 / uShape.x;   // across the relief of the general top: towers are simply brightest
 
-    // jitter the START only (a per-step factor compounds: at 8 km neighbouring
-    // pixels sampled 800 m apart, and far cloud came out as grain)
-    float t = t0 + jit * (dsBase + t0 * 0.06) * 0.6;
+    float t = t0;
     float T = 1.0;        // transmittance so far
     float sT = 0.0;       // Σ weight × distance / light / height / thickness
     float sIll = 0.0;
     float sAo = 0.0;
     float sThick = 0.0;
     bool spent = true;
-    float tOut = -1.0;    // the last sample that was in clear air, and its depth
+    float tOut = t0 > 0.0 ? t0 : -1.0;   // the last sample that was in clear air, and its depth
     float mOut = -1.0;
+    float litE = -1.0;    // light at the surface the ray came in through (< 0: the eye is in cloud)
     float yt, yb, ht, gap;
     for (int i = 0; i < STEPS; i++) {
       if (t >= tEnd || T < 0.03) { spent = false; break; }
       vec3 p = uCamPos + d * t;
-      float lod = clamp(log2(max(t * pix * 1.5, 1.0) / TEXEL), 0.0, 7.0);
+      float foot = t * foot1;
+      float lod = clamp(log2(max(foot, 1.0) / TEXEL), 0.0, 8.0);
       float fl = smoothstep(0.5, 1.0, t / uFlat);
       surf(p.xz, lod, fl, p.y, yt, yb, ht, gap);
       float m = min(yt - p.y, p.y - yb);
-      float dsMin = dsBase + t * 0.06;
+      float dsMin = max(8.0, foot * 0.5);
       float ds;
       if (m <= 0.0) {
         // clear air: as far as the clearance allows for a surface this steep
         tOut = t;
         mOut = m - gap - 0.01;
-        ds = clamp((gap - m) / (abs(d.y) + 0.42 * (1.0 - fl) + 0.03), dsMin, max(900.0, t * 0.3));
+        ds = clamp((gap - m) / (abs(d.y) + uSlope * (1.0 - fl) + 0.03), dsMin, max(1200.0, t * 0.35));
+        // a ray still skimming with the budget running out strides on
+        ds *= 1.0 + max(float(i) - float(STEPS) * 0.6, 0.0) * 0.14;
       } else {
         if (tOut >= 0.0) {
           // stepped in from clear air: find where (the edge then lies on
-          // the surface itself, not on a ring of step lengths)
-          // (false position: the depth is close to linear along the ray, so
-          // three goes land within a metre or two — plain bisection of a
-          // 500 m far step left 60 m terraces, drawn as contour lines)
+          // the surface itself, not on a ring of step lengths). False
+          // position: the depth is close to linear along the ray, so three
+          // goes land within a metre or two — plain bisection of a far
+          // step left terraces, drawn as contour lines.
           float lo = tOut;
           float hi = t;
           float mLo = mOut;
@@ -179,63 +214,65 @@ const FRAG = /* glsl */ `
           surf(p.xz, lod, fl, p.y, yt, yb, ht, gap);
           m = max(min(yt - p.y, p.y - yb), 0.0);
           tOut = -1.0;
+          // in through the top: sunlit. In through the base: shade. The
+          // flank of a cloud body: by how far up it
+          litE = smoothstep(0.2, 0.55, (p.y - yb) / max(yt - yb, 1.0));
         }
         // resolve the diffuse edge: no more than half of it per step
-        ds = min(dsMin, uShape.w * 0.5 / max(abs(d.y), 0.06));
+        ds = min(max(uShape.w * 0.3, max(14.0, dsMin)), uShape.w * 0.5 / max(abs(d.y), 0.06));
         m += 0.5 * ds * min(abs(d.y), 0.5);   // the density half a step on
         float rho = smoothstep(0.0, uShape.w, m);
         float a = 1.0 - exp(-uDeck.w * (1.0 + t / 220.0) * rho * ds);
         float w = T * a;
         sT += w * (t + ds * 0.4);
-        sIll += w * exp(-(yt - p.y) * ${f1(1 / CLOUD_ABSORB)});
-        sAo += w * clamp((ht - (uDeck.y - uShape.x)) / (uShape.x + 0.6 * uShape.y), 0.0, 1.0);
-        sThick += w * (clamp((yt - yb - uThick.x) * uThick.y, 0.0, 1.0) - 0.45 * clamp((yb - uDeck.x) * uThick.z, 0.0, 1.0));
+        sIll += w * (litE >= 0.0 ? litE : exp(-(yt - p.y) * INV_ABSORB));
+        sAo += w * clamp((ht - aoLo) * aoK, 0.0, 1.0);
+        sThick += w * under(yt, yb);
         T *= 1.0 - a;
       }
       t += ds;
     }
 
     float w = 1.0 - T;
-    // out of steps with the ray still running: it meets the relaxed layer —
-    // the mean top from above, the mean base from beneath, or the cloud it
-    // is already down among
+    // out of steps with the ray still running (it was skimming the tops):
+    // what is left of it meets cloud about here — unless it is climbing
+    // clear of the layer
     if (spent && T > 0.03 && t < tEnd) {
-      float tp = -1.0;
-      float py = uCamPos.y + d.y * t;
-      if (d.y < 0.0 && py > uMean.x) tp = (uCamPos.y - uMean.x) / (-d.y);
-      else if (d.y > 0.0 && py < uMean.y) tp = (uMean.y - uCamPos.y) / d.y;
-      else if (py < uMean.x && py > uMean.y) tp = t;
-      if (tp >= t && tp < tEnd) {
-        vec3 p = uCamPos + d * tp;
-        float lod = clamp(log2(max(tp * pix * 1.5, 1.0) / TEXEL), 0.0, 7.0);
-        surf(p.xz, lod, 1.0, uMean.x - 1.0, yt, yb, ht, gap);
-        float a = yt > yb ? T : 0.0;
-        sT += a * tp;
-        sIll += a * (d.y < 0.0 ? 0.85 : 0.0);
-        sAo += a * clamp((ht - (uDeck.y - uShape.x)) / (uShape.x + 0.6 * uShape.y), 0.0, 1.0);
-        sThick += a * (clamp((yt - yb - uThick.x) * uThick.y, 0.0, 1.0) - 0.45 * clamp((yb - uDeck.x) * uThick.z, 0.0, 1.0));
-        w += a;
+      vec3 p = uCamPos + d * t;
+      if (d.y < 0.0 || p.y < uMean.x) {
+        float lod = clamp(log2(max(t * foot1, 1.0) / TEXEL), 0.0, 8.0);
+        surf(p.xz, lod, 1.0, yMid, yt, yb, ht, gap);
+        if (yt > yb) {
+          sT += T * t;
+          // (it is in clear air, so what it meets it meets from outside:
+          // a sunlit top, unless it is under the base)
+          sIll += T * (p.y < uMean.y ? 0.0 : 1.0);
+          sAo += T * clamp((ht - aoLo) * aoK, 0.0, 1.0);
+          sThick += T * under(yt, yb);
+          w += T;
+        }
       }
     }
     if (w < 0.012) discard;
 
     float tc = sT / w;
     float ill = sIll / w;
-    // from beneath: dark under the thick places and where scud hangs low
     vec3 col = uShade * (1.1 - 0.34 * sThick / w);
     if (ill > 0.02) {
-      // the lit top: bright domes over dimmer valleys, modelled by the sun
+      // the lit top: bright domes over dimmer valleys, modelled by the sun.
+      // The slope is taken across more than a texel (and more than the
+      // footprint): finer, and every texel edge is a crease
       vec3 q = uCamPos + d * tc;
-      float lod = clamp(log2(max(tc * pix * 2.0, 1.0) / TEXEL), 0.0, 7.0);
-      float e = max(55.0, tc * pix * 3.0);
+      float foot = tc * foot1;
+      float lod = clamp(log2(max(foot, 1.0) / TEXEL), 0.0, 8.0);
+      float e = max(${f1((FIELD_TILE / FIELD_N) * 1.5)}, foot * 1.5);
       float h0, hx, hz;
-      float yMid = 0.5 * (uDeck.x + uDeck.y);   // inside the layer: the exact surface, not the bound
       surf(q.xz, lod, 0.0, yMid, yt, yb, h0, gap);
       surf(q.xz + vec2(e, 0.0), lod, 0.0, yMid, yt, yb, hx, gap);
       surf(q.xz + vec2(0.0, e), lod, 0.0, yMid, yt, yb, hz, gap);
       vec3 n = normalize(vec3(h0 - hx, e, h0 - hz));
       float lam = clamp(dot(n, uSunDir) * 0.85 + 0.3, 0.0, 1.0);
-      vec3 top = uLit * (0.74 + 0.26 * sAo / w) * (0.6 + 0.4 * lam);
+      vec3 top = uLit * (0.82 + 0.18 * sAo / w) * (0.62 + 0.38 * lam);
       col = mix(col, top, ill);
     }
     col = mix(col, uFogColor, smoothstep(uFogNear, uFogFar, tc));
@@ -250,9 +287,57 @@ const FRAG = /* glsl */ `
   }
 `;
 
+/** The three fields as one half-float RGBA texture with its own (box) mips. */
+function fieldTexture(f: CloudFields): THREE.DataTexture {
+  const half = THREE.DataUtils.toHalfFloat;
+  let n = FIELD_N;
+  let level = new Float32Array(n * n * 3);
+  for (let i = 0; i < n * n; i++) {
+    level[i * 3] = f.cover[i];
+    level[i * 3 + 1] = f.lump[i];
+    level[i * 3 + 2] = f.tower[i];
+  }
+  const mips: { data: Uint16Array; width: number; height: number }[] = [];
+  const one = half(1);
+  for (;;) {
+    const px = new Uint16Array(n * n * 4);
+    for (let i = 0; i < n * n; i++) {
+      px[i * 4] = half(level[i * 3]);
+      px[i * 4 + 1] = half(level[i * 3 + 1]);
+      px[i * 4 + 2] = half(level[i * 3 + 2]);
+      px[i * 4 + 3] = one;
+    }
+    mips.push({ data: px, width: n, height: n });
+    if (n === 1) break;
+    const m = n >> 1;
+    const next = new Float32Array(m * m * 3);
+    for (let y = 0; y < m; y++) {
+      for (let x = 0; x < m; x++) {
+        for (let c = 0; c < 3; c++) {
+          const i = (y * 2 * n + x * 2) * 3 + c;
+          next[(y * m + x) * 3 + c] = 0.25 * (level[i] + level[i + 3] + level[i + n * 3] + level[i + n * 3 + 3]);
+        }
+      }
+    }
+    level = next;
+    n = m;
+  }
+  // (mips by hand: generateMipmap on a half-float texture needs an
+  // extension phones may not have; filtering one does not)
+  const tex = new THREE.DataTexture(mips[0].data, FIELD_N, FIELD_N, THREE.RGBAFormat, THREE.HalfFloatType);
+  tex.mipmaps = mips as unknown as THREE.DataTexture['mipmaps'];
+  tex.generateMipmaps = false;
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.magFilter = THREE.LinearFilter;
+  tex.minFilter = THREE.LinearMipmapLinearFilter;
+  tex.needsUpdate = true;
+  return tex;
+}
+
 export class CloudDeckView {
-  /** the fields the picture is drawn from — and the sim flies through */
-  readonly fields: CloudFields;
+  /** the fields the picture is drawn from — and the sim flies through
+   *  (null without a cloud layer: nothing to build) */
+  readonly fields: CloudFields | null = null;
   private mat: THREE.ShaderMaterial | null = null;
   private drift = new THREE.Vector2();
 
@@ -262,25 +347,12 @@ export class CloudDeckView {
    */
   constructor(
     scene: THREE.Scene, private wx: WeatherPreset, fogColor: THREE.Color,
-    lit: THREE.Color, shade: THREE.Color, sunDir: THREE.Vector3, steps = 40,
+    lit: THREE.Color, shade: THREE.Color, sunDir: THREE.Vector3, steps = 64,
   ) {
-    this.fields = makeCloudFields();
     const deck = wx.deck;
     if (!deck) return;
-    const N = FIELD_N;
-    const px = new Uint8Array(N * N * 4);
-    for (let i = 0; i < N * N; i++) {
-      px[i * 4] = this.fields.cover[i];
-      px[i * 4 + 1] = this.fields.lump[i];
-      px[i * 4 + 2] = this.fields.tower[i];
-      px[i * 4 + 3] = this.fields.region[i];
-    }
-    const tex = new THREE.DataTexture(px, N, N, THREE.RGBAFormat, THREE.UnsignedByteType);
-    tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-    tex.magFilter = THREE.LinearFilter;
-    tex.minFilter = THREE.LinearMipmapLinearFilter;
-    tex.generateMipmaps = true;
-    tex.needsUpdate = true;
+    this.fields = makeCloudFields();
+    const tex = fieldTexture(this.fields);
 
     // one triangle over the whole screen; the shader finds the cloud
     const geo = new THREE.BufferGeometry();
@@ -305,7 +377,8 @@ export class CloudDeckView {
           ),
         },
         uLumpy: { value: deck.lumpy },
-        uFlat: { value: 9000 },
+        uFlat: { value: 40000 },
+        uSlope: { value: 0.6 },
         uLit: { value: lit },
         uShade: { value: shade },
         uSunDir: { value: sunDir },
@@ -339,11 +412,13 @@ export class CloudDeckView {
 
   /** Cloud at a point, 0..1 — the same volume the picture is marched through. */
   densityAt(x: number, y: number, z: number): number {
+    if (!this.fields) return 0;
     return deckDensity(this.wx.deck, this.fields, x + this.drift.x, y, z + this.drift.y);
   }
 
   /** 0..1 sunlight at a point in or under the layer (what colour its murk is). */
   lightAt(x: number, y: number, z: number): number {
+    if (!this.fields) return 1;
     return deckLight(this.wx.deck, this.fields, x + this.drift.x, y, z + this.drift.y);
   }
 
@@ -357,10 +432,10 @@ export class CloudDeckView {
     const u = this.mat.uniforms;
     u.uFogNear.value = fogNear;
     u.uFogFar.value = fogFar;
-    // relief holds to 9 km from inside the layer and further the further
-    // off the eye is (from high above, the whole near field keeps its lumps)
+    // relief keeps its full height to 20 km from inside the layer, further
+    // the higher above it the eye is, and relaxes over the same again
     const off = Math.max(camPos.y - (deck.top + deck.towers), deck.base - camPos.y, 0);
-    u.uFlat.value = 9000 + off * 9;
+    u.uFlat.value = 40000 + off * 25;
   }
 }
 

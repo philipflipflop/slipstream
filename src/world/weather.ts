@@ -121,30 +121,38 @@ export function weatherVisibility(w: WeatherPreset, clear: number, y: number, de
   return v;
 }
 
-/* ------------------------------------------------------- coverage field ---- */
+/* ---------------------------------------------------------------- fields ---- */
 
-export const FIELD_N = 256;
-/** one tile of the coverage field, m (it repeats beyond that) */
+export const FIELD_N = 512;
+/** one tile of a field, m (the lookups warp and rotate it — see deckSurfaces) */
 export const FIELD_TILE = 26000;
 
 /**
- * The coverage field of a broken layer: tileable fractal value noise,
+ * The coverage field of a broken layer: tileable fractal noise,
  * histogram-equalised so a threshold of (1 − cover) leaves exactly `cover`
- * of the sky cloudy. The renderer uploads `data` as a texture and the sim
- * samples the same bytes — where the picture shows a gap, there IS a gap.
+ * of the sky cloudy. The renderer uploads the same numbers as a texture and
+ * the sim samples them — where the picture shows a gap, there IS a gap.
  */
-export function makeCoverField(seed = 7): Uint8Array {
+export function makeCoverField(seed = 7): Float32Array {
   return noiseField(seed, false);
 }
 
 /**
- * Tileable fractal value noise as ranks 0..255. `billow` folds each octave
- * (|2v − 1|): rounded domes parted by narrow creases — the lumps of a cloud
- * top — and the ranks are then shaped so most of the area is dome.
+ * Tileable fractal GRADIENT noise as ranks 0..1. `billow` folds each octave
+ * (|v|): rounded domes parted by narrow creases — the lumps of a cloud top —
+ * and the ranks are then shaped so most of the area is dome.
+ *
+ * Why not the value noise this started as: value noise is blocky along its
+ * lattice, and at 256² in 8 bits every texel edge was a crease and every
+ * byte a 1 m terrace — under lighting the tops read as "constructed from
+ * faintly noticeable squares and lines" (playtest). Hence gradient noise on
+ * two lattices half a cell apart (no feature is pinned to a grid point),
+ * 512², floats.
  */
-function noiseField(seed: number, billow: boolean, minCells = 4, maxCells = 64): Uint8Array {
+function noiseField(seed: number, billow: boolean): Float32Array {
   const N = FIELD_N;
   const f = new Float32Array(N * N);
+  const oct = new Float32Array(N * N);
   let s = seed >>> 0;
   const rnd = (): number => {
     s = (s + 0x6d2b79f5) >>> 0;
@@ -154,42 +162,69 @@ function noiseField(seed: number, billow: boolean, minCells = 4, maxCells = 64):
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
   let amp = 1;
-  for (let cells = minCells; cells <= maxCells; cells *= 2) {
-    const g = new Float32Array(cells * cells);
-    for (let i = 0; i < g.length; i++) g[i] = rnd();
-    for (let y = 0; y < N; y++) {
-      const fy = (y / N) * cells;
-      const y0 = Math.floor(fy);
-      const ty = fy - y0;
-      const sy = ty * ty * (3 - 2 * ty);
-      for (let x = 0; x < N; x++) {
-        const fx = (x / N) * cells;
-        const x0 = Math.floor(fx);
-        const tx = fx - x0;
-        const sx = tx * tx * (3 - 2 * tx);
-        const a = g[(y0 % cells) * cells + (x0 % cells)];
-        const b = g[(y0 % cells) * cells + ((x0 + 1) % cells)];
-        const c = g[((y0 + 1) % cells) * cells + (x0 % cells)];
-        const d = g[((y0 + 1) % cells) * cells + ((x0 + 1) % cells)];
-        const v = a + (b - a) * sx + (c - a) * sy + (a - b - c + d) * sx * sy;
-        f[y * N + x] += amp * (billow ? Math.abs(2 * v - 1) : v);
+  for (let cells = 4; cells <= 64; cells *= 2) {
+    oct.fill(0);
+    for (let lattice = 0; lattice < 2; lattice++) {
+      const gx = new Float32Array(cells * cells);
+      const gy = new Float32Array(cells * cells);
+      for (let i = 0; i < gx.length; i++) {
+        const a = rnd() * Math.PI * 2;
+        gx[i] = Math.cos(a);
+        gy[i] = Math.sin(a);
+      }
+      const shift = lattice * 0.5;
+      for (let y = 0; y < N; y++) {
+        const fy = (y / N) * cells + shift;
+        const y0 = Math.floor(fy);
+        const ty = fy - y0;
+        const sy = ty * ty * ty * (ty * (ty * 6 - 15) + 10);
+        const r0 = (y0 % cells) * cells;
+        const r1 = ((y0 + 1) % cells) * cells;
+        const o = y * N;
+        for (let x = 0; x < N; x++) {
+          const fx = (x / N) * cells + shift;
+          const x0 = Math.floor(fx);
+          const tx = fx - x0;
+          const sx = tx * tx * tx * (tx * (tx * 6 - 15) + 10);
+          const c0 = x0 % cells;
+          const c1 = (x0 + 1) % cells;
+          const n00 = gx[r0 + c0] * tx + gy[r0 + c0] * ty;
+          const n10 = gx[r0 + c1] * (tx - 1) + gy[r0 + c1] * ty;
+          const n01 = gx[r1 + c0] * tx + gy[r1 + c0] * (ty - 1);
+          const n11 = gx[r1 + c1] * (tx - 1) + gy[r1 + c1] * (ty - 1);
+          const a = n00 + (n10 - n00) * sx;
+          const b = n01 + (n11 - n01) * sx;
+          oct[o + x] += a + (b - a) * sy;
+        }
       }
     }
+    // folded AFTER the two lattices are summed: the creases follow the zero
+    // line of the sum, which no lattice point pins
+    if (billow) for (let i = 0; i < f.length; i++) f[i] += amp * Math.abs(oct[i]);
+    else for (let i = 0; i < f.length; i++) f[i] += amp * oct[i];
     amp *= 0.5;
   }
-  // equalise: value → its rank
-  const order = Array.from(f.keys()).sort((i, j) => f[i] - f[j]);
-  const out = new Uint8Array(N * N);
-  for (let r = 0; r < order.length; r++) {
-    const u = r / order.length;
-    out[order[r]] = Math.floor((billow ? 1 - (1 - u) * (1 - u) : u) * 256);
+  // equalise: value → its rank (native sort of a copy, then a search each)
+  const sorted = Float32Array.from(f).sort();
+  const n = sorted.length;
+  for (let i = 0; i < n; i++) {
+    const v = f[i];
+    let lo = 0;
+    let hi = n;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (sorted[mid] < v) lo = mid + 1;
+      else hi = mid;
+    }
+    const u = lo / n;
+    f[i] = billow ? 1 - (1 - u) * (1 - u) : u;
   }
-  return out;
+  return f;
 }
 
-/** Bilinear sample of the field at world (x, z), 0..1 — matches the GPU's
- *  LINEAR + REPEAT lookup of the same bytes. */
-export function sampleField(data: Uint8Array, x: number, z: number): number {
+/** Bilinear sample of a field at world (x, z), 0..1 — matches the GPU's
+ *  LINEAR + REPEAT lookup of the same numbers. */
+export function sampleField(data: Float32Array, x: number, z: number): number {
   const N = FIELD_N;
   const u = (x / FIELD_TILE) * N - 0.5;
   const v = (z / FIELD_TILE) * N - 0.5;
@@ -202,7 +237,7 @@ export function sampleField(data: Uint8Array, x: number, z: number): number {
   const b = data[w(y0) * N + w(x0 + 1)];
   const c = data[w(y0 + 1) * N + w(x0)];
   const d = data[w(y0 + 1) * N + w(x0 + 1)];
-  return (a + (b - a) * tx + (c - a) * ty + (a - b - c + d) * tx * ty) / 255;
+  return a + (b - a) * tx + (c - a) * ty + (a - b - c + d) * tx * ty;
 }
 
 /** half-width of the soft cloud edge in field units */
@@ -210,7 +245,7 @@ export const COVER_EDGE = 0.07;
 
 /** 0..1 cloud at a point of the layer for a coverage fraction: 1 inside a
  *  cloud, 0 in a gap. A solid deck (cover ≥ 0.99) is 1 everywhere. */
-export function coverAt(data: Uint8Array, x: number, z: number, cover: number): number {
+export function coverAt(data: Float32Array, x: number, z: number, cover: number): number {
   if (cover >= 0.99) return 1;
   const th = 1 - cover;
   return sstep(th - COVER_EDGE, th + COVER_EDGE, sampleField(data, x, z));
@@ -228,33 +263,60 @@ export function coverAt(data: Uint8Array, x: number, z: number, cover: number): 
  * flat, undulated or fleecy", with cumulus that "may rise above its upper
  * surface", and ragged scud (pannus) beneath.
  *
- * Three byte fields drive it, and the renderer uploads the SAME bytes as one
+ * Three fields drive it, and the renderer uploads the SAME numbers as one
  * texture (R, G, B) and evaluates the SAME formula per pixel (clouds.ts —
  * keep the two in step): what you see is what the aircraft flies through.
+ *
+ * The fields are 26 km tiles, and from above you can see dozens of tiles at
+ * once — the same accumulations came round again and again (playtest). So
+ * nothing reads them on a plain grid: every lookup goes through a slow
+ * WARP (sines of incommensurate wavelength: each tile is displaced and
+ * stretched differently), the small lumps are read ROTATED, and the regional
+ * character — how much relief, whether there are towers — is not a tile at
+ * all but a quasi-periodic function that never repeats.
  */
 export interface CloudFields {
   /** coverage (equalised) — and, at the detail scale, the scud */
-  cover: Uint8Array;
+  cover: Float32Array;
   /** billows: the lumps of the top, at two scales */
-  lump: Uint8Array;
+  lump: Float32Array;
   /** where the embedded cumulus stands */
-  tower: Uint8Array;
-  /** regional character, cells 6–13 km: smooth swells here, lumps and towers there */
-  region: Uint8Array;
+  tower: Float32Array;
 }
 
 export function makeCloudFields(): CloudFields {
-  return { cover: makeCoverField(), lump: noiseField(19, true), tower: noiseField(31, false), region: noiseField(43, false, 2, 4) };
+  return { cover: makeCoverField(), lump: noiseField(19, true), tower: noiseField(31, false) };
 }
 
-/** second lookup: small lumps and scud (cells 55–900 m) */
+const TAU = Math.PI * 2;
+/** the warp: [amplitude m, wavenumber 1/m, phase] × 4 (two per axis) */
+export const WARP = [
+  [1800, TAU / 43000, 1.3], [520, TAU / 17300, 0.4],
+  [1500, TAU / 61000, 0.7], [520, TAU / 23900, 2.2],
+] as const;
+/** regional character: [amplitude, kx, kz, phase] × 3 — wavelengths 31, 19 and 11 km */
+export const REGION = [
+  [0.24, (TAU / 31000) * 0.857, (TAU / 31000) * 0.515, 0.5],
+  [0.17, (TAU / 19000) * 0.573, (TAU / 19000) * -0.819, 2.1],
+  [0.12, (TAU / 11000) * 0.287, (TAU / 11000) * 0.958, 4.0],
+] as const;
+/** second lookup: small lumps and scud (cells 55–900 m), turned 34° */
 export const DETAIL_SCALE = 7.3;
 export const DETAIL_OFF: [number, number] = [0.21, 0.67];
+export const DETAIL_COS = Math.cos(0.6);
+export const DETAIL_SIN = Math.sin(0.6);
 /** mean drop of the top below `top`, in reliefs; mean lift of the base, in `ragged`s */
 export const MEAN_TOP = 0.233;
 export const MEAN_BASE = 0.475;
 /** sunlight reaches about this far down into the top, m */
 export const CLOUD_ABSORB = 260;
+
+/** 0..1: smooth swells where it is low, lumps and towers where it is high. */
+export function regionAt(x: number, z: number): number {
+  let r = 0.5;
+  for (const [a, kx, kz, ph] of REGION) r += a * Math.sin(x * kx + z * kz + ph);
+  return Math.min(Math.max(r, 0), 1);
+}
 
 export interface DeckSurfaces {
   /** top and base of the cloud at this point (top < base: no cloud here) */
@@ -267,20 +329,22 @@ const _surf: DeckSurfaces = { yt: 0, yb: 0 };
 /** Top and base of the layer at world (x, z). */
 export function deckSurfaces(deck: CloudDeck, f: CloudFields, x: number, z: number, out: DeckSurfaces = _surf): DeckSurfaces {
   const T = FIELD_TILE;
-  const big = sampleField(f.lump, x, z);
-  const tow = sampleField(f.tower, x, z);
-  const dx = x * DETAIL_SCALE + DETAIL_OFF[0] * T;
-  const dz = z * DETAIL_SCALE + DETAIL_OFF[1] * T;
+  const reg = regionAt(x, z);
+  const wx = x + WARP[0][0] * Math.sin(z * WARP[0][1] + WARP[0][2]) + WARP[1][0] * Math.sin((x + z) * WARP[1][1] + WARP[1][2]);
+  const wz = z + WARP[2][0] * Math.sin(x * WARP[2][1] + WARP[2][2]) + WARP[3][0] * Math.sin((x - z) * WARP[3][1] + WARP[3][2]);
+  const big = sampleField(f.lump, wx, wz);
+  const tow = sampleField(f.tower, wx, wz);
+  const dx = (wx * DETAIL_COS - wz * DETAIL_SIN) * DETAIL_SCALE + DETAIL_OFF[0] * T;
+  const dz = (wx * DETAIL_SIN + wz * DETAIL_COS) * DETAIL_SCALE + DETAIL_OFF[1] * T;
   const det = sampleField(f.lump, dx, dz);
   const scud = sampleField(f.cover, dx, dz);
-  const reg = sampleField(f.region, x, z);
   const h = big + (det - big) * deck.lumpy;
-  const tw = sstep(0.8, 0.97, tow) * sstep(0.35, 0.65, reg) * (0.7 + 0.3 * big);
+  const tw = sstep(0.62, 0.97, tow) * sstep(0.35, 0.65, reg) * (0.7 + 0.3 * big);
   let yt = deck.top - deck.relief * (0.4 + 0.6 * reg) * (1 - h) + deck.towers * tw;
   let yb = deck.base + deck.ragged * sstep(0.25, 0.8, scud);
   if (deck.cover < 0.99) {
     const th = 1 - deck.cover;
-    const cov = sstep(th - COVER_EDGE, th + COVER_EDGE, sampleField(f.cover, x, z));
+    const cov = sstep(th - COVER_EDGE, th + COVER_EDGE, sampleField(f.cover, wx, wz));
     const mid = 0.5 * (deck.base + deck.top);
     if (cov < 0.002) {
       yt = mid - 1;
