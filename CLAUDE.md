@@ -111,15 +111,32 @@ Cloudflare builds with **npm 10.9.2**; local npm is 11. Two rules:
     hold a copy must follow or the HAZE rules break: `scene.fog.color`
     (THREE.Fog copies the Color it is given), `water.setFogColor`, and the
     deck's own uniform (it shares `sky.fogColor` by reference).
-  · The deck's two sheets are analytic per pixel like the water (ray ∩
-    plane, depth from that) and WRITE depth: cumulus sprites and anything
-    else transparent beyond them is hidden by them. A sheet seen from above
-    is lit, from below shaded — do not go back to "top face only from
-    above": in a gap inside a broken layer both must show.
-  · Coverage is ONE byte field (`makeCoverField`, histogram-equalised so a
-    threshold of 1 − cover gives exactly that coverage) uploaded as the
-    texture AND sampled by the sim (`sampleField`): a gap you can see is a
-    gap you can fly through. Keep the GLSL threshold and `coverAt` the same.
+  · The layer is a VOLUME, not two sheets (the first version was two
+    analytic planes; the playtester: "a sheet of paper … very flat once
+    you're above them"). `weather.deckSurfaces` gives top and base at any
+    point — relief, embedded towers ABOVE `top`, a ragged base that never
+    comes below `base` (ILS minima), lens bodies in a broken layer — and
+    cloud thickens over `soft` metres inside them. clouds.ts marches the
+    SAME formula from the SAME four byte fields (one RGBA texture) per
+    pixel on a full-screen triangle; `deckDensity` is what the sim flies
+    through. Change the shape in BOTH places or what you see stops being
+    what you fly into (tests/24 pins the TS side only).
+  · The march, and what each part is for: steps sized by clearance to the
+    surfaces (one lookup bounds the layer; the detail lookup only near
+    it); the entry point solved by false position (bisecting a 500 m far
+    step left 60 m terraces — contour lines on every distant cloud);
+    jitter on the FIRST step only (a per-step factor compounds with range:
+    far cloud turned to grain); geometry relaxing onto the mean surfaces
+    with range (`uFlat`) while lighting keeps full relief; extinction =
+    the sim's in-cloud visibility near the eye (or the chase-view aircraft
+    vanishes behind a wall), tightening with range. It writes depth
+    (analytic, both depth-buffer paths): transparent things beyond it are
+    hidden. Costs ~10–20% of frame rate on the dev Intel GPU; step budget
+    24 on touch/low, 40 otherwise.
+  · Per-weather character lives in the preset's deck (relief / towers /
+    ragged / soft / lumpy): rain is smooth swells with towers (WMO:
+    "diffuse and fairly smooth … cumulus may rise above its upper
+    surface", scud beneath), overcast is lumpier, fog nearly flat.
   · Rain streaks are world-space drops wrapped into a camera-following box;
     the wrap offset is computed on the CPU in doubles (a float `mod` of a
     100 km coordinate has no precision left).

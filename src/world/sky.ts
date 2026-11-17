@@ -208,13 +208,14 @@ export class Sky {
     scene.add(this.sun);
     scene.add(this.sun.target);
 
-    // fair-weather puffs. With a deck they sit where cumulus would: poking
-    // through a broken layer, or as the lumps on top of a solid one (the
-    // deck writes depth, so from beneath those are simply hidden).
+    // fair-weather puffs. In a broken layer they sit among its clouds; over
+    // a solid one they are a few scraps of a higher layer, well clear of
+    // the tops (the layer has its own lumps now, and it writes depth — from
+    // beneath, those scraps are simply hidden).
     const deck = wx?.deck ?? null;
     const band: [number, number] = !deck ? [850, 1750]
       : deck.cover < 0.99 ? [deck.base - 40, deck.top + 160]
-      : [deck.top - 30, deck.top + 260];
+      : [Math.max(deck.top + deck.towers + 500, 900), Math.max(deck.top + deck.towers + 1500, 1800)];
     cloudCount = Math.round(cloudCount * (wx?.puffs ?? 1));
     const tex = makeCloudTexture();
     for (let i = 0; i < cloudCount; i++) {

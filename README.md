@@ -53,8 +53,11 @@ Six skies from the hangar (or `?wx=clear|fair|broken|overcast|rain|fog`): **Clea
 **Fair** (scattered cumulus), **Broken** (a layer at 4,300 ft with gaps to fly through),
 **Overcast** (solid from 2,100 ft, sunshine on top at 5,000), **Rain** (cloudbase 1,000 ft,
 4 km in rain, gusty) and **Fog** (700 m at the surface, blue sky above 600 ft). The cloud
-is a real layer: beneath it the light is grey and you see what the weather allows, inside
-it you see a few hundred metres, and above it the sun is out over an undercast. Wind and
+is a real layer with a shape — an undulating top with cumulus standing out of it, a ragged
+base, wispy edges — drawn by marching each pixel's view ray through the same volume the
+aircraft flies through: beneath it the light is grey and you see what the weather allows,
+inside it you see a few hundred metres, skimming the tops you are in and out of them, and
+above it the sun is out over an undercast. Wind and
 turbulence follow the weather, the tower reads you the sky with your clearance, and the
 ILS finally has a job — in Rain the runway appears at about 1,000 ft, in Fog at the flare.
 

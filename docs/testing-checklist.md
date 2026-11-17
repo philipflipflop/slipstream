@@ -24,11 +24,15 @@ desktop or phone.
       Do distant rivers breaking into dots bother you?
 - [ ] **Mesa and Meridian Bay** — one flight in each: buttes/dunes look right;
       city skyline appears sensibly as you approach.
-- [ ] **Clouds from every side** — Overcast: climb through it (grey below →
-      white-out → sunshine on top) and descend again. Is the transition
-      smooth? Is the flat top/bottom of the layer acceptable?
-- [ ] **Broken** — fly through a gap at 4,500–5,500 ft. Do the cloud sheets
-      look odd edge-on?
+- [ ] **Clouds from every side** (reworked after "sheet of paper": the layer
+      is now a lumpy volume with soft edges) — Rain and Overcast: climb
+      through (grey below → white-out → in and out of the tops → sunshine)
+      and descend again. Does it read as cloud now? Any grain, rings or
+      hard edges? Is the HUD readable over the white tops?
+- [ ] **Broken** — fly through a gap at 4,500–5,500 ft and past a cloud's
+      side. Do the cloud bodies look solid from every angle?
+- [ ] **Cloud frame rate** — Rain/Overcast on the phone and on desktop High:
+      noticeably slower than Fair?
 - [ ] **Rain** — streaks parked, at 100 kt and at 300 kt. Too many, too few,
       too bright?
 - [ ] **Fog** — take off into it and land in it. Can you read the green HUD

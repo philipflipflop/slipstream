@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import {
   WEATHERS, weatherById, layerDensity, beneath, weatherVisibility,
   makeCoverField, sampleField, coverAt, FIELD_N, FIELD_TILE,
+  makeCloudFields, deckSurfaces, deckDensity, deckLight,
 } from '../.test-build/world/weather.js';
 
 // ---- presets ----
@@ -94,4 +95,72 @@ for (const w of WEATHERS.filter((x) => x.deck)) {
   }
   assert.ok(cloud > 1500 && gap > 1000, `broken layer: ${cloud} cloud / ${gap} gap samples of 5000`);
   console.log(`  ✓ coverage field: deterministic, tileable, equalised; broken layer is ${(cloud / 50).toFixed(0)}% solid cloud, ${(gap / 50).toFixed(0)}% clear gaps`);
+}
+
+// ---- the shape of the layer: a volume, not two sheets ----
+{
+  const f = makeCloudFields();
+  assert.deepEqual(makeCloudFields(), f, 'the cloud fields are not deterministic');
+  assert.deepEqual(f.cover, makeCoverField(), 'the coverage the sim samples is not the field the layer is built on');
+  for (const w of WEATHERS.filter((x) => x.deck)) {
+    const d = w.deck;
+    const solid = d.cover >= 0.99;
+    const mid = (d.base + d.top) / 2;
+    let lo = Infinity, hi = -Infinity, baseLo = Infinity, baseHi = -Infinity, cloudy = 0, n = 0, above = 0;
+    let maxSlope = 0;
+    for (let i = 0; i < 6000; i++) {
+      const x = i * 173.3 - 40000, z = i * 97.1 + 12000;
+      const s = { ...deckSurfaces(d, f, x, z) };
+      n++;
+      if (s.yt <= s.yb) {
+        assert.ok(!solid, `${w.id}: a hole in a solid deck at ${x.toFixed(0)}, ${z.toFixed(0)}`);
+        assert.equal(deckDensity(d, f, x, mid, z), 0);
+        continue;
+      }
+      cloudy++;
+      lo = Math.min(lo, s.yt); hi = Math.max(hi, s.yt);
+      baseLo = Math.min(baseLo, s.yb); baseHi = Math.max(baseHi, s.yb);
+      if (s.yt > d.top) above++;
+      // the briefing's cloudbase is the LOWEST the cloud comes (ILS minima hold)
+      assert.ok(s.yb >= d.base - 1e-6, `${w.id}: cloud at ${s.yb.toFixed(0)} m, below the ${d.base} m base`);
+      assert.ok(s.yt <= d.top + d.towers + 1e-6, `${w.id}: top at ${s.yt.toFixed(0)} m, above the march slab`);
+      assert.equal(deckDensity(d, f, x, s.yt + 1, z), 0, `${w.id}: cloud above its own top`);
+      assert.equal(deckDensity(d, f, x, s.yb - 1, z), 0, `${w.id}: cloud below its own base`);
+      if (solid) assert.ok(deckDensity(d, f, x, (s.yt + s.yb) / 2, z) > 0.99, `${w.id}: thin in the middle`);
+      const s2 = deckSurfaces(d, f, x + 20, z);
+      if (s2.yt > s2.yb) maxSlope = Math.max(maxSlope, Math.abs(s2.yt - s.yt) / 20);
+    }
+    // a top with relief — not a plane — and (where the preset has them) towers standing out of it
+    assert.ok(hi - lo > d.relief * 0.6, `${w.id}: the top only varies ${(hi - lo).toFixed(0)} m`);
+    if (d.towers > 0) assert.ok(above > 20 && above < n * 0.2, `${w.id}: ${above} of ${n} samples stand above the general top`);
+    if (d.ragged > 0 && solid) assert.ok(baseHi - baseLo > d.ragged * 0.8 && baseLo < d.base + d.ragged * 0.1, `${w.id}: base ${baseLo.toFixed(0)}–${baseHi.toFixed(0)} m`);
+    if (!solid) assert.ok(cloudy > n * 0.4 && cloudy < n * 0.75, `${w.id}: ${cloudy} of ${n} samples have cloud`);
+    // density is continuous along any line through it (no sheet to punch through)
+    let prev = 0, maxJump = 0, edge = 0;
+    for (let y = d.base - 50; y <= d.top + d.towers + 50; y += 2) {
+      const v = deckDensity(d, f, 3000, y, -7000);
+      maxJump = Math.max(maxJump, Math.abs(v - prev));
+      if (v > 0.02 && v < 0.98) edge++;
+      prev = v;
+    }
+    assert.ok(maxJump < 0.12, `${w.id}: density jumps ${maxJump.toFixed(2)} in 2 m of climb`);
+    const skim = d.top - d.relief * 0.45 - d.soft * 0.5;
+    prev = deckDensity(d, f, 0, skim, 0);
+    let flips = 0;
+    for (let x = 0; x < 60000; x += 10) {
+      const v = deckDensity(d, f, x, skim, x * 0.37);
+      assert.ok(Math.abs(v - prev) < 0.35, `${w.id}: density jumps ${Math.abs(v - prev).toFixed(2)} in 10 m of level flight`);
+      if ((v > 0.5) !== (prev > 0.5)) flips++;
+      prev = v;
+    }
+    // skimming the tops you are in and out of them
+    assert.ok(flips >= 4, `${w.id}: 60 km along the tops crossed cloud ${flips} times`);
+    // sunlight: full at the top surface, gone deep inside
+    const s = { ...deckSurfaces(d, f, 3000, -7000) };
+    if (s.yt > s.yb) {
+      assert.ok(deckLight(d, f, 3000, s.yt, -7000) > 0.99);
+      assert.ok(deckLight(d, f, 3000, s.yt - 1500, -7000) < 0.01);
+    }
+    console.log(`  ✓ ${w.id}: top ${lo.toFixed(0)}–${hi.toFixed(0)} m (steepest ${maxSlope.toFixed(2)}), base ${baseLo.toFixed(0)}–${baseHi.toFixed(0)} m, ${flips} cloud edges in 60 km along the tops`);
+  }
 }

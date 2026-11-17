@@ -198,7 +198,10 @@ class Game {
     document.getElementById('app')!.appendChild(this.renderer.domElement);
 
     this.sky = new Sky(this.scene, touch ? 26 : 56, this.daylight, this.wx);
-    this.deck = new CloudDeckView(this.scene, this.wx, this.sky.fogColor, this.sky.cloudLit, this.sky.cloudShade);
+    this.deck = new CloudDeckView(
+      this.scene, this.wx, this.sky.fogColor, this.sky.cloudLit, this.sky.cloudShade, this.sky.sunDir,
+      touch || this.save.quality === 'low' ? 24 : 40,
+    );
     if (this.wx.rain > 0) this.rain = new Rain(this.scene, touch ? 500 : 1500, new THREE.Color(0.78, 0.82, 0.88));
     this.scene.fog = new THREE.Fog(this.sky.sceneFogColor, 2500, 7000);
     this.scene.background = null; // dome handles it
@@ -1159,10 +1162,8 @@ class Game {
     fog.far = weatherVisibility(this.wx, this.hazeFar, eye.y, dens);
     fog.near = fog.far * (this.baseFogNear / this.baseFogFar) * (1 - 0.9 * dens);
     if (deckDef) {
-      this.cloudCol.lerpColors(
-        this.sky.cloudShade, this.sky.cloudLit,
-        clamp((eye.y - deckDef.base) / (deckDef.top - deckDef.base), 0, 1),
-      );
+      // the murk is as bright as the sunlight that gets down to the eye
+      this.cloudCol.lerpColors(this.sky.cloudShade, this.sky.cloudLit, this.deck.lightAt(eye.x, eye.y, eye.z) * 0.9);
     }
     this.sky.setAir(under, dens, this.cloudCol);
     fog.color.copy(this.sky.sceneFogColor);
